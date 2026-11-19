@@ -286,6 +286,10 @@ namespace AIEngineer.AutoCAD
                         return LayoutAndPlotTools(doc, args);
                     case "manage_block_library":
                         return ManageBlockLibrary(doc, args);
+                    case "lighting_design_engine":
+                        return LightingDesignEngine(doc, args);
+                    case "export_dialux_stf":
+                        return ExportDialuxStf(doc, args);
                     case "manage_layers":
                         return ManageLayers(doc, args);
                     case "measure_and_compare":
@@ -355,6 +359,7 @@ namespace AIEngineer.AutoCAD
                 "convert_matching_shapes_to_block", "annotate_block_coordinates", "export_to_excel", "import_excel_table",
                 "extract_load_schedule", "quantity_takeoff", "manage_attributes", "text_tools",
                 "advanced_geometry_ops", "drawing_qa_cleanup", "layout_and_plot_tools", "manage_block_library",
+                "lighting_design_engine", "export_dialux_stf",
                 "manage_layers", "measure_and_compare", "duplicate_drawing", "zoom_view", "execute_template",
                 "approve_or_rollback_preview", "get_plugin_diagnostics"
             };
@@ -390,6 +395,7 @@ namespace AIEngineer.AutoCAD
                    string.Equals(layerName, "_AI_EXCEL_TABLE", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_PANEL_SCHEDULE", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_BOQ_TABLE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_LIGHTING_TABLE", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_HIGHLIGHT", StringComparison.OrdinalIgnoreCase);
         }
 
@@ -399,6 +405,7 @@ namespace AIEngineer.AutoCAD
             return IsLegendOrHighlightLayer(layerName) ||
                    string.Equals(layerName, "_AI_COORD_CALLOUTS", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_AREA_LABELS", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_LIGHTING_LABELS", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_REV_CLOUD", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_QA_ISSUE", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, DrawingExecutionCommands.ReviewLayerName, StringComparison.OrdinalIgnoreCase);
@@ -7604,6 +7611,7 @@ namespace AIEngineer.AutoCAD
         private static readonly Dictionary<IntPtr, ExcelSheetData> s_lastLegendTableByDb = new Dictionary<IntPtr, ExcelSheetData>();
         private static readonly Dictionary<IntPtr, ExcelSheetData> s_lastPanelScheduleByDb = new Dictionary<IntPtr, ExcelSheetData>();
         private static readonly Dictionary<IntPtr, ExcelSheetData> s_lastBoqTableByDb = new Dictionary<IntPtr, ExcelSheetData>();
+        private static readonly Dictionary<IntPtr, ExcelSheetData> s_lastLightingTableByDb = new Dictionary<IntPtr, ExcelSheetData>();
         private static readonly Dictionary<IntPtr, string> s_lastGeneratedTableKindByDb = new Dictionary<IntPtr, string>();
 
         private static string NormalizeCoordSortOrder(string raw)
@@ -9381,12 +9389,13 @@ namespace AIEngineer.AutoCAD
                         }
                     }
 
-                    if (sheet == null && (reqSource == "coordinates" || reqSource == "panel_schedule" || reqSource == "boq" || reqSource == "auto"))
+                    if (sheet == null && (reqSource == "coordinates" || reqSource == "panel_schedule" || reqSource == "boq" || reqSource == "lighting" || reqSource == "auto"))
                     {
                         ExcelSheetData cachedCoord = null;
                         ExcelSheetData cachedLegend = null;
                         ExcelSheetData cachedPanel = null;
                         ExcelSheetData cachedBoq = null;
+                        ExcelSheetData cachedLighting = null;
                         string lastKind = null;
                         lock (s_lastCoordLock)
                         {
@@ -9394,10 +9403,20 @@ namespace AIEngineer.AutoCAD
                             s_lastLegendTableByDb.TryGetValue(db.UnmanagedObject, out cachedLegend);
                             s_lastPanelScheduleByDb.TryGetValue(db.UnmanagedObject, out cachedPanel);
                             s_lastBoqTableByDb.TryGetValue(db.UnmanagedObject, out cachedBoq);
+                            s_lastLightingTableByDb.TryGetValue(db.UnmanagedObject, out cachedLighting);
                             s_lastGeneratedTableKindByDb.TryGetValue(db.UnmanagedObject, out lastKind);
                         }
 
-                        if (reqSource == "panel_schedule")
+                        if (reqSource == "lighting")
+                        {
+                            if (cachedLighting != null) { sheet = cachedLighting; sourceUsed = "cached_lighting_schedule"; }
+                            else
+                            {
+                                sheet = ExtractLayerGridFromModelSpace(ms, tr, "_AI_LIGHTING_TABLE", "Lighting_Schedule");
+                                if (sheet != null) sourceUsed = "drawing_lighting_table_layer";
+                            }
+                        }
+                        else if (reqSource == "panel_schedule")
                         {
                             if (cachedPanel != null) { sheet = cachedPanel; sourceUsed = "cached_panel_schedule"; }
                             else
@@ -9437,7 +9456,12 @@ namespace AIEngineer.AutoCAD
                         }
                         else // auto
                         {
-                            if (string.Equals(lastKind, "panel_schedule", StringComparison.OrdinalIgnoreCase) && cachedPanel != null)
+                            if (string.Equals(lastKind, "lighting", StringComparison.OrdinalIgnoreCase) && cachedLighting != null)
+                            {
+                                sheet = cachedLighting;
+                                sourceUsed = "cached_lighting_schedule";
+                            }
+                            else if (string.Equals(lastKind, "panel_schedule", StringComparison.OrdinalIgnoreCase) && cachedPanel != null)
                             {
                                 sheet = cachedPanel;
                                 sourceUsed = "cached_panel_schedule";

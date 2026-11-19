@@ -179,7 +179,7 @@ namespace AIEngineer.AutoCAD
 
             string[] tableLayers = new string[]
             {
-                "_AI_BLOCK_LEGEND", "_AI_COORD_TABLE", "_AI_EXCEL_TABLE", "_AI_PANEL_SCHEDULE", "_AI_BOQ_TABLE"
+                "_AI_BLOCK_LEGEND", "_AI_COORD_TABLE", "_AI_EXCEL_TABLE", "_AI_PANEL_SCHEDULE", "_AI_BOQ_TABLE", "_AI_LIGHTING_TABLE"
             };
             List<Extents3d> blockers = new List<Extents3d>();
             for (int i = 0; i < tableLayers.Length; i++)

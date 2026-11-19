@@ -1922,6 +1922,7 @@ namespace AIEngineer.AutoCAD
                 "- Draft, Legends & Annotate: `draw_block_legend`, `annotate_block_coordinates`, `draw_entities` (circle, line, rect/square, polyline/polygon, arc, ellipse, text, mtext, leader, callout, dimension, linear_dimension, hatch, block_reference), `create_block`, `convert_matching_shapes_to_block`, `execute_template`\n" +
                 "- Excel <-> AutoCAD Interop: `export_to_excel` (export AutoCAD tables, coordinate schedules, panel load schedules, BOQ, block legends, or selected tables to `.xlsx`/`.csv`), `import_excel_table` (import `.xlsx`/`.xlsm`/`.csv` spreadsheets into AutoCAD with crisp TrueType Arial Unicode formatting or native AutoCAD Table)\n" +
                 "- MEP Load Schedules & Quantity Takeoff: `extract_load_schedule` (extract electrical circuit/panel load schedules from blocks + neighbor texts `63A`/`100A`/`15KW`/`4x16mm2` + sample connected feeder path lengths -> AutoCAD & Excel), `quantity_takeoff` (linear cable/pipe lengths by layer, closed room/polygon areas with optional centroid labels, block counts, vertical/waste allowances -> BOQ table & Excel)\n" +
+                "- Lighting Design & DIALux Bridge: `lighting_design_engine` (automated room-by-room lighting calculation & symmetric grid placement using Egyptian Code ECP / EN 12464-1 / CIBSE, real .ies/.ldt photometric file parser, point-by-point Avg/Min Lux & Uniformity U0, 3-phase wiring & CAD/Excel/STF output), `export_dialux_stf` (export AutoCAD rooms + luminaire positions in meters to DIALux .stf + optional clean DWG)\n" +
                 "- Attributes, Text, Geometry, QA/Cleanup, Block Library & Layouts/PDF: `manage_attributes` (extract/update/sync block attributes via Excel), `text_tools` (batch find/replace, directional auto-numbering, text style/height standardize), `advanced_geometry_ops` (align, distribute, rectangular/polar array, offset, revision_cloud, explode), `drawing_qa_cleanup` (duplicate block detector, overkill duplicate lines, purge unused, standardize ByLayer, DWG revision compare with clouds + Excel diff, FILEDIA/PICKFIRST guard), `layout_and_plot_tools` (list/create scaled Layouts + Viewports + Title Block, batch plot PDF via DWG To PDF.pc3), `manage_block_library` (persistent Wblock save/list/insert company blocks across drawings)\n" +
                 "- Modify & Manage: `modify_entities`, `undo_last_action`, `copy_entities`, `delete_entities`, `manage_layers`, `duplicate_drawing`, `zoom_view`, `approve_or_rollback_preview`\n" +
                 "- Measure & Compare: `measure_and_compare` (distances, center-to-center vs clear edge-to-edge gap, overlap detection, entity group totals/areas/lengths/extents comparison)\n\n" +
@@ -1958,9 +1959,10 @@ namespace AIEngineer.AutoCAD
                 "6g. ELECTRICAL LOAD SCHEDULES, NEIGHBOR TEXT ASSOCIATION & QUANTITY TAKEOFF (`extract_load_schedule`, `quantity_takeoff`): Whenever the engineer asks to extract a Panel / Breaker / Feeder Load Schedule from blocks + nearby labels (`63A`, `100A`, `SPARE`, `KW`, `4x16mm2`) OR trace sample feeder paths to measure circuit lengths (`استخراج جدول أحمال من مسارات عينة`, `حصر القواطع بالأمبير`): ALWAYS call `extract_load_schedule` (pass `export_excel: true` when they also want `.xlsx`)! Whenever asked to calculate total cable/route lengths by layer, closed room/polygon areas (including stamping area labels inside rooms via `label_areas: true`), or full material BOQ with waste % / vertical allowance: call `quantity_takeoff`!\n" +
                 "6h. ATTRIBUTES & BATCH TEXT TOOLS (`manage_attributes`, `text_tools`): Use `manage_attributes` to extract all BlockReference attributes to Excel (`action: 'extract'`), bulk-update attribute tags (`action: 'update'`), or sync edited attributes back from Excel (`action: 'sync_from_excel'`). Use `text_tools` for batch find & replace across text/mtext/attributes (`action: 'find_replace'`), directional auto-numbering `C1..Cn` (`action: 'auto_number'`), or height/Arial Unicode style standardization (`action: 'standardize'`).\n" +
                 "6i. ADVANCED GEOMETRY, QA/CLEANUP, DWG COMPARE, BLOCK LIBRARY & LAYOUTS/PDF (`advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`): Never manually loop single entity moves/deletes when an exact batch engineering tool exists! Use `advanced_geometry_ops` for `align`, `distribute`, `array_rect`, `array_polar`, `offset`, `revision_cloud`, or `explode`. Use `drawing_qa_cleanup` for `audit_duplicates` (detect/clean stacked duplicate blocks!), `overkill`, `purge`, `standardize_bylayer`, `compare_dwg` (revision clouds + Excel diff), or `check_env`. Use `layout_and_plot_tools` for scaled PaperSpace Layouts/Viewports and `batch_plot_pdf`. Use `manage_block_library` (`save`/`list`/`insert`) for reusable company blocks across projects!\n" +
+                "6j. LIGHTING DESIGN, IES/LDT PHOTOMETRY & DIALUX STF EXPORT (`lighting_design_engine`, `export_dialux_stf`): Whenever the engineer asks to design/distribute lighting automatically according to Egyptian Code (`ECP`) / `EN 12464-1` / `CIBSE`, calculate Lux/Uniformity from `.ies`/`.ldt` files, balance lighting on 3 phases, or export an AutoCAD lighting plan to DIALux evo (`.stf`): ALWAYS call `lighting_design_engine` and/or `export_dialux_stf`! Note honestly that DIALux evo imports `.stf` (`File -> Import -> STF`) cleanly to skip manual room/fixture modeling, while official DIALux evo has no external headless API for running DIALux's own internal raytracer or PDF export.\n" +
                 "7. SAFE COPYING OUTSIDE LARGE DRAWINGS & FRAMING: Whenever asked to copy elements outside the drawing ('نسخة خارج المخطط') or put ONE frame/box around them ('مربع واحد'), use `copy_entities` with `entity_type: \"BlockReference\"` (or handles/filters), `auto_offset_outside: \"right\"`, `draw_frame: true` + concise `frame_label` if they want one bounding box around all copies, and `select_copied: true` / `zoom: true`.\n" +
                 "8. GEOMETRY PRECISION & SELF-VERIFICATION: When placing shapes side-by-side at a clear distance, inspect the exact `bounds` returned by `draw_entities` and call `measure_and_compare` (mode='distance'); if ANY coordinate or gap differs from what the engineer requested, IMMEDIATELY correct it using `modify_entities` BEFORE giving your final answer!\n" +
-                "9. STRICT TRUTH & NO HALLUCINATION: NEVER claim you extracted coordinates/schedules/BOQ, exported/imported Excel or PDF files, cleaned/purged/compared drawings, added arrows/tables/clouds, deleted, aligned, arrayed, separated, selected, renamed, converted into a block, or drew anything unless the corresponding tool (`extract_load_schedule`, `quantity_takeoff`, `manage_attributes`, `text_tools`, `advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`, `export_to_excel`, `import_excel_table`, `annotate_block_coordinates`, `draw_block_legend`, `draw_entities`, `delete_entities`, `copy_entities`, `modify_entities`, `create_block`, `convert_matching_shapes_to_block`, `select_entities`, `zoom_view`) ACTUALLY ran and returned `ok: true` in this turn! NEVER copy or write bracketed logs like `[Executed tools in AutoCAD: ...]` in your reply!\n" +
+                "9. STRICT TRUTH & NO HALLUCINATION: NEVER claim you extracted coordinates/schedules/BOQ, calculated/distributed lighting, exported `.stf`/Excel/PDF files, cleaned/purged/compared drawings, added arrows/tables/clouds, deleted, aligned, arrayed, separated, selected, renamed, converted into a block, or drew anything unless the corresponding tool (`lighting_design_engine`, `export_dialux_stf`, `extract_load_schedule`, `quantity_takeoff`, `manage_attributes`, `text_tools`, `advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`, `export_to_excel`, `import_excel_table`, `annotate_block_coordinates`, `draw_block_legend`, `draw_entities`, `delete_entities`, `copy_entities`, `modify_entities`, `create_block`, `convert_matching_shapes_to_block`, `select_entities`, `zoom_view`) ACTUALLY ran and returned `ok: true` in this turn! NEVER copy or write bracketed logs like `[Executed tools in AutoCAD: ...]` in your reply!\n" +
                 "10. CODE TRANSPARENCY & DIAGNOSTIC QUESTIONS: When the engineer asks WHY something reverted/failed ('ليه تم التراجع', 'هل فية مشكلة بالكود'), do NOT call `undo_last_action(steps: ...)` or repeat mutations — inspect `undo_last_action(action: \"list_history\")` / `get_plugin_diagnostics` read-only and answer clearly and honestly. If any plugin tool fails or lacks a CAD capability, report the EXACT error/limitation, name `integrations/autocad_context_plugin/CadToolExecutor.cs`, and explain the fix.\n" +
                 (isArabic
                     ? "11. Respond in clear, natural Arabic matching the engineer's tone, keeping CAD coordinates/handles/measurements exact and concise.\n"
@@ -2151,7 +2153,7 @@ namespace AIEngineer.AutoCAD
                 "Export an AutoCAD schedule directly to a real styled OpenXML Excel (.xlsx) or UTF-8 CSV (.csv) file. Automatically extracts from: the latest generated coordinate schedule ('coordinates'), Block Legend ('block_legend'), a currently selected AutoCAD Table or text grid ('selected_table'), live ModelSpace blocks, or custom headers/rows ('custom'). Supports interactive Save dialog (browse=true) and opening in Excel (open_file=true).",
                 ObjSchema(new Dictionary<string, object>
                 {
-                    { "source", Prop("string", "Data source: 'auto' (default smart detection), 'coordinates', 'panel_schedule', 'boq', 'block_legend', 'selected_table', or 'custom'.") },
+                    { "source", Prop("string", "Data source: 'auto' (default smart detection), 'coordinates', 'panel_schedule', 'boq', 'lighting', 'block_legend', 'selected_table', or 'custom'.") },
                     { "file_path", Prop("string", "Optional output .xlsx or .csv file path (auto-named beside the DWG file or Desktop when omitted).") },
                     { "format", Prop("string", "Output format: 'xlsx' (default) or 'csv'.") },
                     { "browse", Prop("boolean", "Open a Windows Save File dialog so the engineer can pick the folder/filename manually (default false).") },
@@ -2599,6 +2601,58 @@ namespace AIEngineer.AutoCAD
                     { "zoom", Prop("boolean", "Zoom onto inserted block (default true).") },
                     { "library_dir", Prop("string", "Optional custom library folder path override.") }
                 }, new string[] { "action" })));
+
+            tools.Add(Tool("lighting_design_engine",
+                "Automated indoor lighting calculation & symmetrical fixture grid placement inside closed CAD room polygons using Egyptian Code (ECP), EN 12464-1, or CIBSE standards + optional real .ies/.ldt photometric files. Computes Lumen Method count + point-by-point Avg/Min Lux & Uniformity U0, places LED fixture blocks, balances 3-phase wiring, draws calculation schedule on _AI_LIGHTING_TABLE, and exports Excel (.xlsx) and/or DIALux (.stf).",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "standard", Prop("string", "Lighting standard: 'ECP' (Egyptian Code, default), 'EN12464', or 'CIBSE'.") },
+                    { "target_lux", Prop("number", "Optional explicit target illuminance in Lux (overrides room-type lookup).") },
+                    { "ies_path", Prop("string", "Optional path to manufacturer .ies (LM-63) or .ldt (EULUMDAT) photometry file.") },
+                    { "browse_ies", Prop("boolean", "Open Windows File Picker to select an .ies/.ldt photometry file.") },
+                    { "block_name", Prop("string", "Luminaire BlockTableRecord name to insert/create (default 'LED_PANEL_60x60').") },
+                    { "fixture_lumens", Prop("number", "Fallback luminaire luminous flux in Lumens when no .ies given (default 3600).") },
+                    { "fixture_watts", Prop("number", "Fallback luminaire power in Watts when no .ies given (default 36).") },
+                    { "room_height_m", Prop("number", "Ceiling height in meters (default 3.0).") },
+                    { "workplane_m", Prop("number", "Working plane height in meters (default 0.80).") },
+                    { "mounting_height_m", Prop("number", "Luminaire mounting height in meters (defaults to room_height_m).") },
+                    { "maintenance_factor", Prop("number", "Maintenance factor MF 0.4..1.0 (default 0.80).") },
+                    { "reflectance_ceiling", Prop("number", "Ceiling reflectance 0.1..0.9 (default 0.70).") },
+                    { "reflectance_walls", Prop("number", "Wall reflectance 0.1..0.85 (default 0.50).") },
+                    { "reflectance_floor", Prop("number", "Floor reflectance 0.05..0.5 (default 0.20).") },
+                    { "room_layer", Prop("string", "Optional layer pattern for closed room boundary Polylines.") },
+                    { "selected_only", Prop("boolean", "Restrict design to currently selected room Polylines.") },
+                    { "handles", ArrProp("string", "Optional explicit room Polyline hex handles.") },
+                    { "draw_fixtures", Prop("boolean", "Place symmetrical grid luminaire blocks inside each room (default true).") },
+                    { "balance_circuits", Prop("boolean", "Color-balance fixtures across L1/L2/L3 phases and draw wiring loops (default true).") },
+                    { "stamp_labels", Prop("boolean", "Stamp room Lux & fixture count labels on _AI_LIGHTING_LABELS (default true).") },
+                    { "draw_table", Prop("boolean", "Draw Lighting Calculation Schedule on _AI_LIGHTING_TABLE (default true).") },
+                    { "export_excel", Prop("boolean", "Export lighting calculation schedule to .xlsx (default false).") },
+                    { "excel_path", Prop("string", "Optional Excel file output path.") },
+                    { "export_stf", Prop("boolean", "Also generate a DIALux .stf file alongside the design (default false).") },
+                    { "stf_path", Prop("string", "Optional .stf file output path.") },
+                    { "replace_existing", Prop("boolean", "Replace previous _AI_LIGHTING_* and E-LTG-* outputs (default true).") },
+                    { "zoom", Prop("boolean", "Zoom onto completed lighting schedule/drawing (default true).") }
+                })));
+
+            tools.Add(Tool("export_dialux_stf",
+                "Export active AutoCAD closed room polygons (with inner room labels) and existing lighting luminaire blocks in meters to a DIALux .stf (STFF 1.0.5) project file ready for import into DIALux evo / DIALux 4, with optional clean DWG background copy.",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "file_path", Prop("string", "Destination .stf file path (auto-named beside DWG or Desktop when omitted).") },
+                    { "browse", Prop("boolean", "Open Windows Save File dialog for choosing .stf destination.") },
+                    { "block_name", Prop("string", "Optional luminaire block name/pattern (auto-detects lighting blocks/layers if omitted).") },
+                    { "fixture_layer", Prop("string", "Optional luminaire layer filter pattern.") },
+                    { "room_layer", Prop("string", "Optional closed room boundary polyline layer filter.") },
+                    { "ies_path", Prop("string", "Optional .ies/.ldt photometry file path referenced in the STF luminaire definition.") },
+                    { "fixture_lumens", Prop("number", "Luminaire luminous flux in Lumens (default 3600).") },
+                    { "fixture_watts", Prop("number", "Luminaire wattage (default 36).") },
+                    { "room_height_m", Prop("number", "Room height in meters (default 3.0).") },
+                    { "workplane_m", Prop("number", "Working plane height in meters (default 0.80).") },
+                    { "mounting_height_m", Prop("number", "Luminaire mounting height in meters (defaults to room_height_m).") },
+                    { "maintenance_factor", Prop("number", "Maintenance factor MF (default 0.80).") },
+                    { "export_clean_dwg", Prop("boolean", "Also save a separate DWG background copy alongside the .stf file without altering the active document.") }
+                })));
 
             return tools;
         }
