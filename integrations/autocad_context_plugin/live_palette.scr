@@ -1,0 +1,20 @@
+(setq aieng-bridge (getenv "AI_ENGINEER_AUTOCAD_BRIDGE"))
+(setq aieng-log-path (getenv "AI_ENGINEER_AUTOCAD_LIVE_LOG"))
+(setq aieng-old-trusted (getvar "TRUSTEDPATHS"))
+(setvar "TRUSTEDPATHS" (vl-filename-directory aieng-bridge))
+(command "_.NETLOAD" aieng-bridge)
+(setvar "TRUSTEDPATHS" aieng-old-trusted)
+(setvar "PICKFIRST" 1)
+(sssetfirst nil (ssget "_X"))
+_.AIENGCONTEXT
+_.AIENGPALETTE
+(setq aieng-log (open aieng-log-path "w"))
+(write-line "AIENG_PALETTE_COMMAND_COMPLETED=1" aieng-log)
+(write-line (strcat "AIENG_DBMOD=" (itoa (getvar "DBMOD"))) aieng-log)
+(write-line (strcat "AIENG_SECURELOAD=" (itoa (getvar "SECURELOAD"))) aieng-log)
+(write-line (strcat "AIENG_TRUSTEDPATHS_RESTORED=" (if (= (getvar "TRUSTEDPATHS") aieng-old-trusted) "1" "0")) aieng-log)
+(close aieng-log)
+_.DELAY
+3000
+_.QUIT
+_N

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "catalog_version": 1,
+  "symbols": [
+    {
+      "id": "socket_single",
+      "block_name": "AIENG_E_SOCKET_SINGLE_V1",
+      "version": 1,
+      "description": "Generic single electrical socket symbol for bounded pilot placement.",
+      "units": "millimeters",
+      "insertion_layer": "E-POWR-DEVC",
+      "layer_color": 2,
+      "linetype": "CONTINUOUS",
+      "base_point": [0, 0, 0],
+      "attributes": [],
+      "entities": [
+        {"type": "circle", "center": [0, 0, 0], "radius": 125},
+        {"type": "line", "start": [-40, -45, 0], "end": [-40, 45, 0]},
+        {"type": "line", "start": [40, -45, 0], "end": [40, 45, 0]}
+      ],
+      "definition_sha256": "8a2f891627de4c1c5d80670a1aed95a6f1b0f602ea4bddd2e3dc94232ea82a95"
+    }
+  ]
+}

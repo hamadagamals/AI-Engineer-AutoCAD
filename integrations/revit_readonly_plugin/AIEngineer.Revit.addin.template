@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>AI-Engineer Revit Bridge</Name>
+    <Assembly>{{ASSEMBLY_PATH}}</Assembly>
+    <AddInId>CA6476F8-0E48-4F16-A61C-B0BD792DF51E</AddInId>
+    <FullClassName>AIEngineer.Revit.ReadOnlyApplication</FullClassName>
+    <VendorId>AIEN</VendorId>
+    <VendorDescription>AI-Engineer local engineering copilot</VendorDescription>
+  </AddIn>
+</RevitAddIns>

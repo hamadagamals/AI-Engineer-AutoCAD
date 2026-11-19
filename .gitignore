@@ -1,0 +1,24 @@
+﻿__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+venv/
+dist/
+build/
+logs/
+*.log
+*.tmp
+*.user
+*.suo
+.vs/
+.env
+.env.*
+backup/*
+!backup/.gitkeep
+workspace/*
+!workspace/.gitkeep
+workspace - Copy/
+test-temp/
+.ai-engineer/
+data/

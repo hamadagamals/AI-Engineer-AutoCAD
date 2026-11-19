@@ -1,0 +1,70 @@
+{
+  "candidates": [
+    {
+      "manufacturer_name": "Legrand SA",
+      "brand_name": "Legrand",
+      "family_name": "Lexic",
+      "model": "Socket outlet 2P+E shuttered French standard",
+      "part_number": "004280",
+      "product_url": "https://www.legrand.com/ecatalogue/en/catalog/products/socket-outlet-1016-250-v-2pe-shuttered-french-standard-004280",
+      "official_host": "www.legrand.com",
+      "evidence_path": "workspace/manufacturer-evidence/legrand-004280.html",
+      "properties": [
+        {
+          "property_name": "rated_current",
+          "value": "16",
+          "unit": "A",
+          "source_locator": "Saved official product page technical characteristics",
+          "evidence_text": "Rated current 16 A"
+        },
+        {
+          "property_name": "rated_voltage",
+          "value": "250",
+          "unit": "V",
+          "source_locator": "Saved official product page technical characteristics",
+          "evidence_text": "Rated voltage 250 V"
+        },
+        {
+          "property_name": "pole_configuration",
+          "value": "2P+E",
+          "unit": null,
+          "source_locator": "Saved official product page title",
+          "evidence_text": "Socket outlet - 10/16 A - 250 V~ - 2P+E - shuttered - french standard"
+        }
+      ]
+    },
+    {
+      "manufacturer_name": "Schneider Electric SE",
+      "brand_name": "Schneider Electric",
+      "family_name": "Acti9 iPC",
+      "model": "DIN socket French standard",
+      "part_number": "A9A15306",
+      "product_url": "https://www.se.com/uk/en/product/A9A15306/din-socket-ipc-2p%2Be-16a-250vac-nfc-15100-french-std/",
+      "official_host": "www.se.com",
+      "evidence_path": "workspace/manufacturer-evidence/schneider-a9a15306.html",
+      "properties": [
+        {
+          "property_name": "rated_current",
+          "value": "16",
+          "unit": "A",
+          "source_locator": "Saved official product page title",
+          "evidence_text": "DIN socket iPC - 2P+E - 16A - 250VAC - NFC 15100 - french std"
+        },
+        {
+          "property_name": "rated_voltage",
+          "value": "250",
+          "unit": "V",
+          "source_locator": "Saved official product page title",
+          "evidence_text": "DIN socket iPC - 2P+E - 16A - 250VAC - NFC 15100 - french std"
+        },
+        {
+          "property_name": "pole_configuration",
+          "value": "2P+E",
+          "unit": null,
+          "source_locator": "Saved official product page title",
+          "evidence_text": "DIN socket iPC - 2P+E - 16A - 250VAC - NFC 15100 - french std"
+        }
+      ]
+    }
+  ]
+}

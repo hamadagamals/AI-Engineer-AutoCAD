@@ -1,0 +1,43 @@
+{
+  "name": "ai-engineer-operator",
+  "displayName": "AI-Engineer Operator",
+  "description": "Safe local AI-Engineer developer/operator side panel for VS Code.",
+  "version": "0.1.6",
+  "publisher": "ai-engineer-local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:aiEngineer.operatorView"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiEngineer",
+          "title": "AI-Engineer",
+          "icon": "media/ai-engineer.svg"
+        }
+      ]
+    },
+    "views": {
+      "aiEngineer": [
+        {
+          "type": "webview",
+          "id": "aiEngineer.operatorView",
+          "name": "Operator"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "aiEngineer.refreshOperator",
+        "title": "AI-Engineer: Refresh Operator"
+      }
+    ]
+  }
+}

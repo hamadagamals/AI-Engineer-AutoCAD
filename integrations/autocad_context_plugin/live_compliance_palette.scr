@@ -1,0 +1,6 @@
+(setq aieng-bridge (getenv "AI_ENGINEER_AUTOCAD_BRIDGE"))
+(setq aieng-old-trusted (getvar "TRUSTEDPATHS"))
+(setvar "TRUSTEDPATHS" (vl-filename-directory aieng-bridge))
+(command "_.NETLOAD" aieng-bridge)
+(setvar "TRUSTEDPATHS" aieng-old-trusted)
+_.AIENGPALETTE

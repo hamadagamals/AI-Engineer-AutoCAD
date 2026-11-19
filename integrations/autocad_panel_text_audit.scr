@@ -1,0 +1,7 @@
+(setq AIENG_OLD_SECURELOAD (getvar "SECURELOAD"))
+(setvar "SECURELOAD" 0)
+(load (strcat (getenv "AI_ENGINEER_PROJECT_ROOT") "\\integrations\\autocad_panel_text_audit.lsp"))
+AIENGPANELTEXTAUDIT
+(setvar "SECURELOAD" AIENG_OLD_SECURELOAD)
+_.QUIT
+_N
