@@ -1953,6 +1953,10 @@ namespace AIEngineer.AutoCAD
             List<string> explicitHandles = GetStringList(args, "handles");
             double? explicitTolerance = GetNullableDouble(args, "tolerance");
             string blockFilter = GetStr(args, "block_name");
+            List<string> excludeBlocks = new List<string>();
+            excludeBlocks.AddRange(ExtractStringListArg(args, "exclude_blocks"));
+            excludeBlocks.AddRange(ExtractStringListArg(args, "exclude_block_names"));
+            excludeBlocks.AddRange(ExtractStringListArg(args, "exclude_block_name"));
             string layerFilter = GetStr(args, "layer_filter") ?? GetStr(args, "layer");
             bool visibleOnly = GetBool(args, "visible_only", true);
             bool includeAnonymous = GetBool(args, "include_anonymous", false);
@@ -1987,21 +1991,28 @@ namespace AIEngineer.AutoCAD
 
             using (DocumentLock docLock = doc.LockDocument())
             {
+                bool selectionHadOnlyBlocks = false;
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
+                    int selBlockCount = 0;
+                    int selTotalValid = 0;
                     foreach (string h in candidateHandles)
                     {
                         ObjectId oid = ResolveHandle(db, h);
                         if (oid.IsNull || oid.IsErased) continue;
                         Entity ent = tr.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ent == null || ent.IsErased) continue;
+                        selTotalValid++;
+                        if (ent is BlockReference) selBlockCount++;
                         if (ent is Curve && !pathCurveIds.Contains(oid))
                         {
                             pathCurveIds.Add(oid);
                             pathHandles.Add(ent.Handle.ToString());
                         }
                     }
+                    selectionHadOnlyBlocks = (selTotalValid > 0 && selBlockCount == selTotalValid);
 
-                    if (pathCurveIds.Count == 0 && usePreviousPath)
+                    if (pathCurveIds.Count == 0 && (usePreviousPath || selectionHadOnlyBlocks || excludeBlocks.Count > 0 || !string.IsNullOrWhiteSpace(blockFilter)))
                     {
                         List<string> prevCurves = GetValidCachedUserCurveHandles(db);
                         foreach (string h in prevCurves)
@@ -2029,26 +2040,21 @@ namespace AIEngineer.AutoCAD
                     try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
                     catch { try { doc.Window.Focus(); } catch { } }
 
-                    PromptSelectionOptions pso = new PromptSelectionOptions();
-                    pso.MessageForAdding = "\n[AI-Engineer] اختر الخط أو الكيبل (Line/Polyline/Arc) لتحديد وحصر البلوكات التي يمر عليها: ";
-                    SelectionFilter sf = new SelectionFilter(new TypedValue[]
-                    {
-                        new TypedValue((int)DxfCode.Start, "LINE,LWPOLYLINE,POLYLINE,ARC,CIRCLE,ELLIPSE,SPLINE")
-                    });
-                    PromptSelectionResult psr = doc.Editor.GetSelection(pso, sf);
-                    if (psr != null && psr.Status == PromptStatus.OK && psr.Value != null)
+                    // Single-click Curve pick (returns immediately on 1 click without looping for Enter)
+                    PromptEntityOptions peo = new PromptEntityOptions(
+                        "\n[AI-Engineer] اضغط ضغطة واحدة على الخط أو الكيبل (Line/Polyline/Arc): ");
+                    peo.SetRejectMessage("\nيجب الضغط على خط أو مسار (Line/Polyline/Arc/Spline/Circle).");
+                    peo.AddAllowedClass(typeof(Curve), false);
+                    PromptEntityResult per = doc.Editor.GetEntity(peo);
+                    if (per != null && per.Status == PromptStatus.OK && !per.ObjectId.IsNull && !per.ObjectId.IsErased)
                     {
                         using (Transaction tr = db.TransactionManager.StartTransaction())
                         {
-                            foreach (SelectedObject so in psr.Value)
+                            Entity ent = tr.GetObject(per.ObjectId, OpenMode.ForRead) as Entity;
+                            if (ent is Curve)
                             {
-                                if (so == null || so.ObjectId.IsNull || so.ObjectId.IsErased) continue;
-                                Entity ent = tr.GetObject(so.ObjectId, OpenMode.ForRead) as Entity;
-                                if (ent is Curve && !pathCurveIds.Contains(so.ObjectId))
-                                {
-                                    pathCurveIds.Add(so.ObjectId);
-                                    pathHandles.Add(ent.Handle.ToString());
-                                }
+                                pathCurveIds.Add(per.ObjectId);
+                                pathHandles.Add(ent.Handle.ToString());
                             }
                             tr.Commit();
                         }
@@ -2152,6 +2158,19 @@ namespace AIEngineer.AutoCAD
                                 !string.Equals(bn, blockFilter.Trim(), StringComparison.OrdinalIgnoreCase) &&
                                 !MatchesPatternOrSubstring(bn, blockFilter))
                                 continue;
+                            bool isExcludedBlock = false;
+                            for (int ei = 0; ei < excludeBlocks.Count; ei++)
+                            {
+                                string exPat = excludeBlocks[ei];
+                                if (string.IsNullOrWhiteSpace(exPat)) continue;
+                                if (string.Equals(bn, exPat.Trim(), StringComparison.OrdinalIgnoreCase) ||
+                                    MatchesPatternOrSubstring(bn, exPat))
+                                {
+                                    isExcludedBlock = true;
+                                    break;
+                                }
+                            }
+                            if (isExcludedBlock) continue;
 
                             Extents3d bex;
                             try { bex = br.GeometricExtents; }

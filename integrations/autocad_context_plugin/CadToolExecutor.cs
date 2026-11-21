@@ -1412,6 +1412,10 @@ namespace AIEngineer.AutoCAD
             }
 
             HashSet<string> requestedBlockNames = GetStringSet(args, "block_names");
+            List<string> excludeLegendBlocks = new List<string>();
+            excludeLegendBlocks.AddRange(ExtractStringListArg(args, "exclude_blocks"));
+            excludeLegendBlocks.AddRange(ExtractStringListArg(args, "exclude_block_names"));
+            excludeLegendBlocks.AddRange(ExtractStringListArg(args, "exclude_block_name"));
             HashSet<string> requestedHandles = GetStringSet(args, "handles");
             string footerLabelReq = GetStr(args, "footer_label");
             bool includeSystem = GetBool(args, "include_system_blocks", false);
@@ -1566,6 +1570,18 @@ namespace AIEngineer.AutoCAD
                             if (!includeSystem && (IsSystemBlockName(bn) || string.Equals(ent.Layer, "ASHADE", StringComparison.OrdinalIgnoreCase))) continue;
                             if (requestedHandles.Count > 0 && !requestedHandles.Contains(ent.Handle.ToString())) continue;
                             if (requestedBlockNames.Count > 0 && !requestedBlockNames.Contains(bn)) continue;
+                            bool excludedLegBlk = false;
+                            for (int ei = 0; ei < excludeLegendBlocks.Count; ei++)
+                            {
+                                string exPat = excludeLegendBlocks[ei];
+                                if (string.IsNullOrWhiteSpace(exPat)) continue;
+                                if (string.Equals(bn, exPat.Trim(), StringComparison.OrdinalIgnoreCase) || MatchesPatternOrSubstring(bn, exPat))
+                                {
+                                    excludedLegBlk = true;
+                                    break;
+                                }
+                            }
+                            if (excludedLegBlk) continue;
 
                             BlockLegendRowSpec spec;
                             if (!blockStats.TryGetValue(bn, out spec))
