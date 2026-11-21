@@ -274,6 +274,8 @@ namespace AIEngineer.AutoCAD
                         return ExtractLoadSchedule(doc, args);
                     case "quantity_takeoff":
                         return QuantityTakeoff(doc, args);
+                    case "find_blocks_along_path":
+                        return FindBlocksAlongPath(doc, args);
                     case "manage_attributes":
                         return ManageAttributes(doc, args);
                     case "text_tools":
@@ -357,7 +359,7 @@ namespace AIEngineer.AutoCAD
                 "inspect_drawing", "query_entities", "select_entities", "draw_entities", "draw_block_legend",
                 "modify_entities", "undo_last_action", "copy_entities", "delete_entities", "create_block",
                 "convert_matching_shapes_to_block", "annotate_block_coordinates", "export_to_excel", "import_excel_table",
-                "extract_load_schedule", "quantity_takeoff", "manage_attributes", "text_tools",
+                "extract_load_schedule", "quantity_takeoff", "find_blocks_along_path", "manage_attributes", "text_tools",
                 "advanced_geometry_ops", "drawing_qa_cleanup", "layout_and_plot_tools", "manage_block_library",
                 "lighting_design_engine", "export_dialux_stf",
                 "manage_layers", "measure_and_compare", "duplicate_drawing", "zoom_view", "execute_template",
@@ -791,6 +793,13 @@ namespace AIEngineer.AutoCAD
                 res["anonymous_or_system_block_counts"] = anonOrSystemBlockCounts;
                 res["selection_count"] = selectedHandles.Count;
                 res["selected_handles"] = selectedHandles;
+                try { res["pickfirst"] = System.Convert.ToInt32(Application.GetSystemVariable("PICKFIRST"), CultureInfo.InvariantCulture); } catch { }
+                if (selectedHandles.Count == 0)
+                {
+                    List<string> cachedCurveHandles = GetValidCachedUserCurveHandles(db);
+                    if (cachedCurveHandles.Count > 0)
+                        res["last_user_selected_curve_handles"] = cachedCurveHandles;
+                }
                 if (selectedHandles.Count > 0)
                 {
                     res["selected_type_counts"] = selectedTypeCounts;
@@ -1132,7 +1141,7 @@ namespace AIEngineer.AutoCAD
                 {
                     doc.Editor.SetImpliedSelection(targetIds.ToArray());
                 }
-                else
+                else if (GetBool(args, "clear_if_empty", false))
                 {
                     doc.Editor.SetImpliedSelection(new ObjectId[0]);
                 }
@@ -1401,6 +1410,8 @@ namespace AIEngineer.AutoCAD
             }
 
             HashSet<string> requestedBlockNames = GetStringSet(args, "block_names");
+            HashSet<string> requestedHandles = GetStringSet(args, "handles");
+            string footerLabelReq = GetStr(args, "footer_label");
             bool includeSystem = GetBool(args, "include_system_blocks", false);
             bool includeAnonymous = GetBool(args, "include_anonymous", false);
             bool visibleOnly = GetBool(args, "visible_only", false);
@@ -1551,6 +1562,7 @@ namespace AIEngineer.AutoCAD
                             if (string.IsNullOrEmpty(bn)) continue;
                             if (!includeAnonymous && IsAnonymousBlockName(bn)) continue;
                             if (!includeSystem && (IsSystemBlockName(bn) || string.Equals(ent.Layer, "ASHADE", StringComparison.OrdinalIgnoreCase))) continue;
+                            if (requestedHandles.Count > 0 && !requestedHandles.Contains(ent.Handle.ToString())) continue;
                             if (requestedBlockNames.Count > 0 && !requestedBlockNames.Contains(bn)) continue;
 
                             BlockLegendRowSpec spec;
@@ -1939,8 +1951,13 @@ namespace AIEngineer.AutoCAD
                     // 7. Footer Total Row
                     double fCy = (yDataBot + yBottom) / 2.0;
                     double leftSpanW = colX[4] - x0;
+                    string legendFooterLabel = !string.IsNullOrWhiteSpace(footerLabelReq)
+                        ? footerLabelReq.Trim()
+                        : (requestedHandles.Count > 0
+                            ? "إجمالي البلوكات المحددة (Total Blocks)"
+                            : "الإجمالي الكلي للبلوكات بالمخطط (Total Blocks)");
                     MText footLbl = CreateLegendCellMText(
-                        ms, tr, unicodeStyleId, "الإجمالي الكلي للبلوكات بالمخطط (Total Blocks)",
+                        ms, tr, unicodeStyleId, legendFooterLabel,
                         x0 + leftSpanW / 2.0, fCy,
                         leftSpanW * 0.92, footerH * 0.76, footerH * 0.28, rowH,
                         AttachmentPoint.MiddleCenter, 4, safeLegendLayer);
@@ -7634,6 +7651,65 @@ namespace AIEngineer.AutoCAD
         private static readonly Dictionary<IntPtr, ExcelSheetData> s_lastBoqTableByDb = new Dictionary<IntPtr, ExcelSheetData>();
         private static readonly Dictionary<IntPtr, ExcelSheetData> s_lastLightingTableByDb = new Dictionary<IntPtr, ExcelSheetData>();
         private static readonly Dictionary<IntPtr, string> s_lastGeneratedTableKindByDb = new Dictionary<IntPtr, string>();
+        private static readonly Dictionary<IntPtr, List<string>> s_lastUserCurveHandlesByDb = new Dictionary<IntPtr, List<string>>();
+
+        internal static void RecordUserSelectionSnapshot(Document doc, List<string> handles)
+        {
+            if (doc == null || handles == null || handles.Count == 0) return;
+            try
+            {
+                Database db = doc.Database;
+                List<string> curveHandles = new List<string>();
+                using (DocumentLock docLock = doc.LockDocument())
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    for (int i = 0; i < handles.Count; i++)
+                    {
+                        ObjectId oid = ResolveHandle(db, handles[i]);
+                        if (oid.IsNull || oid.IsErased) continue;
+                        Entity ent = tr.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ent is Curve) curveHandles.Add(ent.Handle.ToString());
+                    }
+                    tr.Commit();
+                }
+                if (curveHandles.Count > 0)
+                {
+                    lock (s_lastCoordLock)
+                    {
+                        s_lastUserCurveHandlesByDb[db.UnmanagedObject] = curveHandles;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static List<string> GetValidCachedUserCurveHandles(Database db)
+        {
+            List<string> result = new List<string>();
+            if (db == null) return result;
+            List<string> raw = null;
+            lock (s_lastCoordLock)
+            {
+                s_lastUserCurveHandlesByDb.TryGetValue(db.UnmanagedObject, out raw);
+            }
+            if (raw == null || raw.Count == 0) return result;
+            try
+            {
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    for (int i = 0; i < raw.Count; i++)
+                    {
+                        ObjectId oid = ResolveHandle(db, raw[i]);
+                        if (oid.IsNull || oid.IsErased) continue;
+                        Entity ent = tr.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ent is Curve) result.Add(ent.Handle.ToString());
+                    }
+                    tr.Commit();
+                }
+            }
+            catch { }
+            return result;
+        }
 
         private static string NormalizeCoordSortOrder(string raw)
         {
@@ -13131,25 +13207,29 @@ namespace AIEngineer.AutoCAD
 		internal static List<string> GetSelectedHandleStrings(Document doc)
 		{
 			List<string> list = new List<string>();
+			if (doc == null) return list;
 			try
 			{
-				PromptSelectionResult promptSelectionResult = doc.Editor.SelectImplied();
-				if (promptSelectionResult != null && promptSelectionResult.Status == PromptStatus.OK && promptSelectionResult.Value != null)
+				using (DocumentLock docLock = doc.LockDocument())
 				{
-					using (Transaction transaction = doc.Database.TransactionManager.StartTransaction())
+					PromptSelectionResult promptSelectionResult = doc.Editor.SelectImplied();
+					if (promptSelectionResult != null && promptSelectionResult.Status == PromptStatus.OK && promptSelectionResult.Value != null)
 					{
-						foreach (SelectedObject item in promptSelectionResult.Value)
+						using (Transaction transaction = doc.Database.TransactionManager.StartTransaction())
 						{
-							if (item != null && !item.ObjectId.IsNull)
+							foreach (SelectedObject item in promptSelectionResult.Value)
 							{
-								DBObject @object = transaction.GetObject(item.ObjectId, OpenMode.ForRead);
-								if (@object != null)
+								if (item != null && !item.ObjectId.IsNull && !item.ObjectId.IsErased)
 								{
-									list.Add(@object.Handle.ToString());
+									DBObject @object = transaction.GetObject(item.ObjectId, OpenMode.ForRead);
+									if (@object != null && !@object.IsErased)
+									{
+										list.Add(@object.Handle.ToString());
+									}
 								}
 							}
+							transaction.Commit();
 						}
-						transaction.Commit();
 					}
 				}
 			}

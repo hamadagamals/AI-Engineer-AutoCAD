@@ -476,7 +476,11 @@ namespace AIEngineer.AutoCAD
                 {
                     Document activeDoc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
                     if (activeDoc != null)
+                    {
                         initialSelectedHandles = CadToolExecutor.GetSelectedHandleStrings(activeDoc);
+                        if (initialSelectedHandles.Count > 0)
+                            CadToolExecutor.RecordUserSelectionSnapshot(activeDoc, initialSelectedHandles);
+                    }
                 }
                 catch { }
                 try
@@ -637,6 +641,8 @@ namespace AIEngineer.AutoCAD
                 return toolName + "(n=" + res["total_count"] + ",sort:" + so + ",callouts:" + res["callouts_drawn"] + ",table:" + (res.ContainsKey("table_drawn") ? res["table_drawn"] : false) + ")";
             }
             if (res.ContainsKey("matched_instances")) return toolName + "(match:" + res["matched_instances"] + ",conv:" + (res.ContainsKey("converted_count") ? res["converted_count"] : 0) + ")";
+            if (res.ContainsKey("matched_blocks_count") && res.ContainsKey("path_curves_count"))
+                return toolName + "(blocks:" + res["matched_blocks_count"] + ",types:" + (res.ContainsKey("block_types_count") ? res["block_types_count"] : 0) + ",sel:" + (res.ContainsKey("selected_in_autocad") ? res["selected_in_autocad"] : false) + ",legend:" + (res.ContainsKey("legend_drawn") ? res["legend_drawn"] : false) + ")";
             if (res.ContainsKey("legend_bounds")) return toolName + "(rows:" + (res.ContainsKey("row_count") ? res["row_count"] : "ok") + ")";
             if (res.ContainsKey("selected_count") && toolName == "select_entities") return toolName + "(sel:" + res["selected_count"] + ")";
             if (res.ContainsKey("definition_entities") && res.ContainsKey("block_name")) return toolName + "(" + res["block_name"] + ",def:" + res["definition_entities"] + ")";
@@ -657,6 +663,7 @@ namespace AIEngineer.AutoCAD
             string n = toolName.Trim().ToLowerInvariant();
             return n == "draw_entities" ||
                    n == "draw_block_legend" ||
+                   n == "find_blocks_along_path" ||
                    n == "annotate_block_coordinates" ||
                    n == "modify_entities" ||
                    n == "undo_last_action" ||
@@ -669,7 +676,19 @@ namespace AIEngineer.AutoCAD
                    n == "execute_template" ||
                    n == "approve_or_rollback_preview" ||
                    n == "select_entities" ||
-                   n == "zoom_view";
+                   n == "zoom_view" ||
+                   n == "quantity_takeoff" ||
+                   n == "extract_load_schedule" ||
+                   n == "manage_attributes" ||
+                   n == "text_tools" ||
+                   n == "advanced_geometry_ops" ||
+                   n == "drawing_qa_cleanup" ||
+                   n == "layout_and_plot_tools" ||
+                   n == "manage_block_library" ||
+                   n == "export_to_excel" ||
+                   n == "import_excel_table" ||
+                   n == "lighting_design_engine" ||
+                   n == "export_dialux_stf";
         }
 
         private static bool ContainsFakeToolLog(string reply)
@@ -1920,7 +1939,7 @@ namespace AIEngineer.AutoCAD
             return
                 "You are directly integrated inside AutoCAD (as a native .NET plugin talking straight to the engineer over API with ZERO intermediary blocking).\n" +
                 "You have full engineering authority inside the active AutoCAD drawing through your function tools:\n" +
-                "- Inspect & Query & Select: `inspect_drawing`, `query_entities`, `select_entities`, `get_plugin_diagnostics`\n" +
+                "- Inspect & Query & Select: `inspect_drawing`, `query_entities`, `select_entities`, `find_blocks_along_path` (exact geometric detection + visible selection + Block Legend of ONLY blocks intersected/crossed by a selected Line/Polyline/Cable), `get_plugin_diagnostics`\n" +
                 "- Draft, Legends & Annotate: `draw_block_legend`, `annotate_block_coordinates`, `draw_entities` (circle, line, rect/square, polyline/polygon, arc, ellipse, text, mtext, leader, callout, dimension, linear_dimension, hatch, block_reference), `create_block`, `convert_matching_shapes_to_block`, `execute_template`\n" +
                 "- Excel <-> AutoCAD Interop: `export_to_excel` (export AutoCAD tables, coordinate schedules, panel load schedules, BOQ, block legends, or selected tables to `.xlsx`/`.csv`), `import_excel_table` (import `.xlsx`/`.xlsm`/`.csv` spreadsheets into AutoCAD with crisp TrueType Arial Unicode formatting or native AutoCAD Table)\n" +
                 "- MEP Load Schedules & Quantity Takeoff: `extract_load_schedule` (extract electrical circuit/panel load schedules from blocks + neighbor texts `63A`/`100A`/`15KW`/`4x16mm2` + sample connected feeder path lengths -> AutoCAD & Excel), `quantity_takeoff` (linear cable/pipe lengths by layer, closed room/polygon areas with optional centroid labels, block counts, vertical/waste allowances -> BOQ table & Excel)\n" +
@@ -1972,6 +1991,9 @@ namespace AIEngineer.AutoCAD
                 "6h. ATTRIBUTES & BATCH TEXT TOOLS (`manage_attributes`, `text_tools`): Use `manage_attributes` to extract all BlockReference attributes to Excel (`action: 'extract'`), bulk-update attribute tags (`action: 'update'`), or sync edited attributes back from Excel (`action: 'sync_from_excel'`). Use `text_tools` for batch find & replace across text/mtext/attributes (`action: 'find_replace'`), directional auto-numbering `C1..Cn` (`action: 'auto_number'`), or height/Arial Unicode style standardization (`action: 'standardize'`).\n" +
                 "6i. ADVANCED GEOMETRY, QA/CLEANUP, DWG COMPARE, BLOCK LIBRARY & LAYOUTS/PDF (`advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`): Never manually loop single entity moves/deletes when an exact batch engineering tool exists! Use `advanced_geometry_ops` for `align`, `distribute`, `array_rect`, `array_polar`, `offset`, `revision_cloud`, or `explode`. Use `drawing_qa_cleanup` for `audit_duplicates` (detect/clean stacked duplicate blocks!), `overkill`, `purge`, `standardize_bylayer`, `compare_dwg` (revision clouds + Excel diff), or `check_env`. Use `layout_and_plot_tools` for scaled PaperSpace Layouts/Viewports and `batch_plot_pdf`. Use `manage_block_library` (`save`/`list`/`insert`) for reusable company blocks across projects!\n" +
                 "6j. LIGHTING DESIGN, IES/LDT PHOTOMETRY & DIALUX STF EXPORT (`lighting_design_engine`, `export_dialux_stf`): Whenever the engineer asks to design/distribute lighting automatically according to Egyptian Code (`ECP`) / `EN 12464-1` / `CIBSE`, calculate Lux/Uniformity from `.ies`/`.ldt` files, balance lighting on 3 phases, or export an AutoCAD lighting plan to DIALux evo (`.stf`): ALWAYS call `lighting_design_engine` and/or `export_dialux_stf`! Note honestly that DIALux evo imports `.stf` (`File -> Import -> STF`) cleanly to skip manual room/fixture modeling, while official DIALux evo has no external headless API for running DIALux's own internal raytracer or PDF export.\n" +
+                "6k. BLOCKS ALONG / INTERSECTED BY A SELECTED LINE OR CABLE (`find_blocks_along_path`): Whenever the engineer asks to find, select, count, or make a schedule/legend (name + symbol thumbnail + count) of **ONLY the blocks that a selected Line/Polyline/Cable passes through or touches** ('البلوكات التي مر عليها الخط المحدد', 'حدد البلوكات التي مر عليها الكيبل', 'جدول فيه اسم البلوك وشكل البلوك وعدده فقط للبلوكات على المسار'):\n" +
+                "   - **NEVER use `quantity_takeoff`** (which counts the entire drawing/layers as BOQ) and **NEVER guess bounding boxes in `select_entities`**!\n" +
+                "   - **ALWAYS call `find_blocks_along_path` directly** (`select_blocks: true`, `draw_legend: true` when a table/legend is requested, or `draw_legend: false` if they only asked to select/highlight them)! It automatically reads the currently selected Line/Polyline/Arc/Spline/Circle (or prompts the engineer to pick it on screen if empty, or accepts `use_previous_path: true` if `inspect_drawing.last_user_selected_curve_handles` is present), performs exact 2D XY curve-to-block geometry intersection, selects ONLY the intersected blocks in AutoCAD with blue grips for review, and draws a separated Block Legend (`_AI_BLOCK_LEGEND` with `شكل البلوك` thumbnails, `اسم البلوك`, `العدد`, and optional `clear_layers: [\"_AI_BOQ_TABLE\"]` to remove any mistaken old BOQ table) covering ONLY those intersected blocks!\n" +
                 "7. SAFE COPYING OUTSIDE LARGE DRAWINGS & FRAMING: Whenever asked to copy elements outside the drawing ('نسخة خارج المخطط') or put ONE frame/box around them ('مربع واحد'), use `copy_entities` with `entity_type: \"BlockReference\"` (or handles/filters), `auto_offset_outside: \"right\"`, `draw_frame: true` + concise `frame_label` if they want one bounding box around all copies, and `select_copied: true` / `zoom: true`.\n" +
                 "8. GEOMETRY PRECISION & SELF-VERIFICATION: When placing shapes side-by-side at a clear distance, inspect the exact `bounds` returned by `draw_entities` and call `measure_and_compare` (mode='distance'); if ANY coordinate or gap differs from what the engineer requested, IMMEDIATELY correct it using `modify_entities` BEFORE giving your final answer!\n" +
                 "9. STRICT TRUTH & NO HALLUCINATION: NEVER claim you extracted coordinates/schedules/BOQ, calculated/distributed lighting, exported `.stf`/Excel/PDF files, cleaned/purged/compared drawings, added arrows/tables/clouds, deleted, aligned, arrayed, separated, selected, renamed, converted into a block, or drew anything unless the corresponding tool (`lighting_design_engine`, `export_dialux_stf`, `extract_load_schedule`, `quantity_takeoff`, `manage_attributes`, `text_tools`, `advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`, `export_to_excel`, `import_excel_table`, `annotate_block_coordinates`, `draw_block_legend`, `draw_entities`, `delete_entities`, `copy_entities`, `modify_entities`, `create_block`, `convert_matching_shapes_to_block`, `select_entities`, `zoom_view`) ACTUALLY ran and returned `ok: true` in this turn! NEVER copy or write bracketed logs like `[Executed tools in AutoCAD: ...]` in your reply!\n" +
@@ -2034,6 +2056,43 @@ namespace AIEngineer.AutoCAD
                     { "highlight_box", Prop("boolean", "Draw one rectangular bounding box around selected entities.") },
                     { "highlight_layer", Prop("string", "Layer for optional highlight box (default _AI_HIGHLIGHT).") },
                     { "highlight_color_index", Prop("integer", "ACI color for optional highlight box (default 2=Yellow).") }
+                })));
+
+            tools.Add(Tool("find_blocks_along_path",
+                "Find ALL BlockReferences geometrically crossed, touched, or entered by the currently selected Line/Polyline/Arc/Spline/Circle cable/route (using exact 2D XY curve-to-block geometry intersection and closed-symbol checks), visibly select ONLY those matched blocks in AutoCAD with blue grips for review, and optionally draw a separated Block Legend schedule (شكل البلوك, اسم البلوك, الوصف الهندسي, العدد) covering ONLY those intersected blocks.",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "handles", ArrProp("string", "Optional hex handles of path curve(s) (Line/Polyline/Arc/Spline/Circle). Omit to use the currently selected curve(s) in AutoCAD.") },
+                    { "tolerance", Prop("number", "Optional contact/snap tolerance in active drawing units (omit for automatic symbol-proportional tolerance).") },
+                    { "block_name", Prop("string", "Optional block name/pattern filter to count only specific blocks along the path.") },
+                    { "layer_filter", Prop("string", "Optional layer name/pattern filter for candidate blocks.") },
+                    { "visible_only", Prop("boolean", "Only inspect visible blocks on On/Thawed layers (default true).") },
+                    { "include_anonymous", Prop("boolean", "Include anonymous '*' blocks (default false).") },
+                    { "include_system", Prop("boolean", "Include internal AVE_* / ASHADE blocks (default false).") },
+                    { "select_blocks", Prop("boolean", "Select all intersected blocks in AutoCAD viewport with blue grips for review (default true).") },
+                    { "draw_legend", Prop("boolean", "Draw a separated Block Legend schedule (with block thumbnails, names, descriptions, and counts) ONLY for the intersected blocks (default true).") },
+                    { "descriptions", new Dictionary<string, object>
+                        {
+                            { "type", "array" },
+                            { "description", "Optional engineering descriptions for matched block names shown in the legend." },
+                            { "items", ObjSchema(new Dictionary<string, object>
+                                {
+                                    { "block_name", Prop("string", "Block name.") },
+                                    { "description", Prop("string", "Arabic or bilingual engineering description.") }
+                                }, new string[] { "block_name", "description" })
+                            }
+                        }
+                    },
+                    { "title", Prop("string", "Optional legend title (default 'جدول حصر ومفاتيح بلوكات المسار المحدد (PATH BLOCK LEGEND)').") },
+                    { "position", Prop("string", "'outside_right' (default), 'outside_left', 'outside_top', or 'outside_bottom'.") },
+                    { "clear_layers", ArrProp("string", "Optional non-0 layers of old/unwanted tables (e.g. ['_AI_BOQ_TABLE']) to erase before drawing the clean legend.") },
+                    { "replace_existing", Prop("boolean", "Replace previous _AI_BLOCK_LEGEND before drawing (default true).") },
+                    { "use_previous_path", Prop("boolean", "If true and no curve is currently selected, reuse last_user_selected_curve_handles from earlier in the session.") },
+                    { "pick_if_empty", Prop("boolean", "If true (default) and no curve is currently selected, prompt the engineer directly in AutoCAD to click the Line/Polyline path.") },
+                    { "export_excel", Prop("boolean", "Also export the matched blocks schedule to Excel .xlsx (default false).") },
+                    { "excel_path", Prop("string", "Optional destination .xlsx path.") },
+                    { "zoom", Prop("boolean", "Zoom viewport after execution (default true).") },
+                    { "zoom_mode", Prop("string", "'auto' (default: 'legend' if draw_legend=true else 'selected'), 'selected' (focus on selected blocks), 'legend' (focus on table), or 'both'.") }
                 })));
 
             Dictionary<string, object> entityItemProps = new Dictionary<string, object>
@@ -2112,7 +2171,9 @@ namespace AIEngineer.AutoCAD
                         }
                     },
                     { "block_names", ArrProp("string", "Optional subset of block names to include (omit to include all named non-system blocks found in ModelSpace).") },
+                    { "handles", ArrProp("string", "Optional explicit hex handles of specific BlockReference insertions to include/count ONLY those instances in the legend (e.g. blocks along a cable path).") },
                     { "title", Prop("string", "Optional table title heading (default 'جدول حصر ومفاتيح البلوكات (BLOCK LEGEND)').") },
+                    { "footer_label", Prop("string", "Optional footer total row label.") },
                     { "position", Prop("string", "Placement outside drawing extents: 'outside_right' (default), 'outside_left', 'outside_top', or 'outside_bottom'.") },
                     { "gap", Prop("number", "Optional custom clearance gap outside drawing extents in active drawing units.") },
                     { "layer", Prop("string", "Target layer for legend entities (default '_AI_BLOCK_LEGEND').") },

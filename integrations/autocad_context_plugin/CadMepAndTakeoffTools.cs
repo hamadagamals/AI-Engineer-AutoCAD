@@ -5,6 +5,7 @@ using System.IO;
 using System.Text.RegularExpressions;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
 
 namespace AIEngineer.AutoCAD
@@ -261,7 +262,7 @@ namespace AIEngineer.AutoCAD
                     string hVal = (logicalC < headers.Count && headers[logicalC] != null) ? headers[logicalC] : "";
                     MText hMt = CreateLegendCellMText(ms, tr, unicodeStyleId, hVal,
                         colLeftXs[vc] + colVisualWidths[vc] * 0.5, (curY + rowBottom) * 0.5,
-                        colVisualWidths[vc], headerH, usedTextH * 1.02, headerH, AttachmentPoint.MiddleCenter, 4, safeLayer);
+                        colVisualWidths[vc] * 0.90, headerH * 0.78, usedTextH * 1.02, headerH, AttachmentPoint.MiddleCenter, 4, safeLayer);
                     createdIds.Add(hMt.ObjectId);
                 }
                 Line div = new Line(new Point3d(leftX, rowBottom, 0.0), new Point3d(rightX, rowBottom, 0.0));
@@ -1018,6 +1019,10 @@ namespace AIEngineer.AutoCAD
             double unitsPerM2 = unitsPerM * unitsPerM;
 
             HashSet<string> selSet = new HashSet<string>(GetSelectedHandleStrings(doc), StringComparer.OrdinalIgnoreCase);
+            if (selectedOnly && selSet.Count == 0)
+            {
+                return Err("لا توجد عناصر محددة في أوتوكاد حالياً لتنفيذ الحصر عليها (selected_only=true). حدد العناصر أولاً أو استخدم الأداة المناسبة.");
+            }
 
             Dictionary<string, double> linearLenByLayer = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, int> linearCountByLayer = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -1397,6 +1402,937 @@ namespace AIEngineer.AutoCAD
                 }
             }
             return Ok(res);
+        }
+
+        private sealed class PathCurveCandidate
+        {
+            public int PathIndex;
+            public string Handle;
+            public Curve FlatCurve;
+            public double MinX;
+            public double MinY;
+            public double MaxX;
+            public double MaxY;
+            public double Length;
+            public List<Point2d> Samples;
+        }
+
+        private sealed class PathBlockMatchItem
+        {
+            public ObjectId Id;
+            public string Handle;
+            public string BlockName;
+            public string Layer;
+            public int ColorIndex;
+            public double X;
+            public double Y;
+            public int PathIndex;
+            public double DistanceAlongPath;
+            public Extents3d Bounds;
+        }
+
+        private static Curve FlattenCurveToXY(Curve srcCurve)
+        {
+            if (srcCurve == null) return null;
+            try
+            {
+                Plane xy = new Plane(Point3d.Origin, Vector3d.ZAxis);
+                Curve proj = srcCurve.GetOrthoProjectedCurve(xy) as Curve;
+                if (proj != null) return proj;
+            }
+            catch { }
+
+            try
+            {
+                Polyline poly = srcCurve as Polyline;
+                if (poly != null && poly.NumberOfVertices >= 2)
+                {
+                    Polyline flatPoly = new Polyline(poly.NumberOfVertices);
+                    for (int i = 0; i < poly.NumberOfVertices; i++)
+                    {
+                        Point2d pt = poly.GetPoint2dAt(i);
+                        flatPoly.AddVertexAt(i, pt, poly.GetBulgeAt(i), 0.0, 0.0);
+                    }
+                    flatPoly.Closed = poly.Closed;
+                    return flatPoly;
+                }
+                Point3d sp = srcCurve.StartPoint;
+                Point3d ep = srcCurve.EndPoint;
+                if (Math.Abs(sp.X - ep.X) > 1e-7 || Math.Abs(sp.Y - ep.Y) > 1e-7)
+                {
+                    return new Line(new Point3d(sp.X, sp.Y, 0.0), new Point3d(ep.X, ep.Y, 0.0));
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static List<Point2d> SampleCurvePoints2D(Curve flatCurve, int minArcSamples)
+        {
+            List<Point2d> pts = new List<Point2d>();
+            if (flatCurve == null) return pts;
+
+            Polyline pl = flatCurve as Polyline;
+            if (pl != null && pl.NumberOfVertices > 0)
+            {
+                int vCount = pl.NumberOfVertices;
+                int segCount = pl.Closed ? vCount : (vCount - 1);
+                for (int i = 0; i < vCount; i++)
+                    pts.Add(pl.GetPoint2dAt(i));
+                for (int s = 0; s < segCount; s++)
+                {
+                    double bulge = 0.0;
+                    try { bulge = pl.GetBulgeAt(s); } catch { bulge = 0.0; }
+                    if (Math.Abs(bulge) > 1e-5)
+                    {
+                        try
+                        {
+                            double pStart = s;
+                            double pEnd = s + 1.0;
+                            for (int k = 1; k <= 8; k++)
+                            {
+                                double par = pStart + (pEnd - pStart) * (k / 9.0);
+                                Point3d ap = pl.GetPointAtParameter(par);
+                                pts.Add(new Point2d(ap.X, ap.Y));
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                return pts;
+            }
+
+            Line ln = flatCurve as Line;
+            if (ln != null)
+            {
+                pts.Add(new Point2d(ln.StartPoint.X, ln.StartPoint.Y));
+                pts.Add(new Point2d((ln.StartPoint.X + ln.EndPoint.X) * 0.5, (ln.StartPoint.Y + ln.EndPoint.Y) * 0.5));
+                pts.Add(new Point2d(ln.EndPoint.X, ln.EndPoint.Y));
+                return pts;
+            }
+
+            try
+            {
+                double sp = flatCurve.StartParam;
+                double ep = flatCurve.EndParam;
+                int steps = Math.Max(8, minArcSamples);
+                for (int i = 0; i <= steps; i++)
+                {
+                    double par = sp + (ep - sp) * (i / (double)steps);
+                    Point3d p = flatCurve.GetPointAtParameter(par);
+                    pts.Add(new Point2d(p.X, p.Y));
+                }
+            }
+            catch
+            {
+                try
+                {
+                    pts.Add(new Point2d(flatCurve.StartPoint.X, flatCurve.StartPoint.Y));
+                    pts.Add(new Point2d(flatCurve.EndPoint.X, flatCurve.EndPoint.Y));
+                }
+                catch { }
+            }
+            return pts;
+        }
+
+        private static void CollectBlockGeometryForPathTest(
+            Entity rootEnt,
+            int depth,
+            List<Curve> outFlatCurves,
+            List<List<Point2d>> outClosedSolids,
+            List<Extents3d> outFallbackExtents)
+        {
+            if (rootEnt == null || depth > 3) return;
+            BlockReference br = rootEnt as BlockReference;
+            if (br != null)
+            {
+                DBObjectCollection exploded = new DBObjectCollection();
+                try
+                {
+                    br.Explode(exploded);
+                    foreach (DBObject obj in exploded)
+                    {
+                        Entity child = obj as Entity;
+                        if (child == null)
+                        {
+                            try { if (obj != null) obj.Dispose(); } catch { }
+                            continue;
+                        }
+                        try
+                        {
+                            CollectBlockGeometryForPathTest(child, depth + 1, outFlatCurves, outClosedSolids, outFallbackExtents);
+                        }
+                        finally
+                        {
+                            try { child.Dispose(); } catch { }
+                        }
+                    }
+                    return;
+                }
+                catch
+                {
+                    foreach (DBObject obj in exploded)
+                    {
+                        try { if (obj != null) obj.Dispose(); } catch { }
+                    }
+                }
+                try
+                {
+                    Extents3d ex = br.GeometricExtents;
+                    if (IsFiniteBounds(ex)) outFallbackExtents.Add(ex);
+                }
+                catch { }
+                return;
+            }
+
+            Curve cv = rootEnt as Curve;
+            if (cv != null)
+            {
+                Curve flat = FlattenCurveToXY(cv);
+                if (flat != null)
+                {
+                    outFlatCurves.Add(flat);
+                    return;
+                }
+                try
+                {
+                    Extents3d cex = cv.GeometricExtents;
+                    if (IsFiniteBounds(cex)) outFallbackExtents.Add(cex);
+                }
+                catch { }
+                return;
+            }
+
+            Solid s2 = rootEnt as Solid;
+            if (s2 != null)
+            {
+                try
+                {
+                    List<Point2d> poly = new List<Point2d>();
+                    for (short k = 0; k < 4; k++)
+                    {
+                        Point3d vp = s2.GetPointAt(k);
+                        Point2d p2 = new Point2d(vp.X, vp.Y);
+                        if (poly.Count == 0 || poly[poly.Count - 1].GetDistanceTo(p2) > 1e-6)
+                            poly.Add(p2);
+                    }
+                    if (poly.Count >= 3)
+                    {
+                        outClosedSolids.Add(poly);
+                        return;
+                    }
+                }
+                catch { }
+            }
+
+            Hatch ht = rootEnt as Hatch;
+            if (ht != null)
+            {
+                try
+                {
+                    int nLoops = ht.NumberOfLoops;
+                    for (int li = 0; li < nLoops; li++)
+                    {
+                        HatchLoop loop = ht.GetLoopAt(li);
+                        List<Point2d> poly = new List<Point2d>();
+                        if (loop.IsPolyline && loop.Polyline != null)
+                        {
+                            for (int vi = 0; vi < loop.Polyline.Count; vi++)
+                                poly.Add(loop.Polyline[vi].Vertex);
+                        }
+                        else if (loop.Curves != null)
+                        {
+                            foreach (Curve2d c2 in loop.Curves)
+                            {
+                                Point2d[] samples = c2.GetSamplePoints(10);
+                                if (samples != null)
+                                {
+                                    for (int si = 0; si < samples.Length; si++)
+                                        poly.Add(samples[si]);
+                                }
+                            }
+                        }
+                        if (poly.Count >= 3) outClosedSolids.Add(poly);
+                    }
+                    if (outClosedSolids.Count > 0) return;
+                }
+                catch { }
+                try
+                {
+                    Extents3d hex = ht.GeometricExtents;
+                    if (IsFiniteBounds(hex)) outFallbackExtents.Add(hex);
+                }
+                catch { }
+                return;
+            }
+
+            if (!(rootEnt is DBText) && !(rootEnt is MText))
+            {
+                try
+                {
+                    Extents3d ex = rootEnt.GeometricExtents;
+                    if (IsFiniteBounds(ex)) outFallbackExtents.Add(ex);
+                }
+                catch { }
+            }
+        }
+
+        private static bool DoesCurveHitPointOrSegment2D(Curve flatPath, Point2d a, Point2d b, double tol, out Point2d hitPt)
+        {
+            hitPt = a;
+            try
+            {
+                Point3d pa = flatPath.GetClosestPointTo(new Point3d(a.X, a.Y, 0.0), false);
+                if (Math.Sqrt(Math.Pow(pa.X - a.X, 2) + Math.Pow(pa.Y - a.Y, 2)) <= tol)
+                {
+                    hitPt = a;
+                    return true;
+                }
+                if (a.GetDistanceTo(b) > 1e-6)
+                {
+                    using (Line segLine = new Line(new Point3d(a.X, a.Y, 0.0), new Point3d(b.X, b.Y, 0.0)))
+                    {
+                        Point3dCollection pts = new Point3dCollection();
+                        flatPath.IntersectWith(segLine, Intersect.OnBothOperands, pts, IntPtr.Zero, IntPtr.Zero);
+                        if (pts.Count > 0)
+                        {
+                            hitPt = new Point2d(pts[0].X, pts[0].Y);
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool DoesPathHitBlockXY(
+            List<PathCurveCandidate> paths,
+            BlockReference br,
+            Extents3d blockExt,
+            double tol,
+            out int matchedPathIndex,
+            out double matchedDistAlongPath)
+        {
+            matchedPathIndex = 0;
+            matchedDistAlongPath = 0.0;
+
+            List<Curve> subCurves = new List<Curve>();
+            List<List<Point2d>> closedPolys = new List<List<Point2d>>();
+            List<Extents3d> fallbackExtents = new List<Extents3d>();
+
+            try
+            {
+                CollectBlockGeometryForPathTest(br, 0, subCurves, closedPolys, fallbackExtents);
+
+                for (int pi = 0; pi < paths.Count; pi++)
+                {
+                    PathCurveCandidate pc = paths[pi];
+                    if (blockExt.MaxPoint.X + tol < pc.MinX || blockExt.MinPoint.X - tol > pc.MaxX ||
+                        blockExt.MaxPoint.Y + tol < pc.MinY || blockExt.MinPoint.Y - tol > pc.MaxY)
+                        continue;
+
+                    Curve flatPath = pc.FlatCurve;
+                    if (flatPath == null) continue;
+
+                    // Collect path samples overlapping block bounds (+tol) for point-in-closed-symbol & near-point tests
+                    List<Point2d> localPathSamples = new List<Point2d>();
+                    for (int si = 0; si < pc.Samples.Count; si++)
+                    {
+                        Point2d sp = pc.Samples[si];
+                        if (sp.X >= blockExt.MinPoint.X - tol && sp.X <= blockExt.MaxPoint.X + tol &&
+                            sp.Y >= blockExt.MinPoint.Y - tol && sp.Y <= blockExt.MaxPoint.Y + tol)
+                            localPathSamples.Add(sp);
+                    }
+                    // Always test closest point on path to block center as an extra local sample (catches straight segments passing straight over a closed fixture)
+                    Point2d blkCenter = new Point2d((blockExt.MinPoint.X + blockExt.MaxPoint.X) * 0.5, (blockExt.MinPoint.Y + blockExt.MaxPoint.Y) * 0.5);
+                    try
+                    {
+                        Point3d cpCenter = flatPath.GetClosestPointTo(new Point3d(blkCenter.X, blkCenter.Y, 0.0), false);
+                        localPathSamples.Add(new Point2d(cpCenter.X, cpCenter.Y));
+                    }
+                    catch { }
+
+                    // 1. Sub-curves intersection, proximity & closed-loop containment
+                    for (int ci = 0; ci < subCurves.Count; ci++)
+                    {
+                        Curve sc = subCurves[ci];
+                        if (sc == null) continue;
+
+                        try
+                        {
+                            Point3dCollection intPts = new Point3dCollection();
+                            flatPath.IntersectWith(sc, Intersect.OnBothOperands, intPts, IntPtr.Zero, IntPtr.Zero);
+                            if (intPts.Count > 0)
+                            {
+                                matchedPathIndex = pc.PathIndex;
+                                try
+                                {
+                                    Point3d cp = flatPath.GetClosestPointTo(new Point3d(intPts[0].X, intPts[0].Y, 0.0), false);
+                                    matchedDistAlongPath = flatPath.GetDistAtPoint(cp);
+                                }
+                                catch { }
+                                return true;
+                            }
+                        }
+                        catch { }
+
+                        List<Point2d> subPts = SampleCurvePoints2D(sc, 16);
+                        for (int spi = 0; spi < subPts.Count; spi++)
+                        {
+                            Point2d spt = subPts[spi];
+                            try
+                            {
+                                Point3d cp = flatPath.GetClosestPointTo(new Point3d(spt.X, spt.Y, 0.0), false);
+                                double d = Math.Sqrt(Math.Pow(cp.X - spt.X, 2) + Math.Pow(cp.Y - spt.Y, 2));
+                                if (d <= tol)
+                                {
+                                    matchedPathIndex = pc.PathIndex;
+                                    try { matchedDistAlongPath = flatPath.GetDistAtPoint(cp); } catch { }
+                                    return true;
+                                }
+                            }
+                            catch { }
+                        }
+
+                        Circle scCircle = sc as Circle;
+                        bool isClosedCurve = (scCircle != null) || sc.Closed;
+                        if (isClosedCurve || localPathSamples.Count > 0)
+                        {
+                            for (int lpi = 0; lpi < localPathSamples.Count; lpi++)
+                            {
+                                Point2d lp = localPathSamples[lpi];
+                                try
+                                {
+                                    Point3d cpSub = sc.GetClosestPointTo(new Point3d(lp.X, lp.Y, 0.0), false);
+                                    double dSub = Math.Sqrt(Math.Pow(cpSub.X - lp.X, 2) + Math.Pow(cpSub.Y - lp.Y, 2));
+                                    if (dSub <= tol)
+                                    {
+                                        matchedPathIndex = pc.PathIndex;
+                                        try
+                                        {
+                                            Point3d cpPath = flatPath.GetClosestPointTo(new Point3d(lp.X, lp.Y, 0.0), false);
+                                            matchedDistAlongPath = flatPath.GetDistAtPoint(cpPath);
+                                        }
+                                        catch { }
+                                        return true;
+                                    }
+                                }
+                                catch { }
+
+                                if (scCircle != null)
+                                {
+                                    double dc = Math.Sqrt(Math.Pow(lp.X - scCircle.Center.X, 2) + Math.Pow(lp.Y - scCircle.Center.Y, 2));
+                                    if (dc <= scCircle.Radius + tol)
+                                    {
+                                        matchedPathIndex = pc.PathIndex;
+                                        try
+                                        {
+                                            Point3d cpPath = flatPath.GetClosestPointTo(new Point3d(lp.X, lp.Y, 0.0), false);
+                                            matchedDistAlongPath = flatPath.GetDistAtPoint(cpPath);
+                                        }
+                                        catch { }
+                                        return true;
+                                    }
+                                }
+                                else if (sc.Closed && subPts.Count >= 3 && IsPointInPolygon2D(subPts, lp.X, lp.Y))
+                                {
+                                    matchedPathIndex = pc.PathIndex;
+                                    try
+                                    {
+                                        Point3d cpPath = flatPath.GetClosestPointTo(new Point3d(lp.X, lp.Y, 0.0), false);
+                                        matchedDistAlongPath = flatPath.GetDistAtPoint(cpPath);
+                                    }
+                                    catch { }
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Closed Solid / Hatch polygons
+                    for (int pgi = 0; pgi < closedPolys.Count; pgi++)
+                    {
+                        List<Point2d> poly = closedPolys[pgi];
+                        for (int vi = 0; vi < poly.Count; vi++)
+                        {
+                            Point2d va = poly[vi];
+                            Point2d vb = poly[(vi + 1) % poly.Count];
+                            Point2d hitPt;
+                            if (DoesCurveHitPointOrSegment2D(flatPath, va, vb, tol, out hitPt))
+                            {
+                                matchedPathIndex = pc.PathIndex;
+                                try
+                                {
+                                    Point3d cpPath = flatPath.GetClosestPointTo(new Point3d(hitPt.X, hitPt.Y, 0.0), false);
+                                    matchedDistAlongPath = flatPath.GetDistAtPoint(cpPath);
+                                }
+                                catch { }
+                                return true;
+                            }
+                        }
+                        for (int lpi = 0; lpi < localPathSamples.Count; lpi++)
+                        {
+                            Point2d lp = localPathSamples[lpi];
+                            if (IsPointInPolygon2D(poly, lp.X, lp.Y))
+                            {
+                                matchedPathIndex = pc.PathIndex;
+                                try
+                                {
+                                    Point3d cpPath = flatPath.GetClosestPointTo(new Point3d(lp.X, lp.Y, 0.0), false);
+                                    matchedDistAlongPath = flatPath.GetDistAtPoint(cpPath);
+                                }
+                                catch { }
+                                return true;
+                            }
+                        }
+                    }
+
+                    // 3. Fallback when block has no vector Curve/Hatch/Solid geometry
+                    if (subCurves.Count == 0 && closedPolys.Count == 0)
+                    {
+                        if (fallbackExtents.Count == 0) fallbackExtents.Add(blockExt);
+                        for (int fi = 0; fi < fallbackExtents.Count; fi++)
+                        {
+                            Extents3d fx = fallbackExtents[fi];
+                            List<Point2d> boxPoly = new List<Point2d>
+                            {
+                                new Point2d(fx.MinPoint.X, fx.MinPoint.Y),
+                                new Point2d(fx.MaxPoint.X, fx.MinPoint.Y),
+                                new Point2d(fx.MaxPoint.X, fx.MaxPoint.Y),
+                                new Point2d(fx.MinPoint.X, fx.MaxPoint.Y)
+                            };
+                            for (int vi = 0; vi < 4; vi++)
+                            {
+                                Point2d hitPt;
+                                if (DoesCurveHitPointOrSegment2D(flatPath, boxPoly[vi], boxPoly[(vi + 1) % 4], tol, out hitPt))
+                                {
+                                    matchedPathIndex = pc.PathIndex;
+                                    try
+                                    {
+                                        Point3d cpPath = flatPath.GetClosestPointTo(new Point3d(hitPt.X, hitPt.Y, 0.0), false);
+                                        matchedDistAlongPath = flatPath.GetDistAtPoint(cpPath);
+                                    }
+                                    catch { }
+                                    return true;
+                                }
+                            }
+                            for (int lpi = 0; lpi < localPathSamples.Count; lpi++)
+                            {
+                                Point2d lp = localPathSamples[lpi];
+                                if (lp.X >= fx.MinPoint.X - tol && lp.X <= fx.MaxPoint.X + tol &&
+                                    lp.Y >= fx.MinPoint.Y - tol && lp.Y <= fx.MaxPoint.Y + tol)
+                                {
+                                    matchedPathIndex = pc.PathIndex;
+                                    try
+                                    {
+                                        Point3d cpPath = flatPath.GetClosestPointTo(new Point3d(lp.X, lp.Y, 0.0), false);
+                                        matchedDistAlongPath = flatPath.GetDistAtPoint(cpPath);
+                                    }
+                                    catch { }
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                for (int i = 0; i < subCurves.Count; i++)
+                {
+                    try { if (subCurves[i] != null) subCurves[i].Dispose(); } catch { }
+                }
+            }
+            return false;
+        }
+
+        private static Dictionary<string, object> FindBlocksAlongPath(Document doc, Dictionary<string, object> args)
+        {
+            Database db = doc.Database;
+            List<string> explicitHandles = GetStringList(args, "handles");
+            double? explicitTolerance = GetNullableDouble(args, "tolerance");
+            string blockFilter = GetStr(args, "block_name");
+            string layerFilter = GetStr(args, "layer_filter") ?? GetStr(args, "layer");
+            bool visibleOnly = GetBool(args, "visible_only", true);
+            bool includeAnonymous = GetBool(args, "include_anonymous", false);
+            bool includeSystem = GetBool(args, "include_system", false);
+            bool selectBlocks = GetBool(args, "select_blocks", true);
+            bool drawLegend = GetBool(args, "draw_legend", true);
+            bool usePreviousPath = GetBool(args, "use_previous_path", false);
+            bool pickIfEmpty = GetBool(args, "pick_if_empty", true);
+            bool zoom = GetBool(args, "zoom", true);
+            string zoomMode = (GetStr(args, "zoom_mode") ?? "auto").Trim().ToLowerInvariant();
+            string title = GetStr(args, "title");
+            if (string.IsNullOrWhiteSpace(title))
+                title = "جدول حصر ومفاتيح بلوكات المسار المحدد (PATH BLOCK LEGEND)";
+            string legendPosition = GetStr(args, "position") ?? "outside_right";
+
+            double unitsPerM = Convert.ToDouble(GetUnitsInfo(db)["units_per_m"], CultureInfo.InvariantCulture);
+            if (unitsPerM <= 1e-9) unitsPerM = 1000.0;
+
+            List<string> candidateHandles = new List<string>();
+            if (explicitHandles.Count > 0)
+            {
+                candidateHandles.AddRange(explicitHandles);
+            }
+            else
+            {
+                List<string> liveSel = GetSelectedHandleStrings(doc);
+                candidateHandles.AddRange(liveSel);
+            }
+
+            List<ObjectId> pathCurveIds = new List<ObjectId>();
+            List<string> pathHandles = new List<string>();
+
+            using (DocumentLock docLock = doc.LockDocument())
+            {
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    foreach (string h in candidateHandles)
+                    {
+                        ObjectId oid = ResolveHandle(db, h);
+                        if (oid.IsNull || oid.IsErased) continue;
+                        Entity ent = tr.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ent is Curve && !pathCurveIds.Contains(oid))
+                        {
+                            pathCurveIds.Add(oid);
+                            pathHandles.Add(ent.Handle.ToString());
+                        }
+                    }
+
+                    if (pathCurveIds.Count == 0 && usePreviousPath)
+                    {
+                        List<string> prevCurves = GetValidCachedUserCurveHandles(db);
+                        foreach (string h in prevCurves)
+                        {
+                            ObjectId oid = ResolveHandle(db, h);
+                            if (oid.IsNull || oid.IsErased) continue;
+                            Entity ent = tr.GetObject(oid, OpenMode.ForRead) as Entity;
+                            if (ent is Curve && !pathCurveIds.Contains(oid))
+                            {
+                                pathCurveIds.Add(oid);
+                                pathHandles.Add(ent.Handle.ToString());
+                            }
+                        }
+                    }
+                    tr.Commit();
+                }
+
+                if (pathCurveIds.Count == 0 && pickIfEmpty)
+                {
+                    int cmdActive = 0;
+                    try { cmdActive = Convert.ToInt32(Application.GetSystemVariable("CMDACTIVE"), CultureInfo.InvariantCulture); } catch { }
+                    if (cmdActive != 0)
+                        return Err("يوجد أمر نشط داخل أوتوكاد حالياً (CMDACTIVE=" + cmdActive + "). اضغط Esc أولاً ثم حدد الخط أو المسار المطلوب.");
+
+                    try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
+                    catch { try { doc.Window.Focus(); } catch { } }
+
+                    PromptSelectionOptions pso = new PromptSelectionOptions();
+                    pso.MessageForAdding = "\n[AI-Engineer] اختر الخط أو الكيبل (Line/Polyline/Arc) لتحديد وحصر البلوكات التي يمر عليها: ";
+                    SelectionFilter sf = new SelectionFilter(new TypedValue[]
+                    {
+                        new TypedValue((int)DxfCode.Start, "LINE,LWPOLYLINE,POLYLINE,ARC,CIRCLE,ELLIPSE,SPLINE")
+                    });
+                    PromptSelectionResult psr = doc.Editor.GetSelection(pso, sf);
+                    if (psr != null && psr.Status == PromptStatus.OK && psr.Value != null)
+                    {
+                        using (Transaction tr = db.TransactionManager.StartTransaction())
+                        {
+                            foreach (SelectedObject so in psr.Value)
+                            {
+                                if (so == null || so.ObjectId.IsNull || so.ObjectId.IsErased) continue;
+                                Entity ent = tr.GetObject(so.ObjectId, OpenMode.ForRead) as Entity;
+                                if (ent is Curve && !pathCurveIds.Contains(so.ObjectId))
+                                {
+                                    pathCurveIds.Add(so.ObjectId);
+                                    pathHandles.Add(ent.Handle.ToString());
+                                }
+                            }
+                            tr.Commit();
+                        }
+                    }
+                }
+            }
+
+            if (pathCurveIds.Count == 0)
+            {
+                List<string> prevCurves = GetValidCachedUserCurveHandles(db);
+                if (prevCurves.Count > 0)
+                    return Err("لم يتم تحديد أي خط أو مسار (Line/Polyline) حالياً، لكن يوجد مسار سابق محفوظ (" + string.Join(",", prevCurves.ToArray()) + "). مرر use_previous_path=true أو حدد الخط في أوتوكاد.");
+                return Err("لم يتم تحديد أي خط أو مسار (Line/Polyline/Arc) في أوتوكاد. حدد الخط/الكابل أولاً ثم أعد المحاولة.");
+            }
+
+            RecordUserSelectionSnapshot(doc, pathHandles);
+
+            List<PathCurveCandidate> pathCandidates = new List<PathCurveCandidate>();
+            List<PathBlockMatchItem> matchedItems = new List<PathBlockMatchItem>();
+            Dictionary<string, int> countsByBlock = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            double totalPathLenUnits = 0.0;
+            Extents3d? selectedAndPathExt = null;
+            bool switchedToModel = false;
+
+            using (DocumentLock docLock = doc.LockDocument())
+            {
+                if ((selectBlocks || zoom) && !db.TileMode)
+                {
+                    try { LayoutManager.Current.CurrentLayout = "Model"; switchedToModel = true; } catch { }
+                }
+
+                try
+                {
+                    using (Transaction tr = db.TransactionManager.StartTransaction())
+                    {
+                        Dictionary<string, bool> layerHiddenFlags = BuildLayerHiddenMap(db, tr);
+                        HashSet<ObjectId> pathIdSet = new HashSet<ObjectId>(pathCurveIds);
+
+                        for (int i = 0; i < pathCurveIds.Count; i++)
+                        {
+                            Curve srcCurve = tr.GetObject(pathCurveIds[i], OpenMode.ForRead) as Curve;
+                            if (srcCurve == null || srcCurve.IsErased) continue;
+                            Curve flat = FlattenCurveToXY(srcCurve);
+                            if (flat == null) continue;
+
+                            double cLen = 0.0;
+                            try { cLen = srcCurve.GetDistanceAtParameter(srcCurve.EndParam) - srcCurve.GetDistanceAtParameter(srcCurve.StartParam); }
+                            catch { cLen = 0.0; }
+                            totalPathLenUnits += cLen;
+
+                            Extents3d pex;
+                            try { pex = flat.GeometricExtents; }
+                            catch
+                            {
+                                try { pex = srcCurve.GeometricExtents; }
+                                catch { flat.Dispose(); continue; }
+                            }
+                            if (!IsFiniteBounds(pex)) { flat.Dispose(); continue; }
+
+                            if (!selectedAndPathExt.HasValue) selectedAndPathExt = pex;
+                            else { Extents3d c = selectedAndPathExt.Value; c.AddExtents(pex); selectedAndPathExt = c; }
+
+                            pathCandidates.Add(new PathCurveCandidate
+                            {
+                                PathIndex = i,
+                                Handle = srcCurve.Handle.ToString(),
+                                FlatCurve = flat,
+                                MinX = pex.MinPoint.X,
+                                MinY = pex.MinPoint.Y,
+                                MaxX = pex.MaxPoint.X,
+                                MaxY = pex.MaxPoint.Y,
+                                Length = cLen,
+                                Samples = SampleCurvePoints2D(flat, 24)
+                            });
+                        }
+
+                        if (pathCandidates.Count == 0)
+                        {
+                            tr.Commit();
+                            return Err("تعذر قراءة الهندسة ثنائية الأبعاد للخط المحدد.");
+                        }
+
+                        BlockTableRecord ms = (BlockTableRecord)tr.GetObject(
+                            SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+
+                        foreach (ObjectId mid in ms)
+                        {
+                            if (mid.IsErased || pathIdSet.Contains(mid)) continue;
+                            Entity ent = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                            BlockReference br = ent as BlockReference;
+                            if (br == null || ent.IsErased) continue;
+                            if (IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer)) continue;
+                            if (visibleOnly && !IsEntityVisible(ent, layerHiddenFlags)) continue;
+                            if (!string.IsNullOrWhiteSpace(layerFilter) && !MatchesPatternOrSubstring(ent.Layer ?? "", layerFilter)) continue;
+
+                            string bn = ResolveBlockName(tr, br);
+                            if (string.IsNullOrEmpty(bn)) continue;
+                            if (!includeAnonymous && IsAnonymousBlockName(bn)) continue;
+                            if (!includeSystem && (IsSystemBlockName(bn) || string.Equals(ent.Layer, "ASHADE", StringComparison.OrdinalIgnoreCase))) continue;
+                            if (!string.IsNullOrWhiteSpace(blockFilter) &&
+                                !string.Equals(bn, blockFilter.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                                !MatchesPatternOrSubstring(bn, blockFilter))
+                                continue;
+
+                            Extents3d bex;
+                            try { bex = br.GeometricExtents; }
+                            catch { continue; }
+                            if (!IsFiniteBounds(bex)) continue;
+
+                            double bw = Math.Max(0.0, bex.MaxPoint.X - bex.MinPoint.X);
+                            double bh = Math.Max(0.0, bex.MaxPoint.Y - bex.MinPoint.Y);
+                            double blockSpan = Math.Max(bw, bh);
+                            double tol = explicitTolerance.HasValue
+                                ? Math.Max(1e-5, explicitTolerance.Value)
+                                : Math.Max(1e-4, Math.Min(blockSpan * 0.04, Math.Max(1e-3, blockSpan * 0.08)));
+
+                            int hitPathIdx;
+                            double hitDist;
+                            if (!DoesPathHitBlockXY(pathCandidates, br, bex, tol, out hitPathIdx, out hitDist))
+                                continue;
+
+                            double cx = (bex.MinPoint.X + bex.MaxPoint.X) * 0.5;
+                            double cy = (bex.MinPoint.Y + bex.MaxPoint.Y) * 0.5;
+
+                            matchedItems.Add(new PathBlockMatchItem
+                            {
+                                Id = mid,
+                                Handle = ent.Handle.ToString(),
+                                BlockName = bn,
+                                Layer = ent.Layer ?? "0",
+                                ColorIndex = ent.ColorIndex,
+                                X = cx,
+                                Y = cy,
+                                PathIndex = hitPathIdx,
+                                DistanceAlongPath = hitDist,
+                                Bounds = bex
+                            });
+                            countsByBlock[bn] = countsByBlock.ContainsKey(bn) ? countsByBlock[bn] + 1 : 1;
+
+                            if (!selectedAndPathExt.HasValue) selectedAndPathExt = bex;
+                            else { Extents3d c = selectedAndPathExt.Value; c.AddExtents(bex); selectedAndPathExt = c; }
+                        }
+                        tr.Commit();
+                    }
+                }
+                finally
+                {
+                    for (int i = 0; i < pathCandidates.Count; i++)
+                    {
+                        try { if (pathCandidates[i].FlatCurve != null) pathCandidates[i].FlatCurve.Dispose(); } catch { }
+                    }
+                }
+
+                matchedItems.Sort(delegate(PathBlockMatchItem a, PathBlockMatchItem b)
+                {
+                    int c = a.PathIndex.CompareTo(b.PathIndex);
+                    if (c != 0) return c;
+                    c = a.DistanceAlongPath.CompareTo(b.DistanceAlongPath);
+                    return c != 0 ? c : string.Compare(a.Handle, b.Handle, StringComparison.Ordinal);
+                });
+
+                List<string> matchedHandles = new List<string>(matchedItems.Count);
+                List<ObjectId> matchedIds = new List<ObjectId>(matchedItems.Count);
+                List<object> matchedDetails = new List<object>();
+                for (int i = 0; i < matchedItems.Count; i++)
+                {
+                    PathBlockMatchItem m = matchedItems[i];
+                    matchedHandles.Add(m.Handle);
+                    matchedIds.Add(m.Id);
+                    if (matchedDetails.Count < 200)
+                    {
+                        matchedDetails.Add(new Dictionary<string, object>
+                        {
+                            { "order_along_path", i + 1 },
+                            { "handle", m.Handle },
+                            { "block_name", m.BlockName },
+                            { "layer", m.Layer },
+                            { "x", Round(m.X) },
+                            { "y", Round(m.Y) },
+                            { "distance_along_path", Round(m.DistanceAlongPath) }
+                        });
+                    }
+                }
+
+                Dictionary<string, object> legendResult = null;
+                Extents3d? legendExt = null;
+                if (drawLegend && matchedHandles.Count > 0)
+                {
+                    Dictionary<string, object> legendArgs = new Dictionary<string, object>
+                    {
+                        { "handles", matchedHandles.ToArray() },
+                        { "title", title },
+                        { "footer_label", "إجمالي البلوكات على المسار المحدد (Total Blocks)" },
+                        { "position", legendPosition },
+                        { "visible_only", visibleOnly },
+                        { "include_system_blocks", includeSystem },
+                        { "include_anonymous", includeAnonymous },
+                        { "replace_existing", GetBool(args, "replace_existing", true) },
+                        { "export_excel", GetBool(args, "export_excel", false) },
+                        { "zoom", false }
+                    };
+                    if (args.ContainsKey("descriptions")) legendArgs["descriptions"] = args["descriptions"];
+                    if (args.ContainsKey("clear_layers")) legendArgs["clear_layers"] = args["clear_layers"];
+                    if (args.ContainsKey("clear_handles")) legendArgs["clear_handles"] = args["clear_handles"];
+                    if (args.ContainsKey("layer")) legendArgs["layer"] = args["layer"];
+                    if (args.ContainsKey("gap")) legendArgs["gap"] = args["gap"];
+                    if (args.ContainsKey("excel_path")) legendArgs["excel_path"] = args["excel_path"];
+
+                    legendResult = DrawBlockLegend(doc, legendArgs);
+                    if (legendResult != null && legendResult.ContainsKey("legend_bounds"))
+                    {
+                        double[] lb = GetDoubleArray(legendResult, "legend_bounds");
+                        if (lb != null && lb.Length >= 4)
+                            legendExt = new Extents3d(new Point3d(lb[0], lb[1], 0.0), new Point3d(lb[2], lb[3], 0.0));
+                    }
+                }
+
+                if (zoom)
+                {
+                    string effectiveZoom = zoomMode;
+                    if (effectiveZoom == "auto")
+                        effectiveZoom = (drawLegend && legendExt.HasValue) ? "legend" : "selected";
+
+                    if (effectiveZoom == "both" && selectedAndPathExt.HasValue && legendExt.HasValue)
+                    {
+                        Extents3d both = selectedAndPathExt.Value;
+                        both.AddExtents(legendExt.Value);
+                        ZoomToExtents3d(doc, both, 1.12);
+                    }
+                    else if (effectiveZoom == "selected" && selectedAndPathExt.HasValue)
+                    {
+                        ZoomToExtents3d(doc, selectedAndPathExt.Value, 1.25);
+                    }
+                    else if (legendExt.HasValue)
+                    {
+                        ZoomToExtents3d(doc, legendExt.Value, 1.18);
+                    }
+                    else if (selectedAndPathExt.HasValue)
+                    {
+                        ZoomToExtents3d(doc, selectedAndPathExt.Value, 1.25);
+                    }
+                }
+
+                try { Application.SetSystemVariable("PICKFIRST", 1); } catch { }
+                if (selectBlocks && matchedIds.Count > 0)
+                {
+                    doc.Editor.SetImpliedSelection(matchedIds.ToArray());
+                }
+                doc.Editor.UpdateScreen();
+
+                Dictionary<string, object> res = new Dictionary<string, object>
+                {
+                    { "path_curves_count", pathCurveIds.Count },
+                    { "path_handles", pathHandles },
+                    { "total_path_length_m", Math.Round(totalPathLenUnits / unitsPerM, 3) },
+                    { "matched_blocks_count", matchedItems.Count },
+                    { "block_types_count", countsByBlock.Count },
+                    { "counts_by_block", countsByBlock },
+                    { "matched_handles", matchedHandles },
+                    { "matched_blocks", matchedDetails },
+                    { "selected_in_autocad", selectBlocks && matchedIds.Count > 0 },
+                    { "legend_drawn", legendResult != null && legendResult.ContainsKey("ok") && legendResult["ok"] is bool && (bool)legendResult["ok"] },
+                    { "switched_to_model", switchedToModel }
+                };
+                if (selectedAndPathExt.HasValue)
+                {
+                    res["selected_bounds"] = new double[]
+                    {
+                        Round(selectedAndPathExt.Value.MinPoint.X), Round(selectedAndPathExt.Value.MinPoint.Y),
+                        Round(selectedAndPathExt.Value.MaxPoint.X), Round(selectedAndPathExt.Value.MaxPoint.Y)
+                    };
+                }
+                if (legendResult != null)
+                {
+                    if (legendResult.ContainsKey("legend_bounds")) res["legend_bounds"] = legendResult["legend_bounds"];
+                    if (legendResult.ContainsKey("rows")) res["legend_rows"] = legendResult["rows"];
+                    if (legendResult.ContainsKey("layer")) res["legend_layer"] = legendResult["layer"];
+                    if (legendResult.ContainsKey("excel_exported")) res["excel_exported"] = legendResult["excel_exported"];
+                    if (legendResult.ContainsKey("excel_path")) res["excel_path"] = legendResult["excel_path"];
+                }
+                if (matchedItems.Count == 0)
+                    res["note"] = "لم يتقاطع الخط المحدد مع أي بلوكات مطابقة في المخطط (تم الحفاظ على اختيار الخط الأصلي).";
+                return Ok(res);
+            }
         }
     }
 }
