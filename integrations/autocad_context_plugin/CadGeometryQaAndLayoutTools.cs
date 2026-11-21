@@ -10,6 +10,7 @@ using Autodesk.AutoCAD.ApplicationServices;
 using AcadApp = Autodesk.AutoCAD.ApplicationServices.Application;
 using Autodesk.AutoCAD.Colors;
 using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.PlottingServices;
 
@@ -1474,11 +1475,11 @@ namespace AIEngineer.AutoCAD
         private sealed class ArrowShaftCandidate
         {
             public ObjectId PrimaryId;
-            public ObjectId MergedSecondLineId;
+            public List<ObjectId> ExtraErasedIds = new List<ObjectId>();
             public string Handle;
             public string Layer;
             public Autodesk.AutoCAD.Colors.Color SourceColor;
-            public short ColorIndex;
+            public int ColorKey;
             public List<Point3d> Pts;
             public double StartSegW0;
             public double StartSegW1;
@@ -1486,13 +1487,19 @@ namespace AIEngineer.AutoCAD
             public double EndSegW1;
             public bool IsOnCalloutLayer;
             public bool HasTaperedWidth;
+            public bool IsRawLineSegment;
+            public double TotalLength;
         }
 
         private sealed class ArrowHeadShape
         {
-            public ObjectId Id;
+            public ObjectId PrimaryId;
+            public List<ObjectId> ComponentIds = new List<ObjectId>();
+            public string Kind;
+            public string Layer;
             public Point2d Center;
-            public List<Point2d> Vertices;
+            public List<Point2d> Vertices = new List<Point2d>();
+            public Point2d? PreferredApex;
             public double Span;
         }
 
@@ -1555,10 +1562,85 @@ namespace AIEngineer.AutoCAD
             return len > 1e-6 && dx > 1e-6 && dy <= Math.Max(1e-5, dx * 0.08);
         }
 
+        private static int ComputeColorKey(Entity ent)
+        {
+            if (ent == null || ent.Color == null) return 256;
+            if (ent.Color.ColorMethod == ColorMethod.ByLayer) return 256;
+            if (ent.Color.ColorMethod == ColorMethod.ByBlock) return 0;
+            if (ent.Color.ColorMethod == ColorMethod.ByColor)
+                return (1 << 24) | (ent.Color.Red << 16) | (ent.Color.Green << 8) | ent.Color.Blue;
+            return ent.ColorIndex;
+        }
+
+        private static string FormatNumberMatchingDecimals(double val, string origToken, int defaultDecimals)
+        {
+            int dec = defaultDecimals;
+            if (!string.IsNullOrEmpty(origToken))
+            {
+                int dot = origToken.IndexOf('.');
+                if (dot >= 0) dec = Math.Max(0, Math.Min(6, origToken.Length - dot - 1));
+            }
+            return val.ToString("F" + dec.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+        }
+
+        private static string UpdateCoordinateValuesInText(string rawText, double tipX, double tipY, int defaultDecimals, out bool updated)
+        {
+            updated = false;
+            if (string.IsNullOrWhiteSpace(rawText)) return rawText;
+
+            bool replacedX = false;
+            bool replacedY = false;
+
+            string step1 = Regex.Replace(
+                rawText,
+                @"(?i)(^|\\P|[^A-Za-z0-9_\\])((?:X|E)\s*(?:[:=]\s*|\s+))(-?\d+(?:\.\d+)?)",
+                delegate(Match m)
+                {
+                    replacedX = true;
+                    string fmt = FormatNumberMatchingDecimals(tipX, m.Groups[3].Value, defaultDecimals);
+                    return m.Groups[1].Value + m.Groups[2].Value + fmt;
+                });
+
+            string step2 = Regex.Replace(
+                step1,
+                @"(?i)(^|\\P|[^A-Za-z0-9_\\])((?:Y|N)\s*(?:[:=]\s*|\s+))(-?\d+(?:\.\d+)?)",
+                delegate(Match m)
+                {
+                    replacedY = true;
+                    string fmt = FormatNumberMatchingDecimals(tipY, m.Groups[3].Value, defaultDecimals);
+                    return m.Groups[1].Value + m.Groups[2].Value + fmt;
+                });
+
+            if (replacedX || replacedY)
+            {
+                updated = true;
+                return step2;
+            }
+
+            // Fallback: plain coordinate pair like "(123.45, 678.90)" or "123.45\P678.90"
+            bool pairReplaced = false;
+            string step3 = Regex.Replace(
+                rawText,
+                @"(-?\d+\.\d+)(\s*(?:,|\\P|/|;|\r?\n)\s*)(-?\d+\.\d+)",
+                delegate(Match m)
+                {
+                    pairReplaced = true;
+                    string fx = FormatNumberMatchingDecimals(tipX, m.Groups[1].Value, defaultDecimals);
+                    string fy = FormatNumberMatchingDecimals(tipY, m.Groups[3].Value, defaultDecimals);
+                    return fx + m.Groups[2].Value + fy;
+                },
+                RegexOptions.None);
+
+            updated = pairReplaced;
+            return updated ? step3 : rawText;
+        }
+
         private static Dictionary<string, object> ConvertArrowsToLeaders(Document doc, Dictionary<string, object> args)
         {
             Database db = doc.Database;
             List<string> explicitHandles = GetStringList(args, "handles");
+            bool hasExplicitMatchSimilar = args.ContainsKey("match_similar");
+            bool matchSimilar = GetBool(args, "match_similar", false);
             bool selectedOnly = GetBool(args, "selected_only", false);
             string layerFilter = GetStr(args, "layer_filter") ?? GetStr(args, "layer");
             string targetLayerOverride = GetStr(args, "target_layer");
@@ -1566,24 +1648,65 @@ namespace AIEngineer.AutoCAD
             int? overrideColor = GetNullableInt(args, "color_index");
             bool keepSource = GetBool(args, "keep_source", false);
             bool clearHighlight = GetBool(args, "clear_highlight", true);
+            bool updateCoordinates = GetBool(args, "update_coordinates", true);
+            int coordDecimals = Math.Max(0, Math.Min(6, GetInt(args, "decimals", 2)));
             bool zoom = GetBool(args, "zoom", true);
 
-            HashSet<string> targetSet = new HashSet<string>(explicitHandles, StringComparer.OrdinalIgnoreCase);
-            if (selectedOnly && targetSet.Count == 0)
+            List<string> liveSel = GetSelectedHandleStrings(doc);
+            if (!hasExplicitMatchSimilar && explicitHandles.Count == 0 && !selectedOnly && liveSel.Count > 0 && liveSel.Count <= 25)
             {
-                List<string> sel = GetSelectedHandleStrings(doc);
-                for (int i = 0; i < sel.Count; i++) targetSet.Add(sel[i]);
-                if (targetSet.Count == 0)
-                    return Err("لا توجد أسهم محددة في أوتوكاد حالياً (selected_only=true). حدد الأسهم أو أزل selected_only لتحويل كل الأسهم المرسومة.");
+                // Engineer selected a small sample in AutoCAD and asked to convert all arrows like it
+                matchSimilar = true;
             }
-            bool restrictToExplicitSet = targetSet.Count > 0;
+            if (matchSimilar && explicitHandles.Count == 0 && liveSel.Count == 0)
+            {
+                using (DocumentLock pickLock = doc.LockDocument())
+                {
+                    int cmdActive = 0;
+                    try { cmdActive = Convert.ToInt32(AcadApp.GetSystemVariable("CMDACTIVE"), CultureInfo.InvariantCulture); } catch { }
+                    if (cmdActive == 0)
+                    {
+                        try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
+                        catch { try { doc.Window.Focus(); } catch { } }
+                        PromptSelectionOptions pso = new PromptSelectionOptions();
+                        pso.MessageForAdding = "\n[AI-Engineer] اختر عينة سهم واحد (الخط الأفقي + الخط المائل + رأس السهم) واضغط Enter: ";
+                        PromptSelectionResult psr = doc.Editor.GetSelection(pso);
+                        if (psr != null && psr.Status == PromptStatus.OK && psr.Value != null)
+                        {
+                            using (Transaction ptr = db.TransactionManager.StartTransaction())
+                            {
+                                foreach (SelectedObject so in psr.Value)
+                                {
+                                    if (so == null || so.ObjectId.IsNull || so.ObjectId.IsErased) continue;
+                                    Entity pe = ptr.GetObject(so.ObjectId, OpenMode.ForRead) as Entity;
+                                    if (pe != null) liveSel.Add(pe.Handle.ToString());
+                                }
+                                ptr.Commit();
+                            }
+                        }
+                    }
+                }
+                if (liveSel.Count == 0)
+                    return Err("لم يتم تحديد عينة السهم في أوتوكاد. اختر أجزاء سهم واحد (الخط الأفقي + الخط المائل + رأس السهم) وأعد المحاولة.");
+            }
+
+            HashSet<string> targetSet = new HashSet<string>(explicitHandles, StringComparer.OrdinalIgnoreCase);
+            if ((selectedOnly || matchSimilar) && targetSet.Count == 0)
+            {
+                for (int i = 0; i < liveSel.Count; i++) targetSet.Add(liveSel[i]);
+                if (targetSet.Count == 0)
+                    return Err("لا توجد أسهم محددة في أوتوكاد حالياً. حدد السهم/العينة أولاً ثم أعد المحاولة.");
+            }
+            bool restrictToExplicitSet = (targetSet.Count > 0) && !matchSimilar;
 
             List<ObjectId> createdIds = new List<ObjectId>();
             List<ObjectId> erasedIds = new List<ObjectId>();
             List<string> createdHandles = new List<string>();
             List<object> convertedDetails = new List<object>();
+            Dictionary<ObjectId, ModifiedEntitySnapshot> modifiedSnapshots = new Dictionary<ObjectId, ModifiedEntitySnapshot>();
             int alreadyLeaderCount = 0;
             int highlightErasedCount = 0;
+            int coordsUpdatedCount = 0;
             Extents3d? convertedExt = null;
             Extents3d? drawingExt = null;
             bool switchedToModel = false;
@@ -1606,7 +1729,7 @@ namespace AIEngineer.AutoCAD
                     List<ArrowBlockCandidate> blocks = new List<ArrowBlockCandidate>();
                     List<ArrowShaftCandidate> rawShafts = new List<ArrowShaftCandidate>();
                     List<ObjectId> highlightIds = new List<ObjectId>();
-                    List<double> candidateSpans = new List<double>();
+                    HashSet<ObjectId> initialSampleIds = new HashSet<ObjectId>();
 
                     foreach (ObjectId mid in ms)
                     {
@@ -1620,6 +1743,9 @@ namespace AIEngineer.AutoCAD
                             continue;
                         }
                         if (IsTableOrTemporaryLayer(ent.Layer)) continue;
+
+                        if (targetSet.Contains(ent.Handle.ToString()))
+                            initialSampleIds.Add(mid);
 
                         try
                         {
@@ -1717,11 +1843,59 @@ namespace AIEngineer.AutoCAD
                                         : 0.0;
                                     headShapes.Add(new ArrowHeadShape
                                     {
-                                        Id = mid,
+                                        PrimaryId = mid,
+                                        ComponentIds = new List<ObjectId> { mid },
+                                        Kind = "solid",
+                                        Layer = ent.Layer ?? "0",
                                         Center = new Point2d(sx / vpts.Count, sy / vpts.Count),
                                         Vertices = vpts,
                                         Span = sSpan
                                     });
+                                }
+                            }
+                            catch { }
+                            continue;
+                        }
+
+                        Hatch ht = ent as Hatch;
+                        if (ht != null)
+                        {
+                            try
+                            {
+                                Extents3d hex = ht.GeometricExtents;
+                                if (IsFiniteBounds(hex))
+                                {
+                                    double hSpan = Math.Max(hex.MaxPoint.X - hex.MinPoint.X, hex.MaxPoint.Y - hex.MinPoint.Y);
+                                    if (hSpan > 1e-6 && ht.NumberOfLoops >= 1)
+                                    {
+                                        HatchLoop loop = ht.GetLoopAt(0);
+                                        List<Point2d> vpts = new List<Point2d>();
+                                        if (loop.IsPolyline && loop.Polyline != null)
+                                        {
+                                            for (int vi = 0; vi < loop.Polyline.Count; vi++)
+                                                vpts.Add(loop.Polyline[vi].Vertex);
+                                        }
+                                        else if (loop.Curves != null)
+                                        {
+                                            foreach (Curve2d c2 in loop.Curves)
+                                                vpts.Add(c2.StartPoint);
+                                        }
+                                        if (vpts.Count >= 3 && vpts.Count <= 6)
+                                        {
+                                            double sx = 0, sy = 0;
+                                            for (int vi = 0; vi < vpts.Count; vi++) { sx += vpts[vi].X; sy += vpts[vi].Y; }
+                                            headShapes.Add(new ArrowHeadShape
+                                            {
+                                                PrimaryId = mid,
+                                                ComponentIds = new List<ObjectId> { mid },
+                                                Kind = "hatch",
+                                                Layer = ent.Layer ?? "0",
+                                                Center = new Point2d(sx / vpts.Count, sy / vpts.Count),
+                                                Vertices = vpts,
+                                                Span = hSpan
+                                            });
+                                        }
+                                    }
                                 }
                             }
                             catch { }
@@ -1752,14 +1926,16 @@ namespace AIEngineer.AutoCAD
                                         }
                                         headShapes.Add(new ArrowHeadShape
                                         {
-                                            Id = mid,
+                                            PrimaryId = mid,
+                                            ComponentIds = new List<ObjectId> { mid },
+                                            Kind = "poly_triangle",
+                                            Layer = ent.Layer ?? "0",
                                             Center = new Point2d(sx / 3.0, sy / 3.0),
                                             Vertices = vpts,
                                             Span = pSpan
                                         });
                                         if (restrictToExplicitSet && !targetSet.Contains(ent.Handle.ToString()))
                                             continue;
-                                        // If not explicitly selected, keep as arrowhead candidate rather than shaft
                                         if (!restrictToExplicitSet) continue;
                                     }
                                 }
@@ -1862,23 +2038,23 @@ namespace AIEngineer.AutoCAD
                         double totalLen = 0.0;
                         for (int vi = 1; vi < pts.Count; vi++) totalLen += pts[vi - 1].DistanceTo(pts[vi]);
                         if (totalLen <= 1e-6) continue;
-                        candidateSpans.Add(totalLen);
 
                         rawShafts.Add(new ArrowShaftCandidate
                         {
                             PrimaryId = mid,
-                            MergedSecondLineId = ObjectId.Null,
                             Handle = hStr,
                             Layer = ent.Layer ?? "0",
                             SourceColor = ent.Color,
-                            ColorIndex = (short)ent.ColorIndex,
+                            ColorKey = ComputeColorKey(ent),
                             Pts = pts,
                             StartSegW0 = sw0,
                             StartSegW1 = sw1,
                             EndSegW0 = ew0,
                             EndSegW1 = ew1,
                             IsOnCalloutLayer = IsDedicatedCalloutLayerName(ent.Layer),
-                            HasTaperedWidth = hasTaper
+                            HasTaperedWidth = hasTaper,
+                            IsRawLineSegment = (pts.Count == 2),
+                            TotalLength = totalLen
                         });
                     }
 
@@ -1886,77 +2062,296 @@ namespace AIEngineer.AutoCAD
                         ? Math.Max(1.0, Math.Max(drawingExt.Value.MaxPoint.X - drawingExt.Value.MinPoint.X,
                                                  drawingExt.Value.MaxPoint.Y - drawingExt.Value.MinPoint.Y))
                         : 1000.0;
-                    double headAttachTol = Math.Max(1e-3, dwgSpan * 0.008);
 
-                    // Merge exploded diagonal pointer Line + horizontal shelf Line sharing a junction under text
-                    HashSet<int> consumedShaftIndices = new HashSet<int>();
+                    // 1b. If sample was selected, learn sample layers/colors/head-sizes and absorb touching head/shelf parts
+                    HashSet<string> sampleLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    HashSet<int> sampleColors = new HashSet<int>();
+                    HashSet<string> sampleHeadKinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    double sampleHeadSpanSum = 0.0;
+                    int sampleHeadSpanCount = 0;
+                    bool sampleHasShelfOrMulti = false;
+                    bool sampleHasTaper = false;
+
+                    if (matchSimilar && initialSampleIds.Count > 0)
+                    {
+                        for (int i = 0; i < rawShafts.Count; i++)
+                        {
+                            if (!initialSampleIds.Contains(rawShafts[i].PrimaryId)) continue;
+                            sampleLayers.Add(rawShafts[i].Layer);
+                            sampleColors.Add(rawShafts[i].ColorKey);
+                            if (rawShafts[i].HasTaperedWidth) sampleHasTaper = true;
+                            if (rawShafts[i].Pts.Count >= 3 || IsHorizontalSegment2D(rawShafts[i].Pts[0], rawShafts[i].Pts[rawShafts[i].Pts.Count - 1]))
+                                sampleHasShelfOrMulti = true;
+                        }
+                        for (int i = 0; i < headShapes.Count; i++)
+                        {
+                            if (!initialSampleIds.Contains(headShapes[i].PrimaryId)) continue;
+                            sampleLayers.Add(headShapes[i].Layer);
+                            sampleHeadKinds.Add(headShapes[i].Kind);
+                            sampleHeadSpanSum += headShapes[i].Span;
+                            sampleHeadSpanCount++;
+                        }
+                    }
+
+                    // 2. Detect 2-Line Chevron & 3-Line Triangle arrowheads among short 2-pt segments BEFORE shaft merging
+                    double maxHeadSegLen = (sampleHeadSpanCount > 0)
+                        ? Math.Max(dwgSpan * 0.025, (sampleHeadSpanSum / sampleHeadSpanCount) * 3.5)
+                        : Math.Max(1.0, dwgSpan * 0.035);
+                    HashSet<int> consumedAsHeadSeg = new HashSet<int>();
+
                     for (int i = 0; i < rawShafts.Count; i++)
                     {
-                        if (consumedShaftIndices.Contains(i)) continue;
-                        ArrowShaftCandidate a = rawShafts[i];
+                        if (consumedAsHeadSeg.Contains(i)) continue;
+                        ArrowShaftCandidate s1 = rawShafts[i];
+                        if (!s1.IsRawLineSegment || s1.TotalLength > maxHeadSegLen) continue;
+                        if (matchSimilar && sampleLayers.Count > 0 && !sampleLayers.Contains(s1.Layer)) continue;
+
+                        double snap1 = Math.Max(1e-4, s1.TotalLength * 0.06);
+                        Point3d a1 = s1.Pts[0], b1 = s1.Pts[1];
+
+                        for (int j = i + 1; j < rawShafts.Count; j++)
+                        {
+                            if (consumedAsHeadSeg.Contains(j)) continue;
+                            ArrowShaftCandidate s2 = rawShafts[j];
+                            if (!s2.IsRawLineSegment || s2.TotalLength > maxHeadSegLen) continue;
+                            if (!string.Equals(s1.Layer, s2.Layer, StringComparison.OrdinalIgnoreCase)) continue;
+                            double lenRatio = s1.TotalLength / Math.Max(1e-9, s2.TotalLength);
+                            if (lenRatio < 0.45 || lenRatio > 2.25) continue;
+
+                            Point3d a2 = s2.Pts[0], b2 = s2.Pts[1];
+                            double jt = Math.Max(snap1, s2.TotalLength * 0.06);
+                            Point3d apex = Point3d.Origin, open1 = Point3d.Origin, open2 = Point3d.Origin;
+                            bool shareApex = false;
+                            if (a1.DistanceTo(a2) <= jt) { apex = a1; open1 = b1; open2 = b2; shareApex = true; }
+                            else if (a1.DistanceTo(b2) <= jt) { apex = a1; open1 = b1; open2 = a2; shareApex = true; }
+                            else if (b1.DistanceTo(a2) <= jt) { apex = b1; open1 = a1; open2 = b2; shareApex = true; }
+                            else if (b1.DistanceTo(b2) <= jt) { apex = b1; open1 = a1; open2 = a2; shareApex = true; }
+                            if (!shareApex) continue;
+
+                            Vector3d v1 = (open1 - apex);
+                            Vector3d v2 = (open2 - apex);
+                            if (v1.Length <= 1e-6 || v2.Length <= 1e-6) continue;
+                            double cosA = Math.Max(-1.0, Math.Min(1.0, v1.GetNormal().DotProduct(v2.GetNormal())));
+                            double angDeg = Math.Acos(cosA) * (180.0 / Math.PI);
+                            if (angDeg < 8.0 || angDeg > 105.0) continue;
+
+                            // Check if a 3rd short segment closes the base triangle open1 -> open2
+                            int thirdIdx = -1;
+                            for (int k = 0; k < rawShafts.Count; k++)
+                            {
+                                if (k == i || k == j || consumedAsHeadSeg.Contains(k)) continue;
+                                ArrowShaftCandidate s3 = rawShafts[k];
+                                if (!s3.IsRawLineSegment || s3.TotalLength > maxHeadSegLen * 1.4) continue;
+                                if (!string.Equals(s1.Layer, s3.Layer, StringComparison.OrdinalIgnoreCase)) continue;
+                                double tTol = Math.Max(jt, s3.TotalLength * 0.08);
+                                if ((s3.Pts[0].DistanceTo(open1) <= tTol && s3.Pts[1].DistanceTo(open2) <= tTol) ||
+                                    (s3.Pts[1].DistanceTo(open1) <= tTol && s3.Pts[0].DistanceTo(open2) <= tTol))
+                                {
+                                    thirdIdx = k;
+                                    break;
+                                }
+                            }
+
+                            if (thirdIdx >= 0)
+                            {
+                                consumedAsHeadSeg.Add(i);
+                                consumedAsHeadSeg.Add(j);
+                                consumedAsHeadSeg.Add(thirdIdx);
+                                List<ObjectId> cids = new List<ObjectId> { s1.PrimaryId, s2.PrimaryId, rawShafts[thirdIdx].PrimaryId };
+                                double hSpan = Math.Max(apex.DistanceTo(open1), Math.Max(apex.DistanceTo(open2), open1.DistanceTo(open2)));
+                                Point2d ctr = new Point2d((apex.X + open1.X + open2.X) / 3.0, (apex.Y + open1.Y + open2.Y) / 3.0);
+                                ArrowHeadShape hsTri = new ArrowHeadShape
+                                {
+                                    PrimaryId = s1.PrimaryId,
+                                    ComponentIds = cids,
+                                    Kind = "line_triangle",
+                                    Layer = s1.Layer,
+                                    Center = ctr,
+                                    Vertices = new List<Point2d> { new Point2d(apex.X, apex.Y), new Point2d(open1.X, open1.Y), new Point2d(open2.X, open2.Y) },
+                                    PreferredApex = new Point2d(apex.X, apex.Y),
+                                    Span = hSpan
+                                };
+                                headShapes.Add(hsTri);
+                                if (initialSampleIds.Contains(s1.PrimaryId) || initialSampleIds.Contains(s2.PrimaryId) || initialSampleIds.Contains(rawShafts[thirdIdx].PrimaryId))
+                                {
+                                    sampleHeadKinds.Add("line_triangle");
+                                    sampleHeadSpanSum += hSpan;
+                                    sampleHeadSpanCount++;
+                                }
+                                break;
+                            }
+
+                            // Otherwise check if a longer shaft meets apex OR midpoint of open1..open2 along bisector
+                            Point3d baseMid = new Point3d((open1.X + open2.X) * 0.5, (open1.Y + open2.Y) * 0.5, 0.0);
+                            bool touchesShaft = false;
+                            for (int m = 0; m < rawShafts.Count; m++)
+                            {
+                                if (m == i || m == j || consumedAsHeadSeg.Contains(m)) continue;
+                                ArrowShaftCandidate shM = rawShafts[m];
+                                if (shM.TotalLength <= Math.Max(s1.TotalLength, s2.TotalLength) * 1.1) continue;
+                                Point3d m0 = shM.Pts[0];
+                                Point3d mLast = shM.Pts[shM.Pts.Count - 1];
+                                double mtol = Math.Max(jt, Math.Max(s1.TotalLength, s2.TotalLength) * 0.25);
+                                if (m0.DistanceTo(apex) <= mtol || mLast.DistanceTo(apex) <= mtol ||
+                                    m0.DistanceTo(baseMid) <= mtol || mLast.DistanceTo(baseMid) <= mtol)
+                                {
+                                    touchesShaft = true;
+                                    break;
+                                }
+                            }
+                            if (touchesShaft)
+                            {
+                                consumedAsHeadSeg.Add(i);
+                                consumedAsHeadSeg.Add(j);
+                                List<ObjectId> cids = new List<ObjectId> { s1.PrimaryId, s2.PrimaryId };
+                                double hSpan = Math.Max(apex.DistanceTo(open1), apex.DistanceTo(open2));
+                                Point2d ctr = new Point2d((apex.X + open1.X + open2.X) / 3.0, (apex.Y + open1.Y + open2.Y) / 3.0);
+                                ArrowHeadShape hsChev = new ArrowHeadShape
+                                {
+                                    PrimaryId = s1.PrimaryId,
+                                    ComponentIds = cids,
+                                    Kind = "line_chevron",
+                                    Layer = s1.Layer,
+                                    Center = ctr,
+                                    Vertices = new List<Point2d> { new Point2d(apex.X, apex.Y), new Point2d(open1.X, open1.Y), new Point2d(open2.X, open2.Y) },
+                                    PreferredApex = new Point2d(apex.X, apex.Y),
+                                    Span = hSpan
+                                };
+                                headShapes.Add(hsChev);
+                                if (initialSampleIds.Contains(s1.PrimaryId) || initialSampleIds.Contains(s2.PrimaryId))
+                                {
+                                    sampleHeadKinds.Add("line_chevron");
+                                    sampleHeadSpanSum += hSpan;
+                                    sampleHeadSpanCount++;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // Filter rawShafts removing segments already classified as arrowhead lines
+                    List<ArrowShaftCandidate> shafts = new List<ArrowShaftCandidate>();
+                    for (int i = 0; i < rawShafts.Count; i++)
+                    {
+                        if (!consumedAsHeadSeg.Contains(i))
+                            shafts.Add(rawShafts[i]);
+                    }
+
+                    double avgSampleHeadSpan = sampleHeadSpanCount > 0 ? (sampleHeadSpanSum / sampleHeadSpanCount) : 0.0;
+                    double headAttachTol = avgSampleHeadSpan > 1e-5
+                        ? Math.Max(1e-3, avgSampleHeadSpan * 1.65)
+                        : Math.Max(1e-3, dwgSpan * 0.008);
+
+                    // 3. Merge Pointer Shaft + Horizontal Shelf Shaft (endpoint join OR interior T-junction on horizontal line)
+                    HashSet<int> mergedShelfIndices = new HashSet<int>();
+                    for (int i = 0; i < shafts.Count; i++)
+                    {
+                        if (mergedShelfIndices.Contains(i)) continue;
+                        ArrowShaftCandidate a = shafts[i];
                         if (a.Pts.Count != 2) continue;
                         if (IsHorizontalSegment2D(a.Pts[0], a.Pts[1])) continue;
+                        if (matchSimilar && sampleLayers.Count > 0 && !sampleLayers.Contains(a.Layer)) continue;
 
-                        for (int j = 0; j < rawShafts.Count; j++)
+                        Point3d aStart = a.Pts[0], aEnd = a.Pts[1];
+                        int bestShelfIdx = -1;
+                        double bestJoinDist = double.MaxValue;
+                        List<Point3d> bestMergedPts = null;
+
+                        for (int j = 0; j < shafts.Count; j++)
                         {
-                            if (i == j || consumedShaftIndices.Contains(j)) continue;
-                            ArrowShaftCandidate b = rawShafts[j];
+                            if (i == j || mergedShelfIndices.Contains(j)) continue;
+                            ArrowShaftCandidate b = shafts[j];
                             if (b.Pts.Count != 2) continue;
                             if (!string.Equals(a.Layer, b.Layer, StringComparison.OrdinalIgnoreCase)) continue;
                             if (!IsHorizontalSegment2D(b.Pts[0], b.Pts[1])) continue;
 
-                            Point3d aStart = a.Pts[0], aEnd = a.Pts[1];
                             Point3d bStart = b.Pts[0], bEnd = b.Pts[1];
-                            double linkTol = Math.Max(1e-4, Math.Min(aStart.DistanceTo(aEnd), bStart.DistanceTo(bEnd)) * 0.04);
+                            double linkTol = Math.Max(1e-3, Math.Min(aStart.DistanceTo(aEnd), bStart.DistanceTo(bEnd)) * 0.09);
 
-                            Point3d tipCand = Point3d.Origin, elbowCand = Point3d.Origin, shelfEndCand = Point3d.Origin;
-                            bool matchedJoin = false;
-                            if (aEnd.DistanceTo(bStart) <= linkTol) { tipCand = aStart; elbowCand = aEnd; shelfEndCand = bEnd; matchedJoin = true; }
-                            else if (aEnd.DistanceTo(bEnd) <= linkTol) { tipCand = aStart; elbowCand = aEnd; shelfEndCand = bStart; matchedJoin = true; }
-                            else if (aStart.DistanceTo(bStart) <= linkTol) { tipCand = aEnd; elbowCand = aStart; shelfEndCand = bEnd; matchedJoin = true; }
-                            else if (aStart.DistanceTo(bEnd) <= linkTol) { tipCand = aEnd; elbowCand = aStart; shelfEndCand = bStart; matchedJoin = true; }
+                            // Check endpoint joins first, then interior T-junction on horizontal shelf b
+                            Point2d bs2 = new Point2d(bStart.X, bStart.Y);
+                            Point2d be2 = new Point2d(bEnd.X, bEnd.Y);
+                            double dAStartToB = PointToSegmentDist2D(new Point2d(aStart.X, aStart.Y), bs2, be2);
+                            double dAEndToB = PointToSegmentDist2D(new Point2d(aEnd.X, aEnd.Y), bs2, be2);
 
-                            if (!matchedJoin) continue;
+                            double minD = Math.Min(dAStartToB, dAEndToB);
+                            if (minD > linkTol || minD >= bestJoinDist) continue;
 
-                            // Confirm a text label actually sits close to shelf segment b
-                            bool textNearShelf = false;
+                            bool endMeetsShelf = (dAEndToB <= dAStartToB);
+                            Point3d tipCand = endMeetsShelf ? aStart : aEnd;
+                            Point3d joinCand = endMeetsShelf ? aEnd : aStart;
+
+                            // Project joinCand onto segment bStart..bEnd for exact elbow
+                            Vector2d bVec = be2 - bs2;
+                            double bLen2 = bVec.X * bVec.X + bVec.Y * bVec.Y;
+                            double tProj = bLen2 > 1e-12
+                                ? Math.Max(0.0, Math.Min(1.0, ((joinCand.X - bs2.X) * bVec.X + (joinCand.Y - bs2.Y) * bVec.Y) / bLen2))
+                                : 0.0;
+                            Point3d elbowCand = new Point3d(bs2.X + tProj * bVec.X, bs2.Y + tProj * bVec.Y, 0.0);
+
+                            // Pick far shelf end (if T-junction near center, pick whichever side sits under text or longer half)
+                            Point3d shelfEndCand = (elbowCand.DistanceTo(bEnd) >= elbowCand.DistanceTo(bStart)) ? bEnd : bStart;
                             for (int ti = 0; ti < texts.Count; ti++)
                             {
                                 ArrowTextCandidate tx = texts[ti];
-                                double td = Math.Min(
-                                    DistPointToBounds2D(elbowCand.X, elbowCand.Y, tx.Bounds),
-                                    DistPointToBounds2D((elbowCand.X + shelfEndCand.X) * 0.5, shelfEndCand.Y, tx.Bounds));
-                                if (td <= tx.Height * 2.2) { textNearShelf = true; break; }
+                                double dShelfMid = DistPointToBounds2D((bStart.X + bEnd.X) * 0.5, bStart.Y, tx.Bounds);
+                                if (dShelfMid <= tx.Height * 2.5)
+                                {
+                                    shelfEndCand = (tx.Cx >= elbowCand.X)
+                                        ? ((bEnd.X >= bStart.X) ? bEnd : bStart)
+                                        : ((bStart.X <= bEnd.X) ? bStart : bEnd);
+                                    break;
+                                }
                             }
-                            if (!textNearShelf && !a.IsOnCalloutLayer && !restrictToExplicitSet) continue;
 
-                            a.Pts = new List<Point3d> { tipCand, elbowCand, shelfEndCand };
-                            a.MergedSecondLineId = b.PrimaryId;
-                            consumedShaftIndices.Add(j);
-                            break;
+                            bestJoinDist = minD;
+                            bestShelfIdx = j;
+                            bestMergedPts = new List<Point3d> { tipCand, elbowCand, shelfEndCand };
+                        }
+
+                        if (bestShelfIdx >= 0 && bestMergedPts != null)
+                        {
+                            a.Pts = bestMergedPts;
+                            a.ExtraErasedIds.Add(shafts[bestShelfIdx].PrimaryId);
+                            mergedShelfIndices.Add(bestShelfIdx);
+                            sampleHasShelfOrMulti = sampleHasShelfOrMulti ||
+                                initialSampleIds.Contains(a.PrimaryId) ||
+                                initialSampleIds.Contains(shafts[bestShelfIdx].PrimaryId);
                         }
                     }
 
-                    // Filter shafts to real arrows/callouts unless explicitly restricted by handles/selection/layer
+                    // 4. Qualify & Convert Matching Assemblies
                     bool explicitScope = restrictToExplicitSet || !string.IsNullOrWhiteSpace(layerFilter);
-                    List<ArrowShaftCandidate> qualifiedArrows = new List<ArrowShaftCandidate>();
-                    HashSet<ObjectId> consumedHeadIds = new HashSet<ObjectId>();
+                    HashSet<ObjectId> consumedHeadPrimaryIds = new HashSet<ObjectId>();
+                    HashSet<ObjectId> updatedTextIds = new HashSet<ObjectId>();
 
-                    for (int i = 0; i < rawShafts.Count; i++)
+                    for (int i = 0; i < shafts.Count; i++)
                     {
-                        if (consumedShaftIndices.Contains(i)) continue;
-                        ArrowShaftCandidate sh = rawShafts[i];
+                        if (mergedShelfIndices.Contains(i)) continue;
+                        ArrowShaftCandidate sh = shafts[i];
+
+                        if (matchSimilar)
+                        {
+                            if (sampleLayers.Count > 0 && !sampleLayers.Contains(sh.Layer)) continue;
+                            if (sampleColors.Count > 0 && !sampleColors.Contains(sh.ColorKey)) continue;
+                        }
+
                         List<Point3d> pts = sh.Pts;
                         Point3d pStart = pts[0];
                         Point3d pEnd = pts[pts.Count - 1];
 
+                        // Find attached arrowhead at Start or End
                         ArrowHeadShape startHead = null, endHead = null;
                         double bestStartHd = double.MaxValue, bestEndHd = double.MaxValue;
                         for (int hi = 0; hi < headShapes.Count; hi++)
                         {
                             ArrowHeadShape hs = headShapes[hi];
-                            if (consumedHeadIds.Contains(hs.Id)) continue;
-                            double ht = Math.Max(headAttachTol, hs.Span * 1.35);
+                            if (consumedHeadPrimaryIds.Contains(hs.PrimaryId)) continue;
+                            if (matchSimilar && avgSampleHeadSpan > 1e-5)
+                            {
+                                if (hs.Span < avgSampleHeadSpan * 0.25 || hs.Span > avgSampleHeadSpan * 4.0) continue;
+                            }
+                            double ht = Math.Max(headAttachTol, hs.Span * 1.6);
                             double ds = Math.Sqrt(Math.Pow(pStart.X - hs.Center.X, 2) + Math.Pow(pStart.Y - hs.Center.Y, 2));
                             double de = Math.Sqrt(Math.Pow(pEnd.X - hs.Center.X, 2) + Math.Pow(pEnd.Y - hs.Center.Y, 2));
                             for (int vi = 0; vi < hs.Vertices.Count; vi++)
@@ -1964,10 +2359,21 @@ namespace AIEngineer.AutoCAD
                                 ds = Math.Min(ds, Math.Sqrt(Math.Pow(pStart.X - hs.Vertices[vi].X, 2) + Math.Pow(pStart.Y - hs.Vertices[vi].Y, 2)));
                                 de = Math.Min(de, Math.Sqrt(Math.Pow(pEnd.X - hs.Vertices[vi].X, 2) + Math.Pow(pEnd.Y - hs.Vertices[vi].Y, 2)));
                             }
+                            if (hs.Vertices.Count >= 3)
+                            {
+                                for (int vi = 0; vi < hs.Vertices.Count; vi++)
+                                {
+                                    Point2d va = hs.Vertices[vi];
+                                    Point2d vb = hs.Vertices[(vi + 1) % hs.Vertices.Count];
+                                    ds = Math.Min(ds, PointToSegmentDist2D(new Point2d(pStart.X, pStart.Y), va, vb));
+                                    de = Math.Min(de, PointToSegmentDist2D(new Point2d(pEnd.X, pEnd.Y), va, vb));
+                                }
+                            }
                             if (ds <= ht && ds < bestStartHd) { bestStartHd = ds; startHead = hs; }
                             if (de <= ht && de < bestEndHd) { bestEndHd = de; endHead = hs; }
                         }
 
+                        // Find nearest text label near Start vs End/Shelf
                         ArrowTextCandidate bestStartTxt = null, bestEndTxt = null;
                         double dStartTxt = double.MaxValue, dEndTxt = double.MaxValue;
                         for (int ti = 0; ti < texts.Count; ti++)
@@ -1989,25 +2395,34 @@ namespace AIEngineer.AutoCAD
                             if (de < dEndTxt) { dEndTxt = de; bestEndTxt = tx; }
                         }
 
-                        bool endNearText = bestEndTxt != null && dEndTxt <= Math.Max(bestEndTxt.Height * 2.5, dwgSpan * 0.015);
-                        bool startNearText = bestStartTxt != null && dStartTxt <= Math.Max(bestStartTxt.Height * 2.5, dwgSpan * 0.015);
+                        bool endNearText = bestEndTxt != null && dEndTxt <= Math.Max(bestEndTxt.Height * 3.2, dwgSpan * 0.015);
+                        bool startNearText = bestStartTxt != null && dStartTxt <= Math.Max(bestStartTxt.Height * 3.2, dwgSpan * 0.015);
                         bool hasHorizEndShelf = pts.Count >= 3 && IsHorizontalSegment2D(pts[pts.Count - 2], pts[pts.Count - 1]);
                         bool hasHorizStartShelf = pts.Count >= 3 && IsHorizontalSegment2D(pts[0], pts[1]);
 
-                        if (!explicitScope)
+                        if (matchSimilar)
+                        {
+                            if (sampleHeadKinds.Count > 0 && startHead == null && endHead == null && !sh.HasTaperedWidth)
+                                continue;
+                            if (sampleHasShelfOrMulti && pts.Count < 3 && startHead == null && endHead == null)
+                                continue;
+                            if (sampleHasTaper && !sh.HasTaperedWidth && startHead == null && endHead == null)
+                                continue;
+                        }
+                        else if (!explicitScope)
                         {
                             bool looksLikeCalloutOrArrow =
                                 sh.IsOnCalloutLayer ||
                                 sh.HasTaperedWidth ||
                                 startHead != null ||
                                 endHead != null ||
-                                (!sh.MergedSecondLineId.IsNull) ||
+                                sh.ExtraErasedIds.Count > 0 ||
                                 (pts.Count <= 5 && ((hasHorizEndShelf && endNearText && !startNearText) ||
                                                     (hasHorizStartShelf && startNearText && !endNearText)));
                             if (!looksLikeCalloutOrArrow) continue;
                         }
 
-                        // Score Start vs End as the pointed arrowhead TIP
+                        // Score Start vs End as pointed arrowhead TIP
                         int startTipScore = 0;
                         int endTipScore = 0;
                         double detectedHeadLen = 0.0;
@@ -2055,7 +2470,7 @@ namespace AIEngineer.AutoCAD
 
                         if (reversePts) orderedPts.Reverse();
 
-                        // If segment 0 was solely a collinear arrowhead-cone vertex in a tapered Polyline, drop redundant cone-base vertex
+                        // Drop redundant collinear arrowhead-cone vertex in tapered Polylines
                         if (sh.HasTaperedWidth && orderedPts.Count >= 3)
                         {
                             Vector3d v0 = orderedPts[1] - orderedPts[0];
@@ -2074,13 +2489,41 @@ namespace AIEngineer.AutoCAD
                             }
                         }
 
-                        // Create native Autodesk.AutoCAD.DatabaseServices.Leader
+                        // Snap Vertex 0 onto the exact sharp forward apex of the attached arrowhead shape!
+                        if (usedHead != null && orderedPts.Count >= 2)
+                        {
+                            if (usedHead.PreferredApex.HasValue)
+                            {
+                                orderedPts[0] = new Point3d(usedHead.PreferredApex.Value.X, usedHead.PreferredApex.Value.Y, 0.0);
+                            }
+                            else if (usedHead.Vertices.Count >= 3)
+                            {
+                                Point3d elbowRef = orderedPts[1];
+                                Vector2d outDir = new Vector2d(orderedPts[0].X - elbowRef.X, orderedPts[0].Y - elbowRef.Y);
+                                if (outDir.Length > 1e-7)
+                                {
+                                    outDir = outDir.GetNormal();
+                                    double bestProj = double.MinValue;
+                                    Point2d bestV = usedHead.Vertices[0];
+                                    for (int vi = 0; vi < usedHead.Vertices.Count; vi++)
+                                    {
+                                        Point2d hv = usedHead.Vertices[vi];
+                                        double proj = (hv.X - elbowRef.X) * outDir.X + (hv.Y - elbowRef.Y) * outDir.Y;
+                                        if (proj > bestProj) { bestProj = proj; bestV = hv; }
+                                    }
+                                    orderedPts[0] = new Point3d(bestV.X, bestV.Y, 0.0);
+                                }
+                            }
+                            detectedHeadLen = Math.Max(detectedHeadLen, usedHead.Span);
+                        }
+
                         string safeLyr = !string.IsNullOrWhiteSpace(targetLayerOverride)
                             ? EnsureLayerSafe(db, tr, targetLayerOverride.Trim(), overrideColor.HasValue ? (short?)ClampColor(overrideColor.Value) : null, null)
                             : sh.Layer;
 
                         double firstLegLen = orderedPts.Count >= 2 ? orderedPts[0].DistanceTo(orderedPts[1]) : 1.0;
-                        double textHRef = (pairedText != null && pairedTextDist <= Math.Max(pairedText.Height * 3.0, dwgSpan * 0.02))
+                        bool hasClosePairedText = pairedText != null && pairedTextDist <= Math.Max(pairedText.Height * 3.5, dwgSpan * 0.02);
+                        double textHRef = hasClosePairedText
                             ? pairedText.Height
                             : Math.Max(1e-4, firstLegLen * 0.09);
 
@@ -2098,8 +2541,7 @@ namespace AIEngineer.AutoCAD
                         {
                             short aci = (short)ClampColor(overrideColor.Value);
                             ldr.ColorIndex = aci;
-                            ldr.Dimclrd = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
-                                Autodesk.AutoCAD.Colors.ColorMethod.ByAci, aci);
+                            ldr.Dimclrd = Color.FromColorIndex(ColorMethod.ByAci, aci);
                         }
                         else if (sh.SourceColor != null)
                         {
@@ -2133,8 +2575,50 @@ namespace AIEngineer.AutoCAD
                         ObjectId ldrId = ms.AppendEntity(ldr);
                         tr.AddNewlyCreatedDBObject(ldr, true);
 
-                        // If paired with coordinate text & touching a BlockReference, preserve coordinate XData for reference_callout_index
-                        if (pairedText != null && blocks.Count > 0)
+                        // Update X/Y coordinates inside paired text to exact Vertex 0 arrowhead tip coordinates!
+                        string finalPairedText = hasClosePairedText ? pairedText.Text : "";
+                        bool thisTextUpdated = false;
+                        if (updateCoordinates && hasClosePairedText && !updatedTextIds.Contains(pairedText.Id))
+                        {
+                            try
+                            {
+                                Entity txEnt = tr.GetObject(pairedText.Id, OpenMode.ForWrite) as Entity;
+                                if (txEnt is MText)
+                                {
+                                    MText mt = (MText)txEnt;
+                                    bool changed;
+                                    string updatedContents = UpdateCoordinateValuesInText(mt.Contents, orderedPts[0].X, orderedPts[0].Y, coordDecimals, out changed);
+                                    if (changed && !string.Equals(updatedContents, mt.Contents, StringComparison.Ordinal))
+                                    {
+                                        CaptureEntitySnapshot(mt, modifiedSnapshots);
+                                        mt.Contents = updatedContents;
+                                        updatedTextIds.Add(pairedText.Id);
+                                        coordsUpdatedCount++;
+                                        thisTextUpdated = true;
+                                        finalPairedText = ExtractEntityTextString(mt).Trim();
+                                    }
+                                }
+                                else if (txEnt is DBText)
+                                {
+                                    DBText dt = (DBText)txEnt;
+                                    bool changed;
+                                    string updatedStr = UpdateCoordinateValuesInText(dt.TextString, orderedPts[0].X, orderedPts[0].Y, coordDecimals, out changed);
+                                    if (changed && !string.Equals(updatedStr, dt.TextString, StringComparison.Ordinal))
+                                    {
+                                        CaptureEntitySnapshot(dt, modifiedSnapshots);
+                                        dt.TextString = updatedStr;
+                                        updatedTextIds.Add(pairedText.Id);
+                                        coordsUpdatedCount++;
+                                        thisTextUpdated = true;
+                                        finalPairedText = updatedStr;
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+
+                        // Attach AIENG_COORD_LDR XData if paired with numbered coordinate callout near a BlockReference
+                        if (hasClosePairedText && blocks.Count > 0)
                         {
                             int parsedIdx;
                             string headerTok;
@@ -2152,7 +2636,7 @@ namespace AIEngineer.AutoCAD
                                 {
                                     double blkSpan = Math.Max(nearBlk.Bounds.MaxPoint.X - nearBlk.Bounds.MinPoint.X,
                                                               nearBlk.Bounds.MaxPoint.Y - nearBlk.Bounds.MinPoint.Y);
-                                    if (bestBd <= Math.Max(dimasz * 2.0, blkSpan * 0.5))
+                                    if (bestBd <= Math.Max(dimasz * 2.5, blkSpan * 0.65))
                                     {
                                         AttachCoordLeaderXData(db, tr, ldr, new CoordTargetItem
                                         {
@@ -2170,7 +2654,6 @@ namespace AIEngineer.AutoCAD
 
                         createdIds.Add(ldrId);
                         createdHandles.Add(ldr.Handle.ToString());
-                        qualifiedArrows.Add(sh);
 
                         Extents3d lEx = new Extents3d(
                             new Point3d(Math.Min(orderedPts[0].X, orderedPts[orderedPts.Count - 1].X),
@@ -2190,7 +2673,8 @@ namespace AIEngineer.AutoCAD
                                 { "tip", Pt2(orderedPts[0].X, orderedPts[0].Y) },
                                 { "tail", Pt2(orderedPts[orderedPts.Count - 1].X, orderedPts[orderedPts.Count - 1].Y) },
                                 { "arrow_size", Round(dimasz) },
-                                { "paired_text", pairedText != null && pairedTextDist <= Math.Max(pairedText.Height * 3.0, dwgSpan * 0.02) ? pairedText.Text : "" }
+                                { "coordinates_updated", thisTextUpdated },
+                                { "paired_text", finalPairedText }
                             });
                         }
 
@@ -2207,32 +2691,39 @@ namespace AIEngineer.AutoCAD
                             }
                             catch { }
 
-                            if (!sh.MergedSecondLineId.IsNull)
+                            for (int ei = 0; ei < sh.ExtraErasedIds.Count; ei++)
                             {
+                                ObjectId eid = sh.ExtraErasedIds[ei];
+                                if (eid.IsNull || eid.IsErased) continue;
                                 try
                                 {
-                                    Entity secEnt = tr.GetObject(sh.MergedSecondLineId, OpenMode.ForWrite) as Entity;
+                                    Entity secEnt = tr.GetObject(eid, OpenMode.ForWrite) as Entity;
                                     if (secEnt != null && !secEnt.IsErased)
                                     {
                                         secEnt.Erase(true);
-                                        erasedIds.Add(sh.MergedSecondLineId);
+                                        erasedIds.Add(eid);
                                     }
                                 }
                                 catch { }
                             }
 
-                            if (usedHead != null && consumedHeadIds.Add(usedHead.Id))
+                            if (usedHead != null && consumedHeadPrimaryIds.Add(usedHead.PrimaryId))
                             {
-                                try
+                                for (int hci = 0; hci < usedHead.ComponentIds.Count; hci++)
                                 {
-                                    Entity hdEnt = tr.GetObject(usedHead.Id, OpenMode.ForWrite) as Entity;
-                                    if (hdEnt != null && !hdEnt.IsErased)
+                                    ObjectId hid = usedHead.ComponentIds[hci];
+                                    if (hid.IsNull || hid.IsErased) continue;
+                                    try
                                     {
-                                        hdEnt.Erase(true);
-                                        erasedIds.Add(usedHead.Id);
+                                        Entity hdEnt = tr.GetObject(hid, OpenMode.ForWrite) as Entity;
+                                        if (hdEnt != null && !hdEnt.IsErased)
+                                        {
+                                            hdEnt.Erase(true);
+                                            erasedIds.Add(hid);
+                                        }
                                     }
+                                    catch { }
                                 }
-                                catch { }
                             }
                         }
                     }
@@ -2259,13 +2750,14 @@ namespace AIEngineer.AutoCAD
                     tr.Commit();
                 }
 
-                if (createdIds.Count > 0 || erasedIds.Count > 0)
+                if (createdIds.Count > 0 || erasedIds.Count > 0 || modifiedSnapshots.Count > 0)
                 {
                     CadUndoEntry undo = new CadUndoEntry();
                     undo.ToolName = "convert_arrows_to_leaders";
                     undo.Summary = "Converted " + createdIds.Count.ToString(CultureInfo.InvariantCulture) + " arrow(s) to native Leaders";
                     undo.ErasedIds.AddRange(erasedIds);
                     undo.CreatedIds.AddRange(createdIds);
+                    undo.ModifiedSnapshots.AddRange(modifiedSnapshots.Values);
                     PushUndoEntry(doc, undo);
                 }
 
@@ -2278,17 +2770,19 @@ namespace AIEngineer.AutoCAD
 
             if (createdIds.Count == 0 && highlightErasedCount == 0)
             {
-                if (alreadyLeaderCount > 0)
-                    return Err("الأسهم الموجودة في المخطط (" + alreadyLeaderCount.ToString(CultureInfo.InvariantCulture) + ") هي بالفعل عناصر Leader أصلية، ولم يتم العثور على أسهم Polyline/Line للتحويل.");
-                return Err("لم يتم العثور على أسهم مرسومة (Polyline/Line/Solid) لتحويلها إلى Leader. يمكنك تحديد الأسهم بالماوس في أوتوكاد ثم التمرير بـ selected_only=true.");
+                if (matchSimilar)
+                    return Err("لم يتم العثور على أسهم مطابقة للعينة المحددة في المخطط. تأكد من تحديد أجزاء سهم واحد (الخط الأفقي + الخط المائل + رأس السهم) وأعد المحاولة.");
+                return Err("لم يتم العثور على أسهم مرسومة مطابقة (Polyline/Line + رأس السهم). حدد سهم عينة في أوتوكاد ثم مرر match_similar=true.");
             }
 
             return Ok(new Dictionary<string, object>
             {
                 { "converted_count", createdIds.Count },
+                { "coordinates_updated_count", coordsUpdatedCount },
                 { "already_leader_count", alreadyLeaderCount },
                 { "erased_source_count", erasedIds.Count },
                 { "highlight_boxes_removed", highlightErasedCount },
+                { "matched_from_sample", matchSimilar },
                 { "leader_handles", createdHandles },
                 { "details", convertedDetails },
                 { "switched_to_model", switchedToModel },
