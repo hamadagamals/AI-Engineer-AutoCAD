@@ -7624,6 +7624,7 @@ namespace AIEngineer.AutoCAD
 
         private static readonly object s_lastCoordLock = new object();
         private static readonly Dictionary<IntPtr, string> s_lastCoordSortOrderByDb = new Dictionary<IntPtr, string>();
+        private static readonly Dictionary<IntPtr, string> s_lastCoordBlockNameByDb = new Dictionary<IntPtr, string>();
         private static readonly Dictionary<IntPtr, string> s_lastMultiPointModeByDb = new Dictionary<IntPtr, string>();
         private static readonly Dictionary<IntPtr, Dictionary<string, List<SamplePointSpec>>> s_lastBlockSamplePointsByDb =
             new Dictionary<IntPtr, Dictionary<string, List<SamplePointSpec>>>();
@@ -7852,6 +7853,344 @@ namespace AIEngineer.AutoCAD
             {
                 return false;
             }
+        }
+
+        private const string CoordLeaderRegApp = "AIENG_COORD_LDR";
+
+        private static void EnsureRegApp(Database db, Transaction tr, string appName)
+        {
+            if (db == null || tr == null || string.IsNullOrWhiteSpace(appName)) return;
+            RegAppTable rat = tr.GetObject(db.RegAppTableId, OpenMode.ForRead) as RegAppTable;
+            if (rat == null || rat.Has(appName)) return;
+            rat.UpgradeOpen();
+            RegAppTableRecord rec = new RegAppTableRecord();
+            rec.Name = appName;
+            rat.Add(rec);
+            tr.AddNewlyCreatedDBObject(rec, true);
+        }
+
+        private static void AttachCoordLeaderXData(Database db, Transaction tr, Leader ldr, CoordTargetItem item)
+        {
+            if (ldr == null || item == null) return;
+            try
+            {
+                EnsureRegApp(db, tr, CoordLeaderRegApp);
+                ResultBuffer rb = new ResultBuffer(
+                    new TypedValue((int)DxfCode.ExtendedDataRegAppName, CoordLeaderRegApp),
+                    new TypedValue((int)DxfCode.ExtendedDataInteger32, item.Index),
+                    new TypedValue((int)DxfCode.ExtendedDataInteger32, item.BlockIndex),
+                    new TypedValue((int)DxfCode.ExtendedDataInteger32, item.SubPointIndex),
+                    new TypedValue((int)DxfCode.ExtendedDataAsciiString, item.Handle ?? ""),
+                    new TypedValue((int)DxfCode.ExtendedDataAsciiString, item.BlockName ?? "")
+                );
+                ldr.XData = rb;
+            }
+            catch { }
+        }
+
+        private static bool ReadCoordLeaderXData(
+            Leader ldr,
+            out int index,
+            out int blockIndex,
+            out int subIndex,
+            out string blockHandle,
+            out string blockName)
+        {
+            index = 0;
+            blockIndex = 0;
+            subIndex = 0;
+            blockHandle = "";
+            blockName = "";
+            if (ldr == null) return false;
+            try
+            {
+                ResultBuffer rb = ldr.GetXDataForApplication(CoordLeaderRegApp);
+                if (rb == null) return false;
+                TypedValue[] vals = rb.AsArray();
+                int intPos = 0;
+                int strPos = 0;
+                for (int i = 0; i < vals.Length; i++)
+                {
+                    if (vals[i].TypeCode == (int)DxfCode.ExtendedDataInteger32 || vals[i].TypeCode == (int)DxfCode.ExtendedDataInteger16)
+                    {
+                        int v = Convert.ToInt32(vals[i].Value, CultureInfo.InvariantCulture);
+                        if (intPos == 0) index = v;
+                        else if (intPos == 1) blockIndex = v;
+                        else if (intPos == 2) subIndex = v;
+                        intPos++;
+                    }
+                    else if (vals[i].TypeCode == (int)DxfCode.ExtendedDataAsciiString)
+                    {
+                        string sv = Convert.ToString(vals[i].Value, CultureInfo.InvariantCulture) ?? "";
+                        if (strPos == 0) blockHandle = sv;
+                        else if (strPos == 1) blockName = sv;
+                        strPos++;
+                    }
+                }
+                return index > 0;
+            }
+            catch { return false; }
+        }
+
+        private static bool ParseLeadingCalloutIndex(string rawText, out int calloutIndex)
+        {
+            calloutIndex = 0;
+            if (string.IsNullOrWhiteSpace(rawText)) return false;
+            string s = rawText.Trim();
+            int pos = 0;
+            while (pos < s.Length && !char.IsDigit(s[pos]))
+            {
+                if (s[pos] != '#' && !char.IsWhiteSpace(s[pos])) return false;
+                pos++;
+            }
+            int start = pos;
+            while (pos < s.Length && char.IsDigit(s[pos])) pos++;
+            if (pos == start) return false;
+            int val;
+            if (int.TryParse(s.Substring(start, pos - start), NumberStyles.Integer, CultureInfo.InvariantCulture, out val) && val > 0)
+            {
+                calloutIndex = val;
+                return true;
+            }
+            return false;
+        }
+
+        private static double DistPointToExtents2D(double px, double py, Extents3d ex)
+        {
+            double dx = (px < ex.MinPoint.X) ? (ex.MinPoint.X - px) : (px > ex.MaxPoint.X ? px - ex.MaxPoint.X : 0.0);
+            double dy = (py < ex.MinPoint.Y) ? (ex.MinPoint.Y - py) : (py > ex.MaxPoint.Y ? py - ex.MaxPoint.Y : 0.0);
+            return Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        private sealed class ExistingCalloutLeaderInfo
+        {
+            public Leader Ldr;
+            public int Index;
+            public string BlockHandle;
+            public string BlockName;
+            public Point3d TipPt;
+            public Point3d LastPt;
+        }
+
+        private static bool ResolveReferenceLeadersToSamplePoints(
+            Database db,
+            Transaction tr,
+            BlockTableRecord ms,
+            string calloutLayer,
+            string blockFilter,
+            List<string> selectedHandles,
+            List<int> refIndices,
+            bool fromSelectedLeader,
+            Dictionary<string, bool> layerHiddenFlags,
+            bool visibleOnly,
+            bool includeAnonymous,
+            bool includeSystem,
+            out string inferredBlockName,
+            out List<SamplePointSpec> resolvedLocalPoints,
+            out string errorMsg)
+        {
+            inferredBlockName = "";
+            resolvedLocalPoints = new List<SamplePointSpec>();
+            errorMsg = "";
+
+            List<ExistingCalloutLeaderInfo> leaders = new List<ExistingCalloutLeaderInfo>();
+            List<KeyValuePair<int, Point3d>> labelAnchors = new List<KeyValuePair<int, Point3d>>();
+            HashSet<ObjectId> selectedIdSet = new HashSet<ObjectId>();
+            if (selectedHandles != null)
+            {
+                foreach (string h in selectedHandles)
+                {
+                    ObjectId sid = ResolveHandle(db, h);
+                    if (!sid.IsNull && !sid.IsErased) selectedIdSet.Add(sid);
+                }
+            }
+
+            List<ExistingCalloutLeaderInfo> selectedLeaders = new List<ExistingCalloutLeaderInfo>();
+            foreach (ObjectId mid in ms)
+            {
+                if (mid.IsErased) continue;
+                Entity ent = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                if (ent == null) continue;
+                bool onCalloutLayer = string.Equals(ent.Layer ?? "", calloutLayer, StringComparison.OrdinalIgnoreCase);
+                bool isSelected = selectedIdSet.Contains(mid);
+                if (!onCalloutLayer && !isSelected) continue;
+
+                Leader ldr = ent as Leader;
+                if (ldr != null && ldr.NumVertices >= 2)
+                {
+                    ExistingCalloutLeaderInfo info = new ExistingCalloutLeaderInfo();
+                    info.Ldr = ldr;
+                    info.TipPt = ldr.VertexAt(0);
+                    info.LastPt = ldr.VertexAt(ldr.NumVertices - 1);
+                    int xIdx, xBlkIdx, xSubIdx;
+                    string xHandle, xName;
+                    if (ReadCoordLeaderXData(ldr, out xIdx, out xBlkIdx, out xSubIdx, out xHandle, out xName))
+                    {
+                        info.Index = xIdx;
+                        info.BlockHandle = xHandle;
+                        info.BlockName = xName;
+                    }
+                    leaders.Add(info);
+                    if (isSelected) selectedLeaders.Add(info);
+                    continue;
+                }
+
+                if (onCalloutLayer)
+                {
+                    MText mt = ent as MText;
+                    if (mt != null)
+                    {
+                        int parsedIdx;
+                        if (ParseLeadingCalloutIndex(mt.Text, out parsedIdx))
+                            labelAnchors.Add(new KeyValuePair<int, Point3d>(parsedIdx, mt.Location));
+                    }
+                    else
+                    {
+                        DBText dt = ent as DBText;
+                        if (dt != null)
+                        {
+                            int parsedIdx;
+                            if (ParseLeadingCalloutIndex(dt.TextString, out parsedIdx))
+                                labelAnchors.Add(new KeyValuePair<int, Point3d>(parsedIdx, dt.Position));
+                        }
+                    }
+                }
+            }
+
+            // Pair any non-XData Leaders (e.g. older drawings) with nearest MText index
+            HashSet<int> usedLabelPos = new HashSet<int>();
+            for (int i = 0; i < leaders.Count; i++)
+            {
+                if (leaders[i].Index > 0) continue;
+                int bestLabelIdx = -1;
+                double bestDist = double.MaxValue;
+                for (int li = 0; li < labelAnchors.Count; li++)
+                {
+                    if (usedLabelPos.Contains(li)) continue;
+                    double d = leaders[i].LastPt.DistanceTo(labelAnchors[li].Value);
+                    if (d < bestDist)
+                    {
+                        bestDist = d;
+                        bestLabelIdx = li;
+                    }
+                }
+                if (bestLabelIdx >= 0)
+                {
+                    leaders[i].Index = labelAnchors[bestLabelIdx].Key;
+                    usedLabelPos.Add(bestLabelIdx);
+                }
+            }
+
+            List<ExistingCalloutLeaderInfo> chosenLeaders = new List<ExistingCalloutLeaderInfo>();
+            if (refIndices != null && refIndices.Count > 0)
+            {
+                for (int r = 0; r < refIndices.Count; r++)
+                {
+                    int targetIdx = refIndices[r];
+                    ExistingCalloutLeaderInfo match = null;
+                    for (int i = 0; i < leaders.Count; i++)
+                    {
+                        if (leaders[i].Index == targetIdx) { match = leaders[i]; break; }
+                    }
+                    if (match == null)
+                    {
+                        errorMsg = "Could not find an existing coordinate Leader callout #" +
+                                   targetIdx.ToString(CultureInfo.InvariantCulture) +
+                                   " on layer '" + calloutLayer + "'.";
+                        return false;
+                    }
+                    chosenLeaders.Add(match);
+                }
+            }
+            else if (fromSelectedLeader || selectedLeaders.Count > 0)
+            {
+                if (selectedLeaders.Count == 0)
+                {
+                    errorMsg = "No Leader entity is currently selected to use as the reference arrowhead position.";
+                    return false;
+                }
+                chosenLeaders.AddRange(selectedLeaders);
+            }
+            else
+            {
+                errorMsg = "No reference callout index or selected Leader was provided.";
+                return false;
+            }
+
+            // Collect candidate BlockReferences to map each reference Leader tip to its owning BlockReference
+            List<BlockReference> candidateBlocks = new List<BlockReference>();
+            foreach (ObjectId mid in ms)
+            {
+                if (mid.IsErased) continue;
+                Entity me = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                BlockReference mbr = me as BlockReference;
+                if (mbr == null || IsAiAnnotationLayer(me.Layer) || IsLegendOrHighlightLayer(me.Layer)) continue;
+                if (visibleOnly && !IsEntityVisible(me, layerHiddenFlags)) continue;
+                string bn = ResolveBlockName(tr, mbr);
+                if (!includeAnonymous && IsAnonymousBlockName(bn)) continue;
+                if (!includeSystem && (IsSystemBlockName(bn) || string.Equals(me.Layer, "ASHADE", StringComparison.OrdinalIgnoreCase))) continue;
+                if (!string.IsNullOrWhiteSpace(blockFilter) &&
+                    !string.Equals(bn, blockFilter.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                    !MatchesPatternOrSubstring(bn, blockFilter))
+                    continue;
+                candidateBlocks.Add(mbr);
+            }
+
+            for (int c = 0; c < chosenLeaders.Count; c++)
+            {
+                ExistingCalloutLeaderInfo refInfo = chosenLeaders[c];
+                BlockReference ownerBr = null;
+                if (!string.IsNullOrWhiteSpace(refInfo.BlockHandle))
+                {
+                    ObjectId bid = ResolveHandle(db, refInfo.BlockHandle);
+                    if (!bid.IsNull && !bid.IsErased)
+                        ownerBr = tr.GetObject(bid, OpenMode.ForRead) as BlockReference;
+                }
+                if (ownerBr == null)
+                {
+                    double bestD = double.MaxValue;
+                    for (int b = 0; b < candidateBlocks.Count; b++)
+                    {
+                        try
+                        {
+                            Extents3d bex = candidateBlocks[b].GeometricExtents;
+                            if (!IsFiniteBounds(bex)) continue;
+                            double d = DistPointToExtents2D(refInfo.TipPt.X, refInfo.TipPt.Y, bex);
+                            if (d < bestD)
+                            {
+                                bestD = d;
+                                ownerBr = candidateBlocks[b];
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                if (ownerBr == null)
+                {
+                    errorMsg = "Could not locate the owning BlockReference for reference Leader #" +
+                               refInfo.Index.ToString(CultureInfo.InvariantCulture) + ".";
+                    return false;
+                }
+
+                Matrix3d inv;
+                if (!TryInvertMatrix3d(ownerBr.BlockTransform, out inv))
+                {
+                    errorMsg = "Owning block for Leader #" + refInfo.Index.ToString(CultureInfo.InvariantCulture) + " has a non-invertible transform.";
+                    return false;
+                }
+                Point3d localPt = refInfo.TipPt.TransformBy(inv);
+                SamplePointSpec sp = new SamplePointSpec();
+                sp.LocalX = localPt.X;
+                sp.LocalY = localPt.Y;
+                sp.LocalZ = localPt.Z;
+                sp.Label = "P" + (c + 1).ToString(CultureInfo.InvariantCulture);
+                resolvedLocalPoints.Add(sp);
+
+                if (string.IsNullOrWhiteSpace(inferredBlockName))
+                    inferredBlockName = ResolveBlockName(tr, ownerBr);
+            }
+
+            return resolvedLocalPoints.Count > 0;
         }
 
         private static bool PromptPickBlockSamplePoints(
@@ -8094,6 +8433,21 @@ namespace AIEngineer.AutoCAD
             bool pickSamplePoints = GetBool(args, "pick_sample_points", false);
             bool clearSamplePoints = GetBool(args, "clear_sample_points", false);
             bool useSavedSamplePoints = GetBool(args, "use_saved_sample_points", true);
+            int refCalloutIdx = GetInt(args, "reference_callout_index", 0);
+            if (refCalloutIdx <= 0) refCalloutIdx = GetInt(args, "reference_leader_index", 0);
+            List<int> refCalloutIndices = new List<int>();
+            if (refCalloutIdx > 0) refCalloutIndices.Add(refCalloutIdx);
+            foreach (object rawRef in AsList(GetObj(args, "reference_callout_indices")))
+            {
+                double dv;
+                if (TryParseObjDouble(rawRef, out dv))
+                {
+                    int iv = (int)Math.Round(dv);
+                    if (iv > 0 && !refCalloutIndices.Contains(iv)) refCalloutIndices.Add(iv);
+                }
+            }
+            bool fromSelectedLeader = GetBool(args, "from_selected_leader", false);
+            bool hasRefLeaderReq = (refCalloutIndices.Count > 0 || fromSelectedLeader);
             string rawMultiPointMode = GetStr(args, "multi_point_mode");
             string normalizedMultiPointMode = NormalizeMultiPointMode(rawMultiPointMode);
             List<SamplePointSpec> explicitLocalPts = ParseSamplePointList(args, "local_points");
@@ -8123,12 +8477,16 @@ namespace AIEngineer.AutoCAD
 
             string sortOrder = normalizedSortOrder;
             string multiPointMode = normalizedMultiPointMode;
+            string rememberedBlockName = "";
             lock (s_lastCoordLock)
             {
+                s_lastCoordBlockNameByDb.TryGetValue(db.UnmanagedObject, out rememberedBlockName);
                 if (string.IsNullOrEmpty(sortOrder))
                 {
                     string remembered;
-                    if (tableOnly && s_lastCoordSortOrderByDb.TryGetValue(db.UnmanagedObject, out remembered) && !string.IsNullOrEmpty(remembered))
+                    if ((tableOnly || hasRefLeaderReq || pickSamplePoints) &&
+                        s_lastCoordSortOrderByDb.TryGetValue(db.UnmanagedObject, out remembered) &&
+                        !string.IsNullOrEmpty(remembered))
                         sortOrder = remembered;
                     else
                         sortOrder = "left_to_right";
@@ -8212,6 +8570,7 @@ namespace AIEngineer.AutoCAD
                     // 1. Resolve target entities BEFORE erasing old annotations
                     List<ObjectId> selectedBlockIds = new List<ObjectId>();
                     List<ObjectId> selectedNonBlockIds = new List<ObjectId>();
+                    bool hasSelectedLeader = false;
                     Dictionary<string, int> selectedBlockNames = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
                     if (selectedHandles.Count > 0 || explicitHandles.Count > 0)
@@ -8226,6 +8585,11 @@ namespace AIEngineer.AutoCAD
                             if (id.IsNull || id.IsErased || !seenPick.Add(id)) continue;
                             Entity ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
                             if (ent == null || ent.OwnerId != ms.ObjectId) continue;
+                            if (ent is Leader && (IsAiAnnotationLayer(ent.Layer) || string.Equals(ent.Layer ?? "", safeCalloutLayer, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                hasSelectedLeader = true;
+                                continue;
+                            }
                             if (IsAiAnnotationLayer(ent.Layer)) continue;
                             BlockReference br = ent as BlockReference;
                             if (br != null)
@@ -8241,6 +8605,30 @@ namespace AIEngineer.AutoCAD
                                 selectedNonBlockIds.Add(id);
                             }
                         }
+                    }
+
+                    // 1b. If engineer asked to match a reference Leader callout (#16 or selected Leader), read its arrowhead BEFORE erasing old callouts
+                    List<SamplePointSpec> refLeaderLocalPts = null;
+                    string refLeaderInferredBlock = "";
+                    if (hasRefLeaderReq || (hasSelectedLeader && selectedBlockIds.Count == 0 && selectedNonBlockIds.Count == 0 && string.IsNullOrWhiteSpace(blockFilter)))
+                    {
+                        string refErr;
+                        List<SamplePointSpec> resolvedRefPts;
+                        string resolvedRefBlock;
+                        string searchBlockFilter = !string.IsNullOrWhiteSpace(blockFilter) ? blockFilter : rememberedBlockName;
+                        if (!ResolveReferenceLeadersToSamplePoints(
+                            db, tr, ms, safeCalloutLayer, searchBlockFilter, selectedHandles,
+                            refCalloutIndices, fromSelectedLeader || hasSelectedLeader,
+                            layerHiddenFlags, visibleOnly, includeAnonymous, includeSystem,
+                            out resolvedRefBlock, out resolvedRefPts, out refErr))
+                        {
+                            tr.Commit();
+                            return Err(refErr);
+                        }
+                        refLeaderLocalPts = resolvedRefPts;
+                        refLeaderInferredBlock = resolvedRefBlock;
+                        if (string.IsNullOrWhiteSpace(blockFilter) && !string.IsNullOrWhiteSpace(refLeaderInferredBlock))
+                            blockFilter = refLeaderInferredBlock;
                     }
 
                     // Determine target set
@@ -8296,6 +8684,10 @@ namespace AIEngineer.AutoCAD
                                 return Err("Selected " + selectedNonBlockIds.Count + " loose non-block entities without a block name. Convert to a block first (`convert_matching_shapes_to_block`) or select <= 40 specific entities / a BlockReference.");
                             }
                             foreach (ObjectId nid in selectedNonBlockIds) targetIdSet.Add(nid);
+                        }
+                        else if (!string.IsNullOrWhiteSpace(rememberedBlockName) && (tableOnly || hasRefLeaderReq || pickSamplePoints))
+                        {
+                            resolvedSingleBlockName = rememberedBlockName;
                         }
                         else
                         {
@@ -8461,14 +8853,20 @@ namespace AIEngineer.AutoCAD
                     // 4. Deterministic strict sorting of blocks per engineer-selected direction (L->R, R->L, Top->Bot, Bot->Top)
                     SortCoordTargets(blockTargets, sortOrder, medW, medH);
 
-                    // 4b. Resolve sample points inside block (if picked interactively, passed explicitly, or remembered for this block)
+                    // 4b. Resolve sample points inside block (if picked interactively, matched from reference Leader, passed explicitly, or remembered)
                     string primaryBlockName = !string.IsNullOrWhiteSpace(pickedSampleBlockName)
                         ? pickedSampleBlockName
-                        : (distinctTargetNames.Count == 1 ? blockTargets[0].BlockName : (resolvedSingleBlockName ?? ""));
+                        : (!string.IsNullOrWhiteSpace(refLeaderInferredBlock)
+                            ? refLeaderInferredBlock
+                            : (distinctTargetNames.Count == 1 ? blockTargets[0].BlockName : (resolvedSingleBlockName ?? "")));
 
                     if (pickedLocalPts != null && pickedLocalPts.Count > 0)
                     {
                         activeLocalPoints = pickedLocalPts;
+                    }
+                    else if (refLeaderLocalPts != null && refLeaderLocalPts.Count > 0)
+                    {
+                        activeLocalPoints = refLeaderLocalPts;
                     }
                     else if (explicitLocalPts.Count > 0)
                     {
@@ -8882,6 +9280,7 @@ namespace AIEngineer.AutoCAD
                             ldr.AppendVertex(shelfEndPt);
                             ObjectId ldrId = ms.AppendEntity(ldr);
                             tr.AddNewlyCreatedDBObject(ldr, true);
+                            AttachCoordLeaderXData(db, tr, ldr, item);
                             createdIds.Add(ldrId);
                             createdHandles.Add(ldr.Handle.ToString());
 
@@ -9326,6 +9725,8 @@ namespace AIEngineer.AutoCAD
             {
                 s_lastCoordTableByDb[db.UnmanagedObject] = coordSheet;
                 s_lastGeneratedTableKindByDb[db.UnmanagedObject] = "coordinates";
+                if (distinctTargetNames.Count == 1 && !string.IsNullOrWhiteSpace(targets[0].BlockName))
+                    s_lastCoordBlockNameByDb[db.UnmanagedObject] = targets[0].BlockName;
             }
 
             Dictionary<string, object> result = new Dictionary<string, object>
