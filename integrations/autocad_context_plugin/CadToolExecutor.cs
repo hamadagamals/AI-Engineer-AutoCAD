@@ -266,6 +266,8 @@ namespace AIEngineer.AutoCAD
                         return ConvertMatchingShapesToBlock(doc, args);
                     case "annotate_block_coordinates":
                         return AnnotateBlockCoordinates(doc, args);
+                    case "convert_arrows_to_leaders":
+                        return ConvertArrowsToLeaders(doc, args);
                     case "export_to_excel":
                         return ExportToExcel(doc, args);
                     case "import_excel_table":
@@ -358,7 +360,7 @@ namespace AIEngineer.AutoCAD
             {
                 "inspect_drawing", "query_entities", "select_entities", "draw_entities", "draw_block_legend",
                 "modify_entities", "undo_last_action", "copy_entities", "delete_entities", "create_block",
-                "convert_matching_shapes_to_block", "annotate_block_coordinates", "export_to_excel", "import_excel_table",
+                "convert_matching_shapes_to_block", "annotate_block_coordinates", "convert_arrows_to_leaders", "export_to_excel", "import_excel_table",
                 "extract_load_schedule", "quantity_takeoff", "find_blocks_along_path", "manage_attributes", "text_tools",
                 "advanced_geometry_ops", "drawing_qa_cleanup", "layout_and_plot_tools", "manage_block_library",
                 "lighting_design_engine", "export_dialux_stf",
@@ -3391,13 +3393,15 @@ namespace AIEngineer.AutoCAD
         {
             List<string> handles = GetStringList(args, "handles");
             bool selectedOnly = GetBool(args, "selected_only", false);
-            string layer = GetStr(args, "layer");
+            string layer = GetStr(args, "layer") ?? GetStr(args, "layer_filter");
             bool clearReview = GetBool(args, "clear_review_layer", false);
+            bool clearHighlight = GetBool(args, "clear_highlight_layer", false);
             if (clearReview) layer = DrawingExecutionCommands.ReviewLayerName;
+            else if (clearHighlight && string.IsNullOrEmpty(layer)) layer = "_AI_HIGHLIGHT";
 
             if (selectedOnly) handles.AddRange(GetSelectedHandleStrings(doc));
             if (handles.Count == 0 && string.IsNullOrEmpty(layer))
-                return Err("Refusing blind delete: specify 'handles', 'selected_only': true, 'layer', or 'clear_review_layer': true.");
+                return Err("Refusing blind delete: specify 'handles', 'selected_only': true, 'layer', 'clear_highlight_layer': true, or 'clear_review_layer': true.");
 
             Database db = doc.Database;
             List<string> deleted = new List<string>();

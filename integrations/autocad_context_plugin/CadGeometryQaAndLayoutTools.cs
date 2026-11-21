@@ -1470,5 +1470,830 @@ namespace AIEngineer.AutoCAD
 
             return Err("Unknown manage_block_library action '" + action + "'. Use 'save', 'list', 'insert', or 'delete'.");
         }
+
+        private sealed class ArrowShaftCandidate
+        {
+            public ObjectId PrimaryId;
+            public ObjectId MergedSecondLineId;
+            public string Handle;
+            public string Layer;
+            public Autodesk.AutoCAD.Colors.Color SourceColor;
+            public short ColorIndex;
+            public List<Point3d> Pts;
+            public double StartSegW0;
+            public double StartSegW1;
+            public double EndSegW0;
+            public double EndSegW1;
+            public bool IsOnCalloutLayer;
+            public bool HasTaperedWidth;
+        }
+
+        private sealed class ArrowHeadShape
+        {
+            public ObjectId Id;
+            public Point2d Center;
+            public List<Point2d> Vertices;
+            public double Span;
+        }
+
+        private sealed class ArrowTextCandidate
+        {
+            public ObjectId Id;
+            public string Text;
+            public double Height;
+            public Extents3d Bounds;
+            public double Cx;
+            public double Cy;
+        }
+
+        private sealed class ArrowBlockCandidate
+        {
+            public ObjectId Id;
+            public string BlockName;
+            public double Cx;
+            public double Cy;
+            public Extents3d Bounds;
+        }
+
+        private static double DistPointToBounds2D(double x, double y, Extents3d ex)
+        {
+            double dx = 0.0;
+            if (x < ex.MinPoint.X) dx = ex.MinPoint.X - x;
+            else if (x > ex.MaxPoint.X) dx = x - ex.MaxPoint.X;
+            double dy = 0.0;
+            if (y < ex.MinPoint.Y) dy = ex.MinPoint.Y - y;
+            else if (y > ex.MaxPoint.Y) dy = y - ex.MaxPoint.Y;
+            return Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        private static bool IsTableOrTemporaryLayer(string layerName)
+        {
+            if (string.IsNullOrWhiteSpace(layerName)) return false;
+            return string.Equals(layerName, "_AI_BLOCK_LEGEND", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_COORD_TABLE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_EXCEL_TABLE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_PANEL_SCHEDULE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_BOQ_TABLE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_LIGHTING_TABLE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_HIGHLIGHT", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, DrawingExecutionCommands.ReviewLayerName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsDedicatedCalloutLayerName(string layerName)
+        {
+            if (string.IsNullOrWhiteSpace(layerName)) return false;
+            string up = layerName.Trim().ToUpperInvariant();
+            return up == "_AI_COORD_CALLOUTS" || up == "_AI_COORDS" ||
+                   up.Contains("CALLOUT") || up.Contains("LEADER") || up.Contains("ARROW") || up.Contains("COORD");
+        }
+
+        private static bool IsHorizontalSegment2D(Point3d a, Point3d b)
+        {
+            double dx = Math.Abs(b.X - a.X);
+            double dy = Math.Abs(b.Y - a.Y);
+            double len = Math.Sqrt(dx * dx + dy * dy);
+            return len > 1e-6 && dx > 1e-6 && dy <= Math.Max(1e-5, dx * 0.08);
+        }
+
+        private static Dictionary<string, object> ConvertArrowsToLeaders(Document doc, Dictionary<string, object> args)
+        {
+            Database db = doc.Database;
+            List<string> explicitHandles = GetStringList(args, "handles");
+            bool selectedOnly = GetBool(args, "selected_only", false);
+            string layerFilter = GetStr(args, "layer_filter") ?? GetStr(args, "layer");
+            string targetLayerOverride = GetStr(args, "target_layer");
+            double? explicitArrowSize = GetNullableDouble(args, "arrow_size");
+            int? overrideColor = GetNullableInt(args, "color_index");
+            bool keepSource = GetBool(args, "keep_source", false);
+            bool clearHighlight = GetBool(args, "clear_highlight", true);
+            bool zoom = GetBool(args, "zoom", true);
+
+            HashSet<string> targetSet = new HashSet<string>(explicitHandles, StringComparer.OrdinalIgnoreCase);
+            if (selectedOnly && targetSet.Count == 0)
+            {
+                List<string> sel = GetSelectedHandleStrings(doc);
+                for (int i = 0; i < sel.Count; i++) targetSet.Add(sel[i]);
+                if (targetSet.Count == 0)
+                    return Err("لا توجد أسهم محددة في أوتوكاد حالياً (selected_only=true). حدد الأسهم أو أزل selected_only لتحويل كل الأسهم المرسومة.");
+            }
+            bool restrictToExplicitSet = targetSet.Count > 0;
+
+            List<ObjectId> createdIds = new List<ObjectId>();
+            List<ObjectId> erasedIds = new List<ObjectId>();
+            List<string> createdHandles = new List<string>();
+            List<object> convertedDetails = new List<object>();
+            int alreadyLeaderCount = 0;
+            int highlightErasedCount = 0;
+            Extents3d? convertedExt = null;
+            Extents3d? drawingExt = null;
+            bool switchedToModel = false;
+
+            using (DocumentLock docLock = doc.LockDocument())
+            {
+                if (zoom && !db.TileMode)
+                {
+                    try { LayoutManager.Current.CurrentLayout = "Model"; switchedToModel = true; } catch { }
+                }
+
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    BlockTableRecord ms = (BlockTableRecord)tr.GetObject(
+                        SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
+                    Dictionary<string, bool> layerHiddenFlags = BuildLayerHiddenMap(db, tr);
+
+                    List<ArrowHeadShape> headShapes = new List<ArrowHeadShape>();
+                    List<ArrowTextCandidate> texts = new List<ArrowTextCandidate>();
+                    List<ArrowBlockCandidate> blocks = new List<ArrowBlockCandidate>();
+                    List<ArrowShaftCandidate> rawShafts = new List<ArrowShaftCandidate>();
+                    List<ObjectId> highlightIds = new List<ObjectId>();
+                    List<double> candidateSpans = new List<double>();
+
+                    foreach (ObjectId mid in ms)
+                    {
+                        if (mid.IsErased) continue;
+                        Entity ent = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                        if (ent == null || ent.IsErased) continue;
+
+                        if (string.Equals(ent.Layer, "_AI_HIGHLIGHT", StringComparison.OrdinalIgnoreCase))
+                        {
+                            highlightIds.Add(mid);
+                            continue;
+                        }
+                        if (IsTableOrTemporaryLayer(ent.Layer)) continue;
+
+                        try
+                        {
+                            Extents3d dex = ent.GeometricExtents;
+                            if (IsFiniteBounds(dex))
+                            {
+                                if (!drawingExt.HasValue) drawingExt = dex;
+                                else { Extents3d c = drawingExt.Value; c.AddExtents(dex); drawingExt = c; }
+                            }
+                        }
+                        catch { }
+
+                        if (!IsEntityVisible(ent, layerHiddenFlags)) continue;
+
+                        if (ent is Leader || ent is MLeader)
+                        {
+                            alreadyLeaderCount++;
+                            continue;
+                        }
+
+                        if (ent is DBText || ent is MText)
+                        {
+                            string txt = ExtractEntityTextString(ent);
+                            if (!string.IsNullOrWhiteSpace(txt))
+                            {
+                                try
+                                {
+                                    Extents3d tex = ent.GeometricExtents;
+                                    if (IsFiniteBounds(tex))
+                                    {
+                                        double th = (ent is MText) ? ((MText)ent).TextHeight : ((DBText)ent).Height;
+                                        texts.Add(new ArrowTextCandidate
+                                        {
+                                            Id = mid,
+                                            Text = txt.Trim(),
+                                            Height = Math.Max(1e-4, th),
+                                            Bounds = tex,
+                                            Cx = (tex.MinPoint.X + tex.MaxPoint.X) * 0.5,
+                                            Cy = (tex.MinPoint.Y + tex.MaxPoint.Y) * 0.5
+                                        });
+                                    }
+                                }
+                                catch { }
+                            }
+                            continue;
+                        }
+
+                        BlockReference br = ent as BlockReference;
+                        if (br != null)
+                        {
+                            string bn = ResolveBlockName(tr, br);
+                            if (!IsAnonymousBlockName(bn) && !IsSystemBlockName(bn))
+                            {
+                                try
+                                {
+                                    Extents3d bex = br.GeometricExtents;
+                                    if (IsFiniteBounds(bex))
+                                    {
+                                        blocks.Add(new ArrowBlockCandidate
+                                        {
+                                            Id = mid,
+                                            BlockName = bn,
+                                            Cx = (bex.MinPoint.X + bex.MaxPoint.X) * 0.5,
+                                            Cy = (bex.MinPoint.Y + bex.MaxPoint.Y) * 0.5,
+                                            Bounds = bex
+                                        });
+                                    }
+                                }
+                                catch { }
+                            }
+                            continue;
+                        }
+
+                        Solid s2 = ent as Solid;
+                        if (s2 != null)
+                        {
+                            try
+                            {
+                                List<Point2d> vpts = new List<Point2d>();
+                                double sx = 0, sy = 0;
+                                for (short k = 0; k < 4; k++)
+                                {
+                                    Point3d p = s2.GetPointAt(k);
+                                    Point2d p2 = new Point2d(p.X, p.Y);
+                                    bool dup = false;
+                                    for (int vi = 0; vi < vpts.Count; vi++)
+                                        if (vpts[vi].GetDistanceTo(p2) < 1e-6) { dup = true; break; }
+                                    if (!dup) { vpts.Add(p2); sx += p2.X; sy += p2.Y; }
+                                }
+                                if (vpts.Count >= 3)
+                                {
+                                    Extents3d sex = s2.GeometricExtents;
+                                    double sSpan = IsFiniteBounds(sex)
+                                        ? Math.Max(sex.MaxPoint.X - sex.MinPoint.X, sex.MaxPoint.Y - sex.MinPoint.Y)
+                                        : 0.0;
+                                    headShapes.Add(new ArrowHeadShape
+                                    {
+                                        Id = mid,
+                                        Center = new Point2d(sx / vpts.Count, sy / vpts.Count),
+                                        Vertices = vpts,
+                                        Span = sSpan
+                                    });
+                                }
+                            }
+                            catch { }
+                            continue;
+                        }
+
+                        if (ent is Polyline)
+                        {
+                            Polyline pl = (Polyline)ent;
+                            if (pl.Closed && (pl.NumberOfVertices == 3 || pl.NumberOfVertices == 4))
+                            {
+                                try
+                                {
+                                    Extents3d pex = pl.GeometricExtents;
+                                    double pSpan = IsFiniteBounds(pex)
+                                        ? Math.Max(pex.MaxPoint.X - pex.MinPoint.X, pex.MaxPoint.Y - pex.MinPoint.Y)
+                                        : 0.0;
+                                    if (pl.NumberOfVertices == 3 && pSpan > 1e-6)
+                                    {
+                                        List<Point2d> vpts = new List<Point2d>();
+                                        double sx = 0, sy = 0;
+                                        for (int vi = 0; vi < 3; vi++)
+                                        {
+                                            Point2d vp = pl.GetPoint2dAt(vi);
+                                            vpts.Add(vp);
+                                            sx += vp.X;
+                                            sy += vp.Y;
+                                        }
+                                        headShapes.Add(new ArrowHeadShape
+                                        {
+                                            Id = mid,
+                                            Center = new Point2d(sx / 3.0, sy / 3.0),
+                                            Vertices = vpts,
+                                            Span = pSpan
+                                        });
+                                        if (restrictToExplicitSet && !targetSet.Contains(ent.Handle.ToString()))
+                                            continue;
+                                        // If not explicitly selected, keep as arrowhead candidate rather than shaft
+                                        if (!restrictToExplicitSet) continue;
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+
+                        if (!(ent is Polyline) && !(ent is Polyline2d) && !(ent is Line))
+                            continue;
+
+                        string hStr = ent.Handle.ToString();
+                        if (restrictToExplicitSet && !targetSet.Contains(hStr)) continue;
+                        if (!string.IsNullOrWhiteSpace(layerFilter) && !MatchesPatternOrSubstring(ent.Layer ?? "", layerFilter)) continue;
+
+                        List<Point3d> pts = new List<Point3d>();
+                        double sw0 = 0, sw1 = 0, ew0 = 0, ew1 = 0;
+                        bool isClosed = false;
+                        bool hasTaper = false;
+
+                        if (ent is Line)
+                        {
+                            Line ln = (Line)ent;
+                            pts.Add(new Point3d(ln.StartPoint.X, ln.StartPoint.Y, 0.0));
+                            pts.Add(new Point3d(ln.EndPoint.X, ln.EndPoint.Y, 0.0));
+                        }
+                        else if (ent is Polyline)
+                        {
+                            Polyline pl = (Polyline)ent;
+                            isClosed = pl.Closed;
+                            int n = pl.NumberOfVertices;
+                            for (int vi = 0; vi < n; vi++)
+                            {
+                                Point3d vp = pl.GetPoint3dAt(vi);
+                                Point3d p2 = new Point3d(vp.X, vp.Y, 0.0);
+                                if (pts.Count == 0 || pts[pts.Count - 1].DistanceTo(p2) > 1e-6)
+                                    pts.Add(p2);
+                            }
+                            if (n >= 2)
+                            {
+                                try
+                                {
+                                    sw0 = pl.GetStartWidthAt(0);
+                                    sw1 = pl.GetEndWidthAt(0);
+                                    ew0 = pl.GetStartWidthAt(n - 2);
+                                    ew1 = pl.GetEndWidthAt(n - 2);
+                                    for (int si = 0; si < n - 1; si++)
+                                    {
+                                        double wA = pl.GetStartWidthAt(si);
+                                        double wB = pl.GetEndWidthAt(si);
+                                        if (Math.Abs(wA - wB) > 1e-4 && Math.Max(wA, wB) > 1e-4 &&
+                                            Math.Min(wA, wB) <= Math.Max(wA, wB) * 0.35)
+                                        {
+                                            hasTaper = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                        else if (ent is Polyline2d)
+                        {
+                            Polyline2d p2d = (Polyline2d)ent;
+                            isClosed = p2d.Closed;
+                            List<Vertex2d> vList = new List<Vertex2d>();
+                            foreach (ObjectId vid in p2d)
+                            {
+                                Vertex2d vx = tr.GetObject(vid, OpenMode.ForRead) as Vertex2d;
+                                if (vx == null) continue;
+                                Point3d p2 = new Point3d(vx.Position.X, vx.Position.Y, 0.0);
+                                if (pts.Count == 0 || pts[pts.Count - 1].DistanceTo(p2) > 1e-6)
+                                {
+                                    pts.Add(p2);
+                                    vList.Add(vx);
+                                }
+                            }
+                            if (vList.Count >= 2)
+                            {
+                                sw0 = vList[0].StartWidth;
+                                sw1 = vList[0].EndWidth;
+                                ew0 = vList[vList.Count - 2].StartWidth;
+                                ew1 = vList[vList.Count - 2].EndWidth;
+                                for (int si = 0; si < vList.Count - 1; si++)
+                                {
+                                    double wA = vList[si].StartWidth;
+                                    double wB = vList[si].EndWidth;
+                                    if (Math.Abs(wA - wB) > 1e-4 && Math.Max(wA, wB) > 1e-4 &&
+                                        Math.Min(wA, wB) <= Math.Max(wA, wB) * 0.35)
+                                    {
+                                        hasTaper = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (pts.Count < 2) continue;
+                        if (isClosed && !restrictToExplicitSet) continue;
+
+                        double totalLen = 0.0;
+                        for (int vi = 1; vi < pts.Count; vi++) totalLen += pts[vi - 1].DistanceTo(pts[vi]);
+                        if (totalLen <= 1e-6) continue;
+                        candidateSpans.Add(totalLen);
+
+                        rawShafts.Add(new ArrowShaftCandidate
+                        {
+                            PrimaryId = mid,
+                            MergedSecondLineId = ObjectId.Null,
+                            Handle = hStr,
+                            Layer = ent.Layer ?? "0",
+                            SourceColor = ent.Color,
+                            ColorIndex = (short)ent.ColorIndex,
+                            Pts = pts,
+                            StartSegW0 = sw0,
+                            StartSegW1 = sw1,
+                            EndSegW0 = ew0,
+                            EndSegW1 = ew1,
+                            IsOnCalloutLayer = IsDedicatedCalloutLayerName(ent.Layer),
+                            HasTaperedWidth = hasTaper
+                        });
+                    }
+
+                    double dwgSpan = drawingExt.HasValue
+                        ? Math.Max(1.0, Math.Max(drawingExt.Value.MaxPoint.X - drawingExt.Value.MinPoint.X,
+                                                 drawingExt.Value.MaxPoint.Y - drawingExt.Value.MinPoint.Y))
+                        : 1000.0;
+                    double headAttachTol = Math.Max(1e-3, dwgSpan * 0.008);
+
+                    // Merge exploded diagonal pointer Line + horizontal shelf Line sharing a junction under text
+                    HashSet<int> consumedShaftIndices = new HashSet<int>();
+                    for (int i = 0; i < rawShafts.Count; i++)
+                    {
+                        if (consumedShaftIndices.Contains(i)) continue;
+                        ArrowShaftCandidate a = rawShafts[i];
+                        if (a.Pts.Count != 2) continue;
+                        if (IsHorizontalSegment2D(a.Pts[0], a.Pts[1])) continue;
+
+                        for (int j = 0; j < rawShafts.Count; j++)
+                        {
+                            if (i == j || consumedShaftIndices.Contains(j)) continue;
+                            ArrowShaftCandidate b = rawShafts[j];
+                            if (b.Pts.Count != 2) continue;
+                            if (!string.Equals(a.Layer, b.Layer, StringComparison.OrdinalIgnoreCase)) continue;
+                            if (!IsHorizontalSegment2D(b.Pts[0], b.Pts[1])) continue;
+
+                            Point3d aStart = a.Pts[0], aEnd = a.Pts[1];
+                            Point3d bStart = b.Pts[0], bEnd = b.Pts[1];
+                            double linkTol = Math.Max(1e-4, Math.Min(aStart.DistanceTo(aEnd), bStart.DistanceTo(bEnd)) * 0.04);
+
+                            Point3d tipCand = Point3d.Origin, elbowCand = Point3d.Origin, shelfEndCand = Point3d.Origin;
+                            bool matchedJoin = false;
+                            if (aEnd.DistanceTo(bStart) <= linkTol) { tipCand = aStart; elbowCand = aEnd; shelfEndCand = bEnd; matchedJoin = true; }
+                            else if (aEnd.DistanceTo(bEnd) <= linkTol) { tipCand = aStart; elbowCand = aEnd; shelfEndCand = bStart; matchedJoin = true; }
+                            else if (aStart.DistanceTo(bStart) <= linkTol) { tipCand = aEnd; elbowCand = aStart; shelfEndCand = bEnd; matchedJoin = true; }
+                            else if (aStart.DistanceTo(bEnd) <= linkTol) { tipCand = aEnd; elbowCand = aStart; shelfEndCand = bStart; matchedJoin = true; }
+
+                            if (!matchedJoin) continue;
+
+                            // Confirm a text label actually sits close to shelf segment b
+                            bool textNearShelf = false;
+                            for (int ti = 0; ti < texts.Count; ti++)
+                            {
+                                ArrowTextCandidate tx = texts[ti];
+                                double td = Math.Min(
+                                    DistPointToBounds2D(elbowCand.X, elbowCand.Y, tx.Bounds),
+                                    DistPointToBounds2D((elbowCand.X + shelfEndCand.X) * 0.5, shelfEndCand.Y, tx.Bounds));
+                                if (td <= tx.Height * 2.2) { textNearShelf = true; break; }
+                            }
+                            if (!textNearShelf && !a.IsOnCalloutLayer && !restrictToExplicitSet) continue;
+
+                            a.Pts = new List<Point3d> { tipCand, elbowCand, shelfEndCand };
+                            a.MergedSecondLineId = b.PrimaryId;
+                            consumedShaftIndices.Add(j);
+                            break;
+                        }
+                    }
+
+                    // Filter shafts to real arrows/callouts unless explicitly restricted by handles/selection/layer
+                    bool explicitScope = restrictToExplicitSet || !string.IsNullOrWhiteSpace(layerFilter);
+                    List<ArrowShaftCandidate> qualifiedArrows = new List<ArrowShaftCandidate>();
+                    HashSet<ObjectId> consumedHeadIds = new HashSet<ObjectId>();
+
+                    for (int i = 0; i < rawShafts.Count; i++)
+                    {
+                        if (consumedShaftIndices.Contains(i)) continue;
+                        ArrowShaftCandidate sh = rawShafts[i];
+                        List<Point3d> pts = sh.Pts;
+                        Point3d pStart = pts[0];
+                        Point3d pEnd = pts[pts.Count - 1];
+
+                        ArrowHeadShape startHead = null, endHead = null;
+                        double bestStartHd = double.MaxValue, bestEndHd = double.MaxValue;
+                        for (int hi = 0; hi < headShapes.Count; hi++)
+                        {
+                            ArrowHeadShape hs = headShapes[hi];
+                            if (consumedHeadIds.Contains(hs.Id)) continue;
+                            double ht = Math.Max(headAttachTol, hs.Span * 1.35);
+                            double ds = Math.Sqrt(Math.Pow(pStart.X - hs.Center.X, 2) + Math.Pow(pStart.Y - hs.Center.Y, 2));
+                            double de = Math.Sqrt(Math.Pow(pEnd.X - hs.Center.X, 2) + Math.Pow(pEnd.Y - hs.Center.Y, 2));
+                            for (int vi = 0; vi < hs.Vertices.Count; vi++)
+                            {
+                                ds = Math.Min(ds, Math.Sqrt(Math.Pow(pStart.X - hs.Vertices[vi].X, 2) + Math.Pow(pStart.Y - hs.Vertices[vi].Y, 2)));
+                                de = Math.Min(de, Math.Sqrt(Math.Pow(pEnd.X - hs.Vertices[vi].X, 2) + Math.Pow(pEnd.Y - hs.Vertices[vi].Y, 2)));
+                            }
+                            if (ds <= ht && ds < bestStartHd) { bestStartHd = ds; startHead = hs; }
+                            if (de <= ht && de < bestEndHd) { bestEndHd = de; endHead = hs; }
+                        }
+
+                        ArrowTextCandidate bestStartTxt = null, bestEndTxt = null;
+                        double dStartTxt = double.MaxValue, dEndTxt = double.MaxValue;
+                        for (int ti = 0; ti < texts.Count; ti++)
+                        {
+                            ArrowTextCandidate tx = texts[ti];
+                            double ds = DistPointToBounds2D(pStart.X, pStart.Y, tx.Bounds);
+                            double de = DistPointToBounds2D(pEnd.X, pEnd.Y, tx.Bounds);
+                            if (pts.Count >= 3 && IsHorizontalSegment2D(pts[pts.Count - 2], pts[pts.Count - 1]))
+                            {
+                                double dMid = DistPointToBounds2D((pts[pts.Count - 2].X + pEnd.X) * 0.5, (pts[pts.Count - 2].Y + pEnd.Y) * 0.5, tx.Bounds);
+                                de = Math.Min(de, dMid);
+                            }
+                            if (pts.Count >= 3 && IsHorizontalSegment2D(pts[0], pts[1]))
+                            {
+                                double dMid = DistPointToBounds2D((pts[0].X + pts[1].X) * 0.5, (pts[0].Y + pts[1].Y) * 0.5, tx.Bounds);
+                                ds = Math.Min(ds, dMid);
+                            }
+                            if (ds < dStartTxt) { dStartTxt = ds; bestStartTxt = tx; }
+                            if (de < dEndTxt) { dEndTxt = de; bestEndTxt = tx; }
+                        }
+
+                        bool endNearText = bestEndTxt != null && dEndTxt <= Math.Max(bestEndTxt.Height * 2.5, dwgSpan * 0.015);
+                        bool startNearText = bestStartTxt != null && dStartTxt <= Math.Max(bestStartTxt.Height * 2.5, dwgSpan * 0.015);
+                        bool hasHorizEndShelf = pts.Count >= 3 && IsHorizontalSegment2D(pts[pts.Count - 2], pts[pts.Count - 1]);
+                        bool hasHorizStartShelf = pts.Count >= 3 && IsHorizontalSegment2D(pts[0], pts[1]);
+
+                        if (!explicitScope)
+                        {
+                            bool looksLikeCalloutOrArrow =
+                                sh.IsOnCalloutLayer ||
+                                sh.HasTaperedWidth ||
+                                startHead != null ||
+                                endHead != null ||
+                                (!sh.MergedSecondLineId.IsNull) ||
+                                (pts.Count <= 5 && ((hasHorizEndShelf && endNearText && !startNearText) ||
+                                                    (hasHorizStartShelf && startNearText && !endNearText)));
+                            if (!looksLikeCalloutOrArrow) continue;
+                        }
+
+                        // Score Start vs End as the pointed arrowhead TIP
+                        int startTipScore = 0;
+                        int endTipScore = 0;
+                        double detectedHeadLen = 0.0;
+
+                        if (sh.HasTaperedWidth)
+                        {
+                            if (sh.StartSegW0 < sh.StartSegW1 * 0.35 && sh.StartSegW1 > 1e-4)
+                            {
+                                startTipScore += 12;
+                                detectedHeadLen = Math.Max(detectedHeadLen, pts[0].DistanceTo(pts[1]));
+                            }
+                            if (sh.EndSegW1 < sh.EndSegW0 * 0.35 && sh.EndSegW0 > 1e-4)
+                            {
+                                endTipScore += 12;
+                                detectedHeadLen = Math.Max(detectedHeadLen, pts[pts.Count - 2].DistanceTo(pts[pts.Count - 1]));
+                            }
+                        }
+
+                        if (startHead != null) { startTipScore += 14; detectedHeadLen = Math.Max(detectedHeadLen, startHead.Span); }
+                        if (endHead != null) { endTipScore += 14; detectedHeadLen = Math.Max(detectedHeadLen, endHead.Span); }
+
+                        if (endNearText && !startNearText) startTipScore += 8;
+                        else if (startNearText && !endNearText) endTipScore += 8;
+
+                        if (hasHorizEndShelf && !hasHorizStartShelf) startTipScore += 5;
+                        else if (hasHorizStartShelf && !hasHorizEndShelf) endTipScore += 5;
+
+                        if (blocks.Count > 0 && startTipScore == endTipScore)
+                        {
+                            double bDistStart = double.MaxValue, bDistEnd = double.MaxValue;
+                            for (int bi = 0; bi < blocks.Count; bi++)
+                            {
+                                bDistStart = Math.Min(bDistStart, DistPointToBounds2D(pStart.X, pStart.Y, blocks[bi].Bounds));
+                                bDistEnd = Math.Min(bDistEnd, DistPointToBounds2D(pEnd.X, pEnd.Y, blocks[bi].Bounds));
+                            }
+                            if (bDistStart < bDistEnd * 0.7) startTipScore += 3;
+                            else if (bDistEnd < bDistStart * 0.7) endTipScore += 3;
+                        }
+
+                        bool reversePts = (endTipScore > startTipScore);
+                        List<Point3d> orderedPts = new List<Point3d>(pts);
+                        ArrowHeadShape usedHead = reversePts ? endHead : startHead;
+                        ArrowTextCandidate pairedText = reversePts ? bestStartTxt : bestEndTxt;
+                        double pairedTextDist = reversePts ? dStartTxt : dEndTxt;
+
+                        if (reversePts) orderedPts.Reverse();
+
+                        // If segment 0 was solely a collinear arrowhead-cone vertex in a tapered Polyline, drop redundant cone-base vertex
+                        if (sh.HasTaperedWidth && orderedPts.Count >= 3)
+                        {
+                            Vector3d v0 = orderedPts[1] - orderedPts[0];
+                            Vector3d v1 = orderedPts[2] - orderedPts[1];
+                            if (v0.Length > 1e-6 && v1.Length > 1e-6)
+                            {
+                                double cosAng = v0.GetNormal().DotProduct(v1.GetNormal());
+                                double headWidthMax = reversePts
+                                    ? Math.Max(sh.EndSegW0, sh.EndSegW1)
+                                    : Math.Max(sh.StartSegW0, sh.StartSegW1);
+                                if (cosAng > 0.995 && v0.Length <= Math.Max(1e-4, headWidthMax * 4.5))
+                                {
+                                    detectedHeadLen = Math.Max(detectedHeadLen, v0.Length);
+                                    orderedPts.RemoveAt(1);
+                                }
+                            }
+                        }
+
+                        // Create native Autodesk.AutoCAD.DatabaseServices.Leader
+                        string safeLyr = !string.IsNullOrWhiteSpace(targetLayerOverride)
+                            ? EnsureLayerSafe(db, tr, targetLayerOverride.Trim(), overrideColor.HasValue ? (short?)ClampColor(overrideColor.Value) : null, null)
+                            : sh.Layer;
+
+                        double firstLegLen = orderedPts.Count >= 2 ? orderedPts[0].DistanceTo(orderedPts[1]) : 1.0;
+                        double textHRef = (pairedText != null && pairedTextDist <= Math.Max(pairedText.Height * 3.0, dwgSpan * 0.02))
+                            ? pairedText.Height
+                            : Math.Max(1e-4, firstLegLen * 0.09);
+
+                        double dimasz = explicitArrowSize.HasValue
+                            ? Math.Max(1e-4, explicitArrowSize.Value)
+                            : (detectedHeadLen > 1e-4
+                                ? Math.Min(firstLegLen * 0.48, Math.Max(detectedHeadLen, 1e-4))
+                                : Math.Max(textHRef * 1.15, Math.Min(firstLegLen * 0.42, Math.Max(textHRef * 1.55, firstLegLen * 0.16))));
+                        if (dimasz <= 1e-4) dimasz = Math.Max(1e-4, firstLegLen * 0.2);
+
+                        Leader ldr = new Leader();
+                        ldr.SetDatabaseDefaults(db);
+                        ldr.Layer = safeLyr;
+                        if (overrideColor.HasValue)
+                        {
+                            short aci = (short)ClampColor(overrideColor.Value);
+                            ldr.ColorIndex = aci;
+                            ldr.Dimclrd = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
+                                Autodesk.AutoCAD.Colors.ColorMethod.ByAci, aci);
+                        }
+                        else if (sh.SourceColor != null)
+                        {
+                            ldr.Color = sh.SourceColor;
+                            try { ldr.Dimclrd = sh.SourceColor; } catch { }
+                        }
+                        ldr.DimensionStyle = db.Dimstyle;
+                        try { ldr.Dimldrblk = ObjectId.Null; } catch { }
+                        ldr.HasArrowHead = true;
+                        ldr.IsSplined = false;
+                        ldr.Dimasz = dimasz;
+
+                        int appendedCount = 0;
+                        Point3d prevAppended = Point3d.Origin;
+                        for (int vi = 0; vi < orderedPts.Count; vi++)
+                        {
+                            Point3d vpt = new Point3d(orderedPts[vi].X, orderedPts[vi].Y, 0.0);
+                            if (appendedCount == 0 || vpt.DistanceTo(prevAppended) > 1e-6)
+                            {
+                                ldr.AppendVertex(vpt);
+                                prevAppended = vpt;
+                                appendedCount++;
+                            }
+                        }
+                        if (appendedCount < 2)
+                        {
+                            ldr.Dispose();
+                            continue;
+                        }
+
+                        ObjectId ldrId = ms.AppendEntity(ldr);
+                        tr.AddNewlyCreatedDBObject(ldr, true);
+
+                        // If paired with coordinate text & touching a BlockReference, preserve coordinate XData for reference_callout_index
+                        if (pairedText != null && blocks.Count > 0)
+                        {
+                            int parsedIdx;
+                            string headerTok;
+                            if (ParseLeadingCalloutIndex(pairedText.Text, out parsedIdx, out headerTok) && parsedIdx > 0)
+                            {
+                                ArrowBlockCandidate nearBlk = null;
+                                double bestBd = double.MaxValue;
+                                Point3d tipPt = orderedPts[0];
+                                for (int bi = 0; bi < blocks.Count; bi++)
+                                {
+                                    double bd = DistPointToBounds2D(tipPt.X, tipPt.Y, blocks[bi].Bounds);
+                                    if (bd < bestBd) { bestBd = bd; nearBlk = blocks[bi]; }
+                                }
+                                if (nearBlk != null)
+                                {
+                                    double blkSpan = Math.Max(nearBlk.Bounds.MaxPoint.X - nearBlk.Bounds.MinPoint.X,
+                                                              nearBlk.Bounds.MaxPoint.Y - nearBlk.Bounds.MinPoint.Y);
+                                    if (bestBd <= Math.Max(dimasz * 2.0, blkSpan * 0.5))
+                                    {
+                                        AttachCoordLeaderXData(db, tr, ldr, new CoordTargetItem
+                                        {
+                                            Index = parsedIdx,
+                                            BlockIndex = parsedIdx,
+                                            SubPointIndex = 0,
+                                            SubPointLabel = string.IsNullOrEmpty(headerTok) ? ("#" + parsedIdx.ToString(CultureInfo.InvariantCulture)) : headerTok,
+                                            BlockName = nearBlk.BlockName,
+                                            Handle = tr.GetObject(nearBlk.Id, OpenMode.ForRead).Handle.ToString()
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        createdIds.Add(ldrId);
+                        createdHandles.Add(ldr.Handle.ToString());
+                        qualifiedArrows.Add(sh);
+
+                        Extents3d lEx = new Extents3d(
+                            new Point3d(Math.Min(orderedPts[0].X, orderedPts[orderedPts.Count - 1].X),
+                                        Math.Min(orderedPts[0].Y, orderedPts[orderedPts.Count - 1].Y), 0.0),
+                            new Point3d(Math.Max(orderedPts[0].X, orderedPts[orderedPts.Count - 1].X),
+                                        Math.Max(orderedPts[0].Y, orderedPts[orderedPts.Count - 1].Y), 0.0));
+                        if (!convertedExt.HasValue) convertedExt = lEx;
+                        else { Extents3d c = convertedExt.Value; c.AddExtents(lEx); convertedExt = c; }
+
+                        if (convertedDetails.Count < 80)
+                        {
+                            convertedDetails.Add(new Dictionary<string, object>
+                            {
+                                { "source_handle", sh.Handle },
+                                { "leader_handle", ldr.Handle.ToString() },
+                                { "layer", safeLyr },
+                                { "tip", Pt2(orderedPts[0].X, orderedPts[0].Y) },
+                                { "tail", Pt2(orderedPts[orderedPts.Count - 1].X, orderedPts[orderedPts.Count - 1].Y) },
+                                { "arrow_size", Round(dimasz) },
+                                { "paired_text", pairedText != null && pairedTextDist <= Math.Max(pairedText.Height * 3.0, dwgSpan * 0.02) ? pairedText.Text : "" }
+                            });
+                        }
+
+                        if (!keepSource)
+                        {
+                            try
+                            {
+                                Entity srcEnt = tr.GetObject(sh.PrimaryId, OpenMode.ForWrite) as Entity;
+                                if (srcEnt != null && !srcEnt.IsErased)
+                                {
+                                    srcEnt.Erase(true);
+                                    erasedIds.Add(sh.PrimaryId);
+                                }
+                            }
+                            catch { }
+
+                            if (!sh.MergedSecondLineId.IsNull)
+                            {
+                                try
+                                {
+                                    Entity secEnt = tr.GetObject(sh.MergedSecondLineId, OpenMode.ForWrite) as Entity;
+                                    if (secEnt != null && !secEnt.IsErased)
+                                    {
+                                        secEnt.Erase(true);
+                                        erasedIds.Add(sh.MergedSecondLineId);
+                                    }
+                                }
+                                catch { }
+                            }
+
+                            if (usedHead != null && consumedHeadIds.Add(usedHead.Id))
+                            {
+                                try
+                                {
+                                    Entity hdEnt = tr.GetObject(usedHead.Id, OpenMode.ForWrite) as Entity;
+                                    if (hdEnt != null && !hdEnt.IsErased)
+                                    {
+                                        hdEnt.Erase(true);
+                                        erasedIds.Add(usedHead.Id);
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+
+                    if (clearHighlight && highlightIds.Count > 0)
+                    {
+                        for (int hi = 0; hi < highlightIds.Count; hi++)
+                        {
+                            try
+                            {
+                                Entity he = tr.GetObject(highlightIds[hi], OpenMode.ForWrite) as Entity;
+                                if (he != null && !he.IsErased)
+                                {
+                                    he.Erase(true);
+                                    erasedIds.Add(highlightIds[hi]);
+                                    highlightErasedCount++;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+
+                    db.UpdateExt(true);
+                    tr.Commit();
+                }
+
+                if (createdIds.Count > 0 || erasedIds.Count > 0)
+                {
+                    CadUndoEntry undo = new CadUndoEntry();
+                    undo.ToolName = "convert_arrows_to_leaders";
+                    undo.Summary = "Converted " + createdIds.Count.ToString(CultureInfo.InvariantCulture) + " arrow(s) to native Leaders";
+                    undo.ErasedIds.AddRange(erasedIds);
+                    undo.CreatedIds.AddRange(createdIds);
+                    PushUndoEntry(doc, undo);
+                }
+
+                if (zoom && convertedExt.HasValue && IsFiniteBounds(convertedExt.Value))
+                    ZoomToExtents3d(doc, convertedExt.Value, 1.2);
+                else
+                    doc.Editor.Regen();
+                doc.Editor.UpdateScreen();
+            }
+
+            if (createdIds.Count == 0 && highlightErasedCount == 0)
+            {
+                if (alreadyLeaderCount > 0)
+                    return Err("الأسهم الموجودة في المخطط (" + alreadyLeaderCount.ToString(CultureInfo.InvariantCulture) + ") هي بالفعل عناصر Leader أصلية، ولم يتم العثور على أسهم Polyline/Line للتحويل.");
+                return Err("لم يتم العثور على أسهم مرسومة (Polyline/Line/Solid) لتحويلها إلى Leader. يمكنك تحديد الأسهم بالماوس في أوتوكاد ثم التمرير بـ selected_only=true.");
+            }
+
+            return Ok(new Dictionary<string, object>
+            {
+                { "converted_count", createdIds.Count },
+                { "already_leader_count", alreadyLeaderCount },
+                { "erased_source_count", erasedIds.Count },
+                { "highlight_boxes_removed", highlightErasedCount },
+                { "leader_handles", createdHandles },
+                { "details", convertedDetails },
+                { "switched_to_model", switchedToModel },
+                { "undo_history_steps", GetUndoHistoryCount(doc) }
+            });
+        }
     }
 }
