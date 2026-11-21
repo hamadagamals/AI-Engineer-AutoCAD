@@ -7932,27 +7932,62 @@ namespace AIEngineer.AutoCAD
             catch { return false; }
         }
 
-        private static bool ParseLeadingCalloutIndex(string rawText, out int calloutIndex)
+        private static bool ParseLeadingCalloutIndex(string rawText, out int calloutIndex, out string headerToken)
         {
             calloutIndex = 0;
+            headerToken = "";
             if (string.IsNullOrWhiteSpace(rawText)) return false;
-            string s = rawText.Trim();
+            string firstLine = rawText.Trim().Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+            if (string.IsNullOrEmpty(firstLine)) return false;
+            int spaceIdx = firstLine.IndexOf(' ');
+            headerToken = (spaceIdx > 0) ? firstLine.Substring(0, spaceIdx).Trim() : firstLine;
+
             int pos = 0;
-            while (pos < s.Length && !char.IsDigit(s[pos]))
-            {
-                if (s[pos] != '#' && !char.IsWhiteSpace(s[pos])) return false;
-                pos++;
-            }
+            while (pos < headerToken.Length && !char.IsDigit(headerToken[pos])) pos++;
             int start = pos;
-            while (pos < s.Length && char.IsDigit(s[pos])) pos++;
+            while (pos < headerToken.Length && char.IsDigit(headerToken[pos])) pos++;
             if (pos == start) return false;
             int val;
-            if (int.TryParse(s.Substring(start, pos - start), NumberStyles.Integer, CultureInfo.InvariantCulture, out val) && val > 0)
+            if (int.TryParse(headerToken.Substring(start, pos - start), NumberStyles.Integer, CultureInfo.InvariantCulture, out val) && val > 0)
             {
                 calloutIndex = val;
                 return true;
             }
             return false;
+        }
+
+        private static bool PromptPickReferenceLeader(Document doc, out ObjectId pickedLeaderId, out string errorMsg)
+        {
+            pickedLeaderId = ObjectId.Null;
+            errorMsg = "";
+            try
+            {
+                int cmdActive = Convert.ToInt32(
+                    Autodesk.AutoCAD.ApplicationServices.Application.GetSystemVariable("CMDACTIVE"),
+                    CultureInfo.InvariantCulture);
+                if (cmdActive != 0)
+                {
+                    errorMsg = "An AutoCAD command is currently active (CMDACTIVE=" + cmdActive + "). Press Esc in AutoCAD first, then select the reference Leader.";
+                    return false;
+                }
+            }
+            catch { }
+
+            try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
+            catch { try { doc.Window.Focus(); } catch { } }
+
+            PromptEntityOptions peo = new PromptEntityOptions(
+                "\n[AI-Engineer] Click the reference Leader arrow whose position inside the block should be applied to all matching blocks: ");
+            peo.SetRejectMessage("\nSelect a Leader entity.");
+            peo.AddAllowedClass(typeof(Leader), false);
+            PromptEntityResult per = doc.Editor.GetEntity(peo);
+            if (per.Status != PromptStatus.OK || per.ObjectId.IsNull)
+            {
+                errorMsg = "Reference Leader selection was cancelled.";
+                return false;
+            }
+            pickedLeaderId = per.ObjectId;
+            return true;
         }
 
         private static double DistPointToExtents2D(double px, double py, Extents3d ex)
@@ -7966,10 +8001,18 @@ namespace AIEngineer.AutoCAD
         {
             public Leader Ldr;
             public int Index;
+            public string LabelToken;
             public string BlockHandle;
             public string BlockName;
             public Point3d TipPt;
             public Point3d LastPt;
+        }
+
+        private sealed class LabelAnchorInfo
+        {
+            public int Index;
+            public string Token;
+            public Point3d Pos;
         }
 
         private static bool ResolveReferenceLeadersToSamplePoints(
@@ -7980,6 +8023,7 @@ namespace AIEngineer.AutoCAD
             string blockFilter,
             List<string> selectedHandles,
             List<int> refIndices,
+            string refLabel,
             bool fromSelectedLeader,
             Dictionary<string, bool> layerHiddenFlags,
             bool visibleOnly,
@@ -7994,7 +8038,7 @@ namespace AIEngineer.AutoCAD
             errorMsg = "";
 
             List<ExistingCalloutLeaderInfo> leaders = new List<ExistingCalloutLeaderInfo>();
-            List<KeyValuePair<int, Point3d>> labelAnchors = new List<KeyValuePair<int, Point3d>>();
+            List<LabelAnchorInfo> labelAnchors = new List<LabelAnchorInfo>();
             HashSet<ObjectId> selectedIdSet = new HashSet<ObjectId>();
             if (selectedHandles != null)
             {
@@ -8041,8 +8085,15 @@ namespace AIEngineer.AutoCAD
                     if (mt != null)
                     {
                         int parsedIdx;
-                        if (ParseLeadingCalloutIndex(mt.Text, out parsedIdx))
-                            labelAnchors.Add(new KeyValuePair<int, Point3d>(parsedIdx, mt.Location));
+                        string tok;
+                        if (ParseLeadingCalloutIndex(mt.Text, out parsedIdx, out tok) || !string.IsNullOrWhiteSpace(tok))
+                        {
+                            LabelAnchorInfo la = new LabelAnchorInfo();
+                            la.Index = parsedIdx;
+                            la.Token = tok ?? "";
+                            la.Pos = mt.Location;
+                            labelAnchors.Add(la);
+                        }
                     }
                     else
                     {
@@ -8050,24 +8101,31 @@ namespace AIEngineer.AutoCAD
                         if (dt != null)
                         {
                             int parsedIdx;
-                            if (ParseLeadingCalloutIndex(dt.TextString, out parsedIdx))
-                                labelAnchors.Add(new KeyValuePair<int, Point3d>(parsedIdx, dt.Position));
+                            string tok;
+                            if (ParseLeadingCalloutIndex(dt.TextString, out parsedIdx, out tok) || !string.IsNullOrWhiteSpace(tok))
+                            {
+                                LabelAnchorInfo la = new LabelAnchorInfo();
+                                la.Index = parsedIdx;
+                                la.Token = tok ?? "";
+                                la.Pos = dt.Position;
+                                labelAnchors.Add(la);
+                            }
                         }
                     }
                 }
             }
 
-            // Pair any non-XData Leaders (e.g. older drawings) with nearest MText index
+            // Pair Leaders with nearest MText label token & index
             HashSet<int> usedLabelPos = new HashSet<int>();
             for (int i = 0; i < leaders.Count; i++)
             {
-                if (leaders[i].Index > 0) continue;
+                if (leaders[i].Index > 0 && !string.IsNullOrEmpty(leaders[i].LabelToken)) continue;
                 int bestLabelIdx = -1;
                 double bestDist = double.MaxValue;
                 for (int li = 0; li < labelAnchors.Count; li++)
                 {
                     if (usedLabelPos.Contains(li)) continue;
-                    double d = leaders[i].LastPt.DistanceTo(labelAnchors[li].Value);
+                    double d = leaders[i].LastPt.DistanceTo(labelAnchors[li].Pos);
                     if (d < bestDist)
                     {
                         bestDist = d;
@@ -8076,13 +8134,35 @@ namespace AIEngineer.AutoCAD
                 }
                 if (bestLabelIdx >= 0)
                 {
-                    leaders[i].Index = labelAnchors[bestLabelIdx].Key;
+                    if (leaders[i].Index <= 0) leaders[i].Index = labelAnchors[bestLabelIdx].Index;
+                    leaders[i].LabelToken = labelAnchors[bestLabelIdx].Token;
                     usedLabelPos.Add(bestLabelIdx);
                 }
             }
 
             List<ExistingCalloutLeaderInfo> chosenLeaders = new List<ExistingCalloutLeaderInfo>();
-            if (refIndices != null && refIndices.Count > 0)
+            if (!string.IsNullOrWhiteSpace(refLabel))
+            {
+                string normTarget = refLabel.Trim().TrimStart('#');
+                ExistingCalloutLeaderInfo match = null;
+                for (int i = 0; i < leaders.Count; i++)
+                {
+                    string tok = (leaders[i].LabelToken ?? "").Trim().TrimStart('#');
+                    if (string.Equals(tok, normTarget, StringComparison.OrdinalIgnoreCase))
+                    {
+                        match = leaders[i];
+                        break;
+                    }
+                }
+                if (match == null)
+                {
+                    errorMsg = "Could not find an existing coordinate Leader labeled '" + refLabel +
+                               "' on layer '" + calloutLayer + "'. Select the reference Leader directly in AutoCAD and try again.";
+                    return false;
+                }
+                chosenLeaders.Add(match);
+            }
+            else if (refIndices != null && refIndices.Count > 0)
             {
                 for (int r = 0; r < refIndices.Count; r++)
                 {
@@ -8096,7 +8176,7 @@ namespace AIEngineer.AutoCAD
                     {
                         errorMsg = "Could not find an existing coordinate Leader callout #" +
                                    targetIdx.ToString(CultureInfo.InvariantCulture) +
-                                   " on layer '" + calloutLayer + "'.";
+                                   " on layer '" + calloutLayer + "'. You can click/select the reference Leader directly in AutoCAD (or use pick_reference_leader) even if its numbering is different.";
                         return false;
                     }
                     chosenLeaders.Add(match);
@@ -8113,7 +8193,7 @@ namespace AIEngineer.AutoCAD
             }
             else
             {
-                errorMsg = "No reference callout index or selected Leader was provided.";
+                errorMsg = "No reference callout index, label, or selected Leader was provided.";
                 return false;
             }
 
@@ -8447,7 +8527,9 @@ namespace AIEngineer.AutoCAD
                 }
             }
             bool fromSelectedLeader = GetBool(args, "from_selected_leader", false);
-            bool hasRefLeaderReq = (refCalloutIndices.Count > 0 || fromSelectedLeader);
+            bool pickRefLeader = GetBool(args, "pick_reference_leader", false);
+            string refCalloutLabel = GetStr(args, "reference_callout_label") ?? "";
+            bool hasRefLeaderReq = (refCalloutIndices.Count > 0 || !string.IsNullOrWhiteSpace(refCalloutLabel) || fromSelectedLeader || pickRefLeader);
             string rawMultiPointMode = GetStr(args, "multi_point_mode");
             string normalizedMultiPointMode = NormalizeMultiPointMode(rawMultiPointMode);
             List<SamplePointSpec> explicitLocalPts = ParseSamplePointList(args, "local_points");
@@ -8457,6 +8539,7 @@ namespace AIEngineer.AutoCAD
             List<SamplePointSpec> pickedLocalPts = null;
             ObjectId pickedSampleBlockId = ObjectId.Null;
             string pickedSampleBlockName = "";
+            string pickedRefLeaderHandle = "";
             if (pickSamplePoints)
             {
                 if (!db.TileMode)
@@ -8473,6 +8556,23 @@ namespace AIEngineer.AutoCAD
                 }
                 if (string.IsNullOrWhiteSpace(blockFilter) && !string.IsNullOrWhiteSpace(pickedSampleBlockName))
                     blockFilter = pickedSampleBlockName;
+            }
+            else if (pickRefLeader)
+            {
+                if (!db.TileMode)
+                {
+                    try { LayoutManager.Current.CurrentLayout = "Model"; } catch { }
+                }
+                ObjectId pickedLdrId;
+                string pickLdrErr;
+                if (!PromptPickReferenceLeader(doc, out pickedLdrId, out pickLdrErr))
+                    return Err(pickLdrErr);
+                using (Transaction trTmp = db.TransactionManager.StartTransaction())
+                {
+                    Entity pe = trTmp.GetObject(pickedLdrId, OpenMode.ForRead) as Entity;
+                    if (pe != null) pickedRefLeaderHandle = pe.Handle.ToString();
+                    trTmp.Commit();
+                }
             }
 
             string sortOrder = normalizedSortOrder;
@@ -8520,6 +8620,8 @@ namespace AIEngineer.AutoCAD
             string zoomMode = (GetStr(args, "zoom_mode") ?? "auto").Trim().ToLowerInvariant();
 
             List<string> selectedHandles = selectedOnlyArg ? GetSelectedHandleStrings(doc) : new List<string>();
+            if (!string.IsNullOrWhiteSpace(pickedRefLeaderHandle) && !selectedHandles.Contains(pickedRefLeaderHandle))
+                selectedHandles.Add(pickedRefLeaderHandle);
             HashSet<string> selectedSet = new HashSet<string>(selectedHandles, StringComparer.OrdinalIgnoreCase);
             HashSet<string> explicitHandleSet = new HashSet<string>(explicitHandles, StringComparer.OrdinalIgnoreCase);
 
@@ -8585,7 +8687,7 @@ namespace AIEngineer.AutoCAD
                             if (id.IsNull || id.IsErased || !seenPick.Add(id)) continue;
                             Entity ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
                             if (ent == null || ent.OwnerId != ms.ObjectId) continue;
-                            if (ent is Leader && (IsAiAnnotationLayer(ent.Layer) || string.Equals(ent.Layer ?? "", safeCalloutLayer, StringComparison.OrdinalIgnoreCase)))
+                            if (ent is Leader)
                             {
                                 hasSelectedLeader = true;
                                 continue;
@@ -8607,10 +8709,10 @@ namespace AIEngineer.AutoCAD
                         }
                     }
 
-                    // 1b. If engineer asked to match a reference Leader callout (#16 or selected Leader), read its arrowhead BEFORE erasing old callouts
+                    // 1b. If engineer asked to match a reference Leader callout (#N, label, picked, or selected Leader), read its arrowhead BEFORE erasing old callouts
                     List<SamplePointSpec> refLeaderLocalPts = null;
                     string refLeaderInferredBlock = "";
-                    if (hasRefLeaderReq || (hasSelectedLeader && selectedBlockIds.Count == 0 && selectedNonBlockIds.Count == 0 && string.IsNullOrWhiteSpace(blockFilter)))
+                    if (hasRefLeaderReq || (hasSelectedLeader && selectedBlockIds.Count == 0 && selectedNonBlockIds.Count == 0))
                     {
                         string refErr;
                         List<SamplePointSpec> resolvedRefPts;
@@ -8618,7 +8720,7 @@ namespace AIEngineer.AutoCAD
                         string searchBlockFilter = !string.IsNullOrWhiteSpace(blockFilter) ? blockFilter : rememberedBlockName;
                         if (!ResolveReferenceLeadersToSamplePoints(
                             db, tr, ms, safeCalloutLayer, searchBlockFilter, selectedHandles,
-                            refCalloutIndices, fromSelectedLeader || hasSelectedLeader,
+                            refCalloutIndices, refCalloutLabel, fromSelectedLeader || hasSelectedLeader || !string.IsNullOrWhiteSpace(pickedRefLeaderHandle),
                             layerHiddenFlags, visibleOnly, includeAnonymous, includeSystem,
                             out resolvedRefBlock, out resolvedRefPts, out refErr))
                         {
