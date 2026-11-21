@@ -12,6 +12,11 @@ from integrations.build_lighting_classification_audit import build_audit, render
 
 EVIDENCE = Path("workspace/reports/lighting-panel-schedule-candidate-evidence-20260824.json")
 
+pytestmark = pytest.mark.skipif(
+    not EVIDENCE.is_file(),
+    reason="Field-project AutoCAD lighting evidence JSON is absent in this checkout (gitignored workspace/reports).",
+)
+
 
 def _evidence():
     return json.loads(EVIDENCE.read_text(encoding="utf-8"))

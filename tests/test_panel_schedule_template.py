@@ -12,8 +12,14 @@ from integrations.panel_schedule_template import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_TEMPLATE_MANIFEST = PROJECT_ROOT / "data" / "templates" / "panel-schedules" / "panels-sch-8-station.json"
+_SKIP_MISSING_TEMPLATE = pytest.mark.skipif(
+    not _TEMPLATE_MANIFEST.is_file(),
+    reason="Registered panel-schedule template workbook/manifest is absent in this checkout (gitignored data/).",
+)
 
 
+@_SKIP_MISSING_TEMPLATE
 def test_registered_workbook_identity_and_structure_are_valid() -> None:
     registration = validate_registration(PROJECT_ROOT)
 
@@ -32,6 +38,7 @@ def test_registered_workbook_identity_and_structure_are_valid() -> None:
     ]
 
 
+@_SKIP_MISSING_TEMPLATE
 def test_generation_plan_creates_one_unique_sheet_per_panel() -> None:
     plan = build_generation_plan(
         PROJECT_ROOT,

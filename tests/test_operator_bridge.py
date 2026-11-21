@@ -303,10 +303,14 @@ def test_bundled_vscode_extension_matches_source_version_and_content() -> None:
             "extension.vsixmanifest",
             "[Content_Types].xml",
         } <= names
-        assert archive.read("extension/package.json") == (source / "package.json").read_bytes()
-        assert archive.read("extension/extension.js") == (source / "extension.js").read_bytes()
-        assert archive.read("extension/media/operator.js") == (
+        assert archive.read("extension/package.json").replace(b"\r\n", b"\n") == (
+            source / "package.json"
+        ).read_bytes().replace(b"\r\n", b"\n")
+        assert archive.read("extension/extension.js").replace(b"\r\n", b"\n") == (
+            source / "extension.js"
+        ).read_bytes().replace(b"\r\n", b"\n")
+        assert archive.read("extension/media/operator.js").replace(b"\r\n", b"\n") == (
             source / "media" / "operator.js"
-        ).read_bytes()
+        ).read_bytes().replace(b"\r\n", b"\n")
         manifest = archive.read("extension.vsixmanifest").decode("utf-8")
         assert f'Version="{package["version"]}"' in manifest

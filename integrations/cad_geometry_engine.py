@@ -704,7 +704,8 @@ def parse_and_generate(raw_prompt: str, output_dir: Path) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompt", type=str, required=True)
-    parser.add_argument("--output-dir", type=Path, default=Path("D:/program/apartment_150sqm"))
+    default_out = Path(__file__).resolve().parent.parent / "workspace" / "apartment_150sqm"
+    parser.add_argument("--output-dir", type=Path, default=default_out)
     args = parser.parse_args()
     result = parse_and_generate(args.prompt, args.output_dir)
     # Output ASCII-safe JSON so ANY host codepage (cp1252, cp1256, utf-8) decodes cleanly

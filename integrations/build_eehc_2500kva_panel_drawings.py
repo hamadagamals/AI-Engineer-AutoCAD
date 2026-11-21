@@ -1942,7 +1942,7 @@ def convert_dxf_to_dwg(dxf_path: Path, dwg_path: Path) -> bool:
 
 
 def main() -> None:
-    out_dir = Path(r"D:\program\AI-Engineer-r50\workspace\eehc-2500kva-panel-drawings")
+    out_dir = Path(__file__).resolve().parent.parent / "workspace" / "eehc-2500kva-panel-drawings"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     builders = [

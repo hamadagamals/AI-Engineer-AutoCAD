@@ -4,7 +4,7 @@
 > 🎯 **الهدف النهائي للمشروع (Master Project Goal):**
 > بناء برنامج هندسي احترافي قابل للتثبيت (Windows Setup) ينزل كإضافة أصلية داخل **AutoCAD** (عبر PaletteSet) و **Revit** (عبر DockablePane)، يتيح للمهندس التحدث المباشر مع مساعد ذكي خبير بكامل الصلاحيات، مع الالتزام الصارم بدورة المراجعة اللونية، وحرية اختيار مزودي الذكاء (Gemini, Claude, Codex, إلخ) وإدخال مفاتيحهم (BYOK)، وقراءة مواصفات المشاريع والحسابات الهندسية الدقيقة.
 >
-> التفاصيل المعمارية الكاملة موثقة في: [`docs/MASTER_PRODUCT_GOAL_AR.md`](file:///D:/program/AI-Engineer-r50/New%20folder/docs/MASTER_PRODUCT_GOAL_AR.md) و [`docs/COMMERCIAL_PRODUCT_BLUEPRINT_AR.md`](file:///D:/program/AI-Engineer-r50/New%20folder/docs/COMMERCIAL_PRODUCT_BLUEPRINT_AR.md).
+> التفاصيل المعمارية الكاملة موثقة في: [`docs/MASTER_PRODUCT_GOAL_AR.md`](docs/MASTER_PRODUCT_GOAL_AR.md) و [`docs/COMMERCIAL_PRODUCT_BLUEPRINT_AR.md`](docs/COMMERCIAL_PRODUCT_BLUEPRINT_AR.md).
 
 ---
 

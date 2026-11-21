@@ -7297,38 +7297,50 @@ namespace AIEngineer.AutoCAD
 
             Vector3d vToTip = targetPt - elbowPt;
             double totalDist = vToTip.Length;
-            double arrowLen = Math.Max(textH * 0.9, Math.Min(explicitArrow, Math.Max(textH * 0.5, totalDist * 0.45)));
-            if (totalDist > 1e-6)
+            double arrowLen = Math.Max(textH * 0.9, Math.Min(explicitArrow, Math.Max(textH * 0.5, totalDist * 0.42)));
+            Point3d leaderTip = new Point3d(targetPt.X, targetPt.Y, 0.0);
+            Point3d leaderElbow = new Point3d(elbowPt.X, elbowPt.Y, 0.0);
+            Point3d leaderShelfEnd = new Point3d(shelfEnd.X, shelfEnd.Y, 0.0);
+
+            Leader ldr = new Leader();
+            ldr.SetDatabaseDefaults(db);
+            ldr.Layer = targetLayer;
+            if (leaderClr.HasValue)
             {
-                Vector3d dir = vToTip / totalDist;
-                Vector3d perp = new Vector3d(-dir.Y, dir.X, 0.0);
-                Point3d arrowBase = targetPt - dir * arrowLen;
-                double halfW = arrowLen * 0.34;
-                Solid head = new Solid(targetPt, arrowBase + perp * halfW, arrowBase - perp * halfW);
-                head.Layer = targetLayer;
-                if (leaderClr.HasValue) head.ColorIndex = ClampColor(leaderClr.Value);
-                parts.Add(head);
-
-                if (totalDist > arrowLen * 1.05)
-                {
-                    Line shaft = new Line(arrowBase, elbowPt);
-                    shaft.Layer = targetLayer;
-                    if (leaderClr.HasValue) shaft.ColorIndex = ClampColor(leaderClr.Value);
-                    parts.Add(shaft);
-                }
+                short aci = (short)ClampColor(leaderClr.Value);
+                ldr.ColorIndex = aci;
+                ldr.Dimclrd = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
+                    Autodesk.AutoCAD.Colors.ColorMethod.ByAci, aci);
             }
+            ldr.DimensionStyle = db.Dimstyle;
+            try { ldr.Dimldrblk = ObjectId.Null; } catch { }
+            ldr.HasArrowHead = true;
+            ldr.IsSplined = false;
+            ldr.Dimasz = Math.Max(1e-4, arrowLen);
+            ldr.AppendVertex(leaderTip);
+            if (totalDist > 1e-6)
+                ldr.AppendVertex(leaderElbow);
+            ldr.AppendVertex(leaderShelfEnd);
 
-            Line shelf = new Line(elbowPt, shelfEnd);
-            shelf.Layer = targetLayer;
-            if (leaderClr.HasValue) shelf.ColorIndex = ClampColor(leaderClr.Value);
-            parts.Add(shelf);
+            parts.Add(ldr);
             parts.Add(mt);
             return parts;
+        }
+
+        private sealed class SamplePointSpec
+        {
+            public double LocalX;
+            public double LocalY;
+            public double LocalZ;
+            public string Label;
         }
 
         private sealed class CoordTargetItem
         {
             public int Index;
+            public int BlockIndex;
+            public int SubPointIndex;
+            public string SubPointLabel;
             public int SortBand;
             public ObjectId Id;
             public string Handle;
@@ -7341,6 +7353,11 @@ namespace AIEngineer.AutoCAD
             public double InsertY;
             public double ArrowX;
             public double ArrowY;
+            public double LocalX;
+            public double LocalY;
+            public bool HasCustomPoint;
+            public bool IsBlockRef;
+            public Matrix3d BlockXform;
             public Extents3d Bounds;
             public string LabelText;
             public double LabelMinX;
@@ -7450,7 +7467,7 @@ namespace AIEngineer.AutoCAD
             for (int p = 0; p < placedTargets.Count; p++)
             {
                 CoordTargetItem other = placedTargets[p];
-                if (!other.Placed || other.Id == target.Id) continue;
+                if (!other.Placed || object.ReferenceEquals(other, target)) continue;
                 if (RectsOverlap(overallMinX - boxMargin, ly1 - boxMargin, overallMaxX + boxMargin, ly2 + boxMargin,
                                  Math.Min(other.LabelMinX, Math.Min(other.ElbowX, other.ShelfX2)),
                                  other.LabelMinY,
@@ -7607,6 +7624,9 @@ namespace AIEngineer.AutoCAD
 
         private static readonly object s_lastCoordLock = new object();
         private static readonly Dictionary<IntPtr, string> s_lastCoordSortOrderByDb = new Dictionary<IntPtr, string>();
+        private static readonly Dictionary<IntPtr, string> s_lastMultiPointModeByDb = new Dictionary<IntPtr, string>();
+        private static readonly Dictionary<IntPtr, Dictionary<string, List<SamplePointSpec>>> s_lastBlockSamplePointsByDb =
+            new Dictionary<IntPtr, Dictionary<string, List<SamplePointSpec>>>();
         private static readonly Dictionary<IntPtr, ExcelSheetData> s_lastCoordTableByDb = new Dictionary<IntPtr, ExcelSheetData>();
         private static readonly Dictionary<IntPtr, ExcelSheetData> s_lastLegendTableByDb = new Dictionary<IntPtr, ExcelSheetData>();
         private static readonly Dictionary<IntPtr, ExcelSheetData> s_lastPanelScheduleByDb = new Dictionary<IntPtr, ExcelSheetData>();
@@ -7739,6 +7759,319 @@ namespace AIEngineer.AutoCAD
             });
         }
 
+        private static string NormalizeMultiPointMode(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "";
+            string s = raw.Trim().ToLowerInvariant().Replace("-", "_").Replace(" ", "_");
+            while (s.Contains("__")) s = s.Replace("__", "_");
+            s = s.Trim('_');
+            if (s == "grouped" || s == "block_rows" || s == "rows" || s == "per_block" ||
+                s == "subrows" || s == "sub_rows" || s == "block_subrows" ||
+                s.Contains("صفوف") || s.Contains("امام_رقم_البلوك") || s.Contains("أمام_رقم_البلوك"))
+                return "grouped";
+            if (s == "sequential" || s == "seq" || s == "points" || s == "continuous" ||
+                s == "per_point" || s.Contains("متسلسل") || s.Contains("وراء_بعض") || s.Contains("ورا_بعض"))
+                return "sequential";
+            return "";
+        }
+
+        private static List<SamplePointSpec> ParseSamplePointList(Dictionary<string, object> args, string key)
+        {
+            List<SamplePointSpec> list = new List<SamplePointSpec>();
+            if (args == null || !args.ContainsKey(key) || args[key] == null) return list;
+            IEnumerable seq = args[key] as IEnumerable;
+            if (seq == null || args[key] is string) return list;
+            int idx = 1;
+            foreach (object obj in seq)
+            {
+                if (obj == null) continue;
+                Dictionary<string, object> dict = obj as Dictionary<string, object>;
+                if (dict != null)
+                {
+                    double x = GetDouble(dict, "x", double.NaN);
+                    double y = GetDouble(dict, "y", double.NaN);
+                    double z = GetDouble(dict, "z", 0.0);
+                    if (!double.IsNaN(x) && !double.IsNaN(y) && !double.IsInfinity(x) && !double.IsInfinity(y))
+                    {
+                        SamplePointSpec sp = new SamplePointSpec();
+                        sp.LocalX = x;
+                        sp.LocalY = y;
+                        sp.LocalZ = double.IsNaN(z) || double.IsInfinity(z) ? 0.0 : z;
+                        sp.Label = GetStr(dict, "label") ?? ("P" + idx.ToString(CultureInfo.InvariantCulture));
+                        list.Add(sp);
+                        idx++;
+                    }
+                    continue;
+                }
+
+                IList arr = obj as IList;
+                if (arr != null && arr.Count >= 2)
+                {
+                    double x, y, z = 0.0;
+                    if (TryParseObjDouble(arr[0], out x) && TryParseObjDouble(arr[1], out y) &&
+                        !double.IsNaN(x) && !double.IsNaN(y) && !double.IsInfinity(x) && !double.IsInfinity(y))
+                    {
+                        if (arr.Count >= 3) TryParseObjDouble(arr[2], out z);
+                        SamplePointSpec sp = new SamplePointSpec();
+                        sp.LocalX = x;
+                        sp.LocalY = y;
+                        sp.LocalZ = double.IsNaN(z) || double.IsInfinity(z) ? 0.0 : z;
+                        sp.Label = "P" + idx.ToString(CultureInfo.InvariantCulture);
+                        list.Add(sp);
+                        idx++;
+                    }
+                }
+            }
+            return list;
+        }
+
+        private static bool TryParseObjDouble(object obj, out double val)
+        {
+            val = 0.0;
+            if (obj == null || obj is bool) return false;
+            try
+            {
+                val = Convert.ToDouble(obj, CultureInfo.InvariantCulture);
+                return !double.IsNaN(val) && !double.IsInfinity(val);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryInvertMatrix3d(Matrix3d m, out Matrix3d inv)
+        {
+            inv = Matrix3d.Identity;
+            try
+            {
+                inv = m.Inverse();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool PromptPickBlockSamplePoints(
+            Document doc,
+            string blockFilter,
+            List<string> explicitHandles,
+            bool selectedOnlyArg,
+            string layerFilter,
+            bool visibleOnly,
+            bool includeAnonymous,
+            bool includeSystem,
+            out string sampleBlockName,
+            out ObjectId sampleBlockId,
+            out List<SamplePointSpec> pickedLocalPoints,
+            out string errorMsg)
+        {
+            sampleBlockName = "";
+            sampleBlockId = ObjectId.Null;
+            pickedLocalPoints = new List<SamplePointSpec>();
+            errorMsg = "";
+
+            try
+            {
+                int cmdActive = Convert.ToInt32(
+                    Autodesk.AutoCAD.ApplicationServices.Application.GetSystemVariable("CMDACTIVE"),
+                    CultureInfo.InvariantCulture);
+                if (cmdActive != 0)
+                {
+                    errorMsg = "An AutoCAD command is currently active (CMDACTIVE=" + cmdActive + "). Press Esc in AutoCAD first, then retry picking points inside the block.";
+                    return false;
+                }
+            }
+            catch { }
+
+            Database db = doc.Database;
+            Editor ed = doc.Editor;
+
+            // Resolve candidate sample BlockReference from explicit handles, selection, or block_name
+            ObjectId resolvedId = ObjectId.Null;
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                BlockTableRecord ms = (BlockTableRecord)tr.GetObject(
+                    SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                Dictionary<string, bool> layerHiddenFlags = BuildLayerHiddenMap(db, tr);
+
+                List<string> candidateHandles = new List<string>();
+                if (explicitHandles != null && explicitHandles.Count > 0) candidateHandles.AddRange(explicitHandles);
+                if (selectedOnlyArg) candidateHandles.AddRange(GetSelectedHandleStrings(doc));
+
+                foreach (string h in candidateHandles)
+                {
+                    ObjectId id = ResolveHandle(db, h);
+                    if (id.IsNull || id.IsErased) continue;
+                    Entity ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
+                    BlockReference br = ent as BlockReference;
+                    if (br == null || ent.OwnerId != ms.ObjectId || IsAiAnnotationLayer(ent.Layer)) continue;
+                    string bn = ResolveBlockName(tr, br);
+                    if (!includeAnonymous && IsAnonymousBlockName(bn)) continue;
+                    if (!includeSystem && IsSystemBlockName(bn)) continue;
+                    if (!string.IsNullOrWhiteSpace(blockFilter) && !MatchesPatternOrSubstring(bn, blockFilter) &&
+                        !string.Equals(bn, blockFilter.Trim(), StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    resolvedId = id;
+                    sampleBlockName = bn;
+                    break;
+                }
+
+                if (resolvedId.IsNull && !string.IsNullOrWhiteSpace(blockFilter))
+                {
+                    foreach (ObjectId mid in ms)
+                    {
+                        if (mid.IsErased) continue;
+                        Entity ent = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                        BlockReference br = ent as BlockReference;
+                        if (br == null || IsLegendOrHighlightLayer(ent.Layer)) continue;
+                        if (visibleOnly && !IsEntityVisible(ent, layerHiddenFlags)) continue;
+                        if (!string.IsNullOrEmpty(layerFilter) && !MatchesPatternOrSubstring(ent.Layer ?? "", layerFilter)) continue;
+                        string bn = ResolveBlockName(tr, br);
+                        if (!includeAnonymous && IsAnonymousBlockName(bn)) continue;
+                        if (!includeSystem && (IsSystemBlockName(bn) || string.Equals(ent.Layer, "ASHADE", StringComparison.OrdinalIgnoreCase))) continue;
+                        if (string.Equals(bn, blockFilter.Trim(), StringComparison.OrdinalIgnoreCase) ||
+                            MatchesPatternOrSubstring(bn, blockFilter))
+                        {
+                            resolvedId = mid;
+                            sampleBlockName = bn;
+                            break;
+                        }
+                    }
+                }
+                tr.Commit();
+            }
+
+            try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
+            catch { try { doc.Window.Focus(); } catch { } }
+
+            if (resolvedId.IsNull)
+            {
+                PromptEntityOptions peo = new PromptEntityOptions(
+                    "\n[AI-Engineer] Select ONE sample block to pick target points on: ");
+                peo.SetRejectMessage("\nSelect a BlockReference.");
+                peo.AddAllowedClass(typeof(BlockReference), false);
+                PromptEntityResult per = ed.GetEntity(peo);
+                if (per.Status != PromptStatus.OK)
+                {
+                    errorMsg = "Sample block selection was cancelled.";
+                    return false;
+                }
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    BlockReference br = tr.GetObject(per.ObjectId, OpenMode.ForRead) as BlockReference;
+                    if (br == null)
+                    {
+                        errorMsg = "Selected entity is not a valid BlockReference.";
+                        return false;
+                    }
+                    resolvedId = per.ObjectId;
+                    sampleBlockName = ResolveBlockName(tr, br);
+                    tr.Commit();
+                }
+            }
+
+            sampleBlockId = resolvedId;
+            Matrix3d sampleXform = Matrix3d.Identity;
+            Matrix3d sampleInverse = Matrix3d.Identity;
+            Extents3d? sampleExt = null;
+            bool highlighted = false;
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                BlockReference br = tr.GetObject(sampleBlockId, OpenMode.ForRead) as BlockReference;
+                if (br == null)
+                {
+                    errorMsg = "Sample BlockReference could not be opened.";
+                    return false;
+                }
+                sampleXform = br.BlockTransform;
+                if (!TryInvertMatrix3d(sampleXform, out sampleInverse))
+                {
+                    errorMsg = "Sample block '" + sampleBlockName + "' has a non-invertible transform (zero scale).";
+                    return false;
+                }
+                try
+                {
+                    Extents3d ex = br.GeometricExtents;
+                    if (IsFiniteBounds(ex)) sampleExt = ex;
+                }
+                catch { }
+                try { br.Highlight(); highlighted = true; } catch { }
+                tr.Commit();
+            }
+
+            try
+            {
+                if (sampleExt.HasValue)
+                {
+                    try { ZoomToExtents3d(doc, sampleExt.Value, 2.2); } catch { }
+                }
+
+                try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
+                catch { try { doc.Window.Focus(); } catch { } }
+
+                while (pickedLocalPoints.Count < 32)
+                {
+                    PromptPointOptions ppo = new PromptPointOptions(
+                        "\n[AI-Engineer | " + sampleBlockName + "] Click target point #" +
+                        (pickedLocalPoints.Count + 1).ToString(CultureInfo.InvariantCulture) +
+                        " inside block (Enter / Right-Click = Done, Esc = Cancel): ");
+                    ppo.AllowNone = true;
+                    PromptPointResult ppr = ed.GetPoint(ppo);
+                    if (ppr.Status == PromptStatus.OK)
+                    {
+                        Point3d wcsPt = ppr.Value.TransformBy(ed.CurrentUserCoordinateSystem);
+                        Point3d localPt = wcsPt.TransformBy(sampleInverse);
+                        SamplePointSpec sp = new SamplePointSpec();
+                        sp.LocalX = localPt.X;
+                        sp.LocalY = localPt.Y;
+                        sp.LocalZ = localPt.Z;
+                        sp.Label = "P" + (pickedLocalPoints.Count + 1).ToString(CultureInfo.InvariantCulture);
+                        pickedLocalPoints.Add(sp);
+                        ed.WriteMessage(
+                            "\n  -> Captured " + sp.Label + " at WCS (" +
+                            wcsPt.X.ToString("F3", CultureInfo.InvariantCulture) + ", " +
+                            wcsPt.Y.ToString("F3", CultureInfo.InvariantCulture) + ")");
+                    }
+                    else if (ppr.Status == PromptStatus.None)
+                    {
+                        if (pickedLocalPoints.Count == 0)
+                        {
+                            errorMsg = "No points were picked inside block '" + sampleBlockName + "'. Click at least one point before pressing Enter.";
+                            return false;
+                        }
+                        break;
+                    }
+                    else
+                    {
+                        errorMsg = "Point picking inside block '" + sampleBlockName + "' was cancelled.";
+                        return false;
+                    }
+                }
+            }
+            finally
+            {
+                if (highlighted)
+                {
+                    try
+                    {
+                        using (Transaction tr = db.TransactionManager.StartTransaction())
+                        {
+                            Entity ent = tr.GetObject(sampleBlockId, OpenMode.ForRead) as Entity;
+                            if (ent != null) ent.Unhighlight();
+                            tr.Commit();
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            return pickedLocalPoints.Count > 0;
+        }
+
         private static Dictionary<string, object> AnnotateBlockCoordinates(Document doc, Dictionary<string, object> args)
         {
             string blockFilter = GetStr(args, "block_name");
@@ -7758,9 +8091,38 @@ namespace AIEngineer.AutoCAD
             bool tableOnly = GetBool(args, "table_only", false);
             bool drawCallouts = tableOnly ? false : GetBool(args, "draw_callouts", true);
             bool drawTable = GetBool(args, "draw_table", true);
+            bool pickSamplePoints = GetBool(args, "pick_sample_points", false);
+            bool clearSamplePoints = GetBool(args, "clear_sample_points", false);
+            bool useSavedSamplePoints = GetBool(args, "use_saved_sample_points", true);
+            string rawMultiPointMode = GetStr(args, "multi_point_mode");
+            string normalizedMultiPointMode = NormalizeMultiPointMode(rawMultiPointMode);
+            List<SamplePointSpec> explicitLocalPts = ParseSamplePointList(args, "local_points");
+            List<SamplePointSpec> explicitSamplePts = ParseSamplePointList(args, "sample_points");
 
             Database db = doc.Database;
+            List<SamplePointSpec> pickedLocalPts = null;
+            ObjectId pickedSampleBlockId = ObjectId.Null;
+            string pickedSampleBlockName = "";
+            if (pickSamplePoints)
+            {
+                if (!db.TileMode)
+                {
+                    try { LayoutManager.Current.CurrentLayout = "Model"; } catch { }
+                }
+                string pickErr;
+                if (!PromptPickBlockSamplePoints(
+                    doc, blockFilter, explicitHandles, selectedOnlyArg, layerFilter,
+                    visibleOnly, includeAnonymous, includeSystem,
+                    out pickedSampleBlockName, out pickedSampleBlockId, out pickedLocalPts, out pickErr))
+                {
+                    return Err(pickErr);
+                }
+                if (string.IsNullOrWhiteSpace(blockFilter) && !string.IsNullOrWhiteSpace(pickedSampleBlockName))
+                    blockFilter = pickedSampleBlockName;
+            }
+
             string sortOrder = normalizedSortOrder;
+            string multiPointMode = normalizedMultiPointMode;
             lock (s_lastCoordLock)
             {
                 if (string.IsNullOrEmpty(sortOrder))
@@ -7773,6 +8135,17 @@ namespace AIEngineer.AutoCAD
                 }
                 if (drawCallouts || !s_lastCoordSortOrderByDb.ContainsKey(db.UnmanagedObject) || !string.IsNullOrEmpty(normalizedSortOrder))
                     s_lastCoordSortOrderByDb[db.UnmanagedObject] = sortOrder;
+
+                if (string.IsNullOrEmpty(multiPointMode))
+                {
+                    string rememberedMode;
+                    if (s_lastMultiPointModeByDb.TryGetValue(db.UnmanagedObject, out rememberedMode) && !string.IsNullOrEmpty(rememberedMode))
+                        multiPointMode = rememberedMode;
+                    else
+                        multiPointMode = "sequential";
+                }
+                if (!string.IsNullOrEmpty(normalizedMultiPointMode) || !s_lastMultiPointModeByDb.ContainsKey(db.UnmanagedObject))
+                    s_lastMultiPointModeByDb[db.UnmanagedObject] = multiPointMode;
             }
             string tablePosStr = (GetStr(args, "table_position") ?? "outside_right").Trim().ToLowerInvariant();
             double[] explicitTableOrigin = GetDoubleArray(args, "table_position");
@@ -7792,7 +8165,12 @@ namespace AIEngineer.AutoCAD
             HashSet<string> selectedSet = new HashSet<string>(selectedHandles, StringComparer.OrdinalIgnoreCase);
             HashSet<string> explicitHandleSet = new HashSet<string>(explicitHandles, StringComparer.OrdinalIgnoreCase);
 
+            List<CoordTargetItem> blockTargets = new List<CoordTargetItem>();
             List<CoordTargetItem> targets = new List<CoordTargetItem>();
+            List<SamplePointSpec> activeLocalPoints = null;
+            bool hasActiveSamplePoints = false;
+            int pointsPerBlock = 1;
+            bool isGroupedMulti = false;
             List<string> createdHandles = new List<string>();
             List<ObjectId> createdIds = new List<ObjectId>();
             List<ObjectId> erasedIds = new List<ObjectId>();
@@ -7993,7 +8371,7 @@ namespace AIEngineer.AutoCAD
                         }
                     }
 
-                    // 3. Collect target data + main drawing bounds
+                    // 3. Collect block/entity data + main drawing bounds
                     List<double> blockWidths = new List<double>();
                     List<double> blockHeights = new List<double>();
 
@@ -8026,12 +8404,16 @@ namespace AIEngineer.AutoCAD
                         double cy = (tex.MinPoint.Y + tex.MaxPoint.Y) * 0.5;
                         double insX = cx, insY = cy;
                         string bName = ent.GetType().Name;
+                        bool isBr = false;
+                        Matrix3d brXform = Matrix3d.Identity;
                         BlockReference br = ent as BlockReference;
                         if (br != null)
                         {
                             bName = ResolveBlockName(tr, br);
                             insX = br.Position.X;
                             insY = br.Position.Y;
+                            isBr = true;
+                            brXform = br.BlockTransform;
                         }
                         distinctTargetNames.Add(bName);
 
@@ -8044,6 +8426,8 @@ namespace AIEngineer.AutoCAD
                         item.Id = mid;
                         item.Handle = ent.Handle.ToString();
                         item.BlockName = bName;
+                        item.IsBlockRef = isBr;
+                        item.BlockXform = brXform;
                         item.CenterX = cx;
                         item.CenterY = cy;
                         item.InsertX = insX;
@@ -8053,7 +8437,7 @@ namespace AIEngineer.AutoCAD
                         item.ArrowX = arrX;
                         item.ArrowY = arrY;
                         item.Bounds = tex;
-                        targets.Add(item);
+                        blockTargets.Add(item);
 
                         blockWidths.Add(Math.Max(1e-4, tex.MaxPoint.X - tex.MinPoint.X));
                         blockHeights.Add(Math.Max(1e-4, tex.MaxPoint.Y - tex.MinPoint.Y));
@@ -8062,7 +8446,7 @@ namespace AIEngineer.AutoCAD
                         else { Extents3d cur = targetsExt.Value; cur.AddExtents(tex); targetsExt = cur; }
                     }
 
-                    if (targets.Count == 0)
+                    if (blockTargets.Count == 0)
                     {
                         tr.Commit();
                         return Err("Resolved target entities have no valid geometric bounds.");
@@ -8074,8 +8458,144 @@ namespace AIEngineer.AutoCAD
                     double medH = blockHeights[blockHeights.Count / 2];
                     double medSpan = Math.Max(medW, medH);
 
-                    // 4. Deterministic strict sorting per engineer-selected direction (L->R, R->L, Top->Bot, Bot->Top)
-                    SortCoordTargets(targets, sortOrder, medW, medH);
+                    // 4. Deterministic strict sorting of blocks per engineer-selected direction (L->R, R->L, Top->Bot, Bot->Top)
+                    SortCoordTargets(blockTargets, sortOrder, medW, medH);
+
+                    // 4b. Resolve sample points inside block (if picked interactively, passed explicitly, or remembered for this block)
+                    string primaryBlockName = !string.IsNullOrWhiteSpace(pickedSampleBlockName)
+                        ? pickedSampleBlockName
+                        : (distinctTargetNames.Count == 1 ? blockTargets[0].BlockName : (resolvedSingleBlockName ?? ""));
+
+                    if (pickedLocalPts != null && pickedLocalPts.Count > 0)
+                    {
+                        activeLocalPoints = pickedLocalPts;
+                    }
+                    else if (explicitLocalPts.Count > 0)
+                    {
+                        activeLocalPoints = explicitLocalPts;
+                    }
+                    else if (explicitSamplePts.Count > 0)
+                    {
+                        CoordTargetItem sampleItem = null;
+                        if (selectedBlockIds.Count > 0)
+                        {
+                            ObjectId firstSelId = selectedBlockIds[0];
+                            for (int b = 0; b < blockTargets.Count; b++)
+                            {
+                                if (blockTargets[b].Id == firstSelId && blockTargets[b].IsBlockRef)
+                                {
+                                    sampleItem = blockTargets[b];
+                                    break;
+                                }
+                            }
+                        }
+                        if (sampleItem == null)
+                        {
+                            for (int b = 0; b < blockTargets.Count; b++)
+                            {
+                                if (blockTargets[b].IsBlockRef) { sampleItem = blockTargets[b]; break; }
+                            }
+                        }
+                        Matrix3d inv;
+                        if (sampleItem != null && TryInvertMatrix3d(sampleItem.BlockXform, out inv))
+                        {
+                            activeLocalPoints = new List<SamplePointSpec>();
+                            for (int p = 0; p < explicitSamplePts.Count; p++)
+                            {
+                                SamplePointSpec rawSp = explicitSamplePts[p];
+                                Point3d lp = new Point3d(rawSp.LocalX, rawSp.LocalY, rawSp.LocalZ).TransformBy(inv);
+                                SamplePointSpec locSp = new SamplePointSpec();
+                                locSp.LocalX = lp.X;
+                                locSp.LocalY = lp.Y;
+                                locSp.LocalZ = lp.Z;
+                                locSp.Label = rawSp.Label;
+                                activeLocalPoints.Add(locSp);
+                            }
+                            if (string.IsNullOrWhiteSpace(primaryBlockName)) primaryBlockName = sampleItem.BlockName;
+                        }
+                    }
+
+                    lock (s_lastCoordLock)
+                    {
+                        Dictionary<string, List<SamplePointSpec>> dbMap;
+                        if (!s_lastBlockSamplePointsByDb.TryGetValue(db.UnmanagedObject, out dbMap))
+                        {
+                            dbMap = new Dictionary<string, List<SamplePointSpec>>(StringComparer.OrdinalIgnoreCase);
+                            s_lastBlockSamplePointsByDb[db.UnmanagedObject] = dbMap;
+                        }
+                        if (clearSamplePoints && !string.IsNullOrWhiteSpace(primaryBlockName))
+                        {
+                            dbMap.Remove(primaryBlockName);
+                        }
+                        else if (activeLocalPoints != null && activeLocalPoints.Count > 0 && !string.IsNullOrWhiteSpace(primaryBlockName))
+                        {
+                            dbMap[primaryBlockName] = activeLocalPoints;
+                        }
+                        else if (!clearSamplePoints && useSavedSamplePoints && !string.IsNullOrWhiteSpace(primaryBlockName))
+                        {
+                            List<SamplePointSpec> savedPts;
+                            if (dbMap.TryGetValue(primaryBlockName, out savedPts) && savedPts != null && savedPts.Count > 0)
+                                activeLocalPoints = savedPts;
+                        }
+                    }
+
+                    hasActiveSamplePoints = (activeLocalPoints != null && activeLocalPoints.Count > 0);
+                    pointsPerBlock = hasActiveSamplePoints ? activeLocalPoints.Count : 1;
+                    bool allBlocksUseSameMulti = hasActiveSamplePoints && blockTargets.TrueForAll(delegate(CoordTargetItem bItem)
+                    {
+                        return bItem.IsBlockRef && (string.IsNullOrWhiteSpace(primaryBlockName) ||
+                            string.Equals(bItem.BlockName, primaryBlockName, StringComparison.OrdinalIgnoreCase));
+                    });
+                    isGroupedMulti = allBlocksUseSameMulti && pointsPerBlock > 1 && multiPointMode == "grouped";
+
+                    for (int b = 0; b < blockTargets.Count; b++)
+                    {
+                        CoordTargetItem blk = blockTargets[b];
+                        int blkIdx = b + 1;
+                        bool expandThisBlock = hasActiveSamplePoints && blk.IsBlockRef &&
+                            (string.IsNullOrWhiteSpace(primaryBlockName) ||
+                             string.Equals(blk.BlockName, primaryBlockName, StringComparison.OrdinalIgnoreCase));
+
+                        if (expandThisBlock)
+                        {
+                            for (int p = 0; p < activeLocalPoints.Count; p++)
+                            {
+                                SamplePointSpec sp = activeLocalPoints[p];
+                                Point3d wpt = new Point3d(sp.LocalX, sp.LocalY, sp.LocalZ).TransformBy(blk.BlockXform);
+                                CoordTargetItem ptItem = new CoordTargetItem();
+                                ptItem.BlockIndex = blkIdx;
+                                ptItem.SubPointIndex = p + 1;
+                                ptItem.SubPointLabel = !string.IsNullOrWhiteSpace(sp.Label)
+                                    ? sp.Label
+                                    : ("P" + (p + 1).ToString(CultureInfo.InvariantCulture));
+                                ptItem.HasCustomPoint = true;
+                                ptItem.LocalX = sp.LocalX;
+                                ptItem.LocalY = sp.LocalY;
+                                ptItem.Id = blk.Id;
+                                ptItem.Handle = blk.Handle;
+                                ptItem.BlockName = blk.BlockName;
+                                ptItem.IsBlockRef = true;
+                                ptItem.BlockXform = blk.BlockXform;
+                                ptItem.CenterX = blk.CenterX;
+                                ptItem.CenterY = blk.CenterY;
+                                ptItem.InsertX = blk.InsertX;
+                                ptItem.InsertY = blk.InsertY;
+                                ptItem.ReportX = wpt.X;
+                                ptItem.ReportY = wpt.Y;
+                                ptItem.ArrowX = wpt.X;
+                                ptItem.ArrowY = wpt.Y;
+                                ptItem.Bounds = blk.Bounds;
+                                targets.Add(ptItem);
+                            }
+                        }
+                        else
+                        {
+                            blk.BlockIndex = blkIdx;
+                            blk.SubPointIndex = 1;
+                            blk.SubPointLabel = "P1";
+                            targets.Add(blk);
+                        }
+                    }
 
                     bool includeBlkNameLabel = includeBlockNameArg.HasValue ? includeBlockNameArg.Value : (distinctTargetNames.Count > 1);
                     string fmt = "F" + decimals.ToString(CultureInfo.InvariantCulture);
@@ -8083,9 +8603,11 @@ namespace AIEngineer.AutoCAD
                     for (int i = 0; i < targets.Count; i++)
                     {
                         targets[i].Index = i + 1;
-                        string head = includeBlkNameLabel
-                            ? (numPrefix + targets[i].Index.ToString(CultureInfo.InvariantCulture) + " " + targets[i].BlockName)
+                        string tag = isGroupedMulti
+                            ? (numPrefix + targets[i].BlockIndex.ToString(CultureInfo.InvariantCulture) + "." +
+                               targets[i].SubPointIndex.ToString(CultureInfo.InvariantCulture))
                             : (numPrefix + targets[i].Index.ToString(CultureInfo.InvariantCulture));
+                        string head = includeBlkNameLabel ? (tag + " " + targets[i].BlockName) : tag;
                         string lbl = head + "\nX: " + targets[i].ReportX.ToString(fmt, CultureInfo.InvariantCulture) +
                                      "\nY: " + targets[i].ReportY.ToString(fmt, CultureInfo.InvariantCulture);
                         targets[i].LabelText = lbl;
@@ -8096,19 +8618,19 @@ namespace AIEngineer.AutoCAD
                     double dwgH = mainDrawingExt.HasValue ? Math.Max(medH, mainDrawingExt.Value.MaxPoint.Y - mainDrawingExt.Value.MinPoint.Y) : medSpan * 10.0;
                     double dwgSpan = Math.Max(1e-3, Math.Max(dwgW, dwgH));
 
-                    // Compute nearest-neighbor pitch p20NN for proportional label sizing
+                    // Compute nearest-neighbor pitch p20NN between distinct blocks for proportional label sizing
                     double p20NN = medSpan * 4.0;
-                    if (targets.Count > 1)
+                    if (blockTargets.Count > 1)
                     {
                         List<double> nnDists = new List<double>();
-                        for (int i = 0; i < targets.Count; i++)
+                        for (int i = 0; i < blockTargets.Count; i++)
                         {
                             double bestD = double.MaxValue;
-                            for (int j = 0; j < targets.Count; j++)
+                            for (int j = 0; j < blockTargets.Count; j++)
                             {
                                 if (i == j) continue;
-                                double dx = targets[i].ArrowX - targets[j].ArrowX;
-                                double dy = targets[i].ArrowY - targets[j].ArrowY;
+                                double dx = blockTargets[i].CenterX - blockTargets[j].CenterX;
+                                double dy = blockTargets[i].CenterY - blockTargets[j].CenterY;
                                 double d = Math.Sqrt(dx * dx + dy * dy);
                                 if (d > medSpan * 0.1 && d < bestD) bestD = d;
                             }
@@ -8131,10 +8653,10 @@ namespace AIEngineer.AutoCAD
                         }
                         else
                         {
-                            textH = medSpan * 0.20;
-                            if (p20NN > 1e-5) textH = Math.Min(textH, p20NN * 0.145);
+                            textH = medSpan * (pointsPerBlock > 1 ? 0.15 : 0.20);
+                            if (p20NN > 1e-5) textH = Math.Min(textH, p20NN * (pointsPerBlock > 1 ? 0.12 : 0.145));
                             textH = Math.Max(dwgSpan * 0.0020, Math.Min(dwgSpan * 0.025, textH));
-                            textH = Math.Max(textH, medSpan * 0.095);
+                            textH = Math.Max(textH, medSpan * (pointsPerBlock > 1 ? 0.068 : 0.095));
                         }
                         usedTextH = textH;
 
@@ -8335,45 +8857,33 @@ namespace AIEngineer.AutoCAD
                             double itemSo = item.UsedShelfOffset > 1e-6 ? item.UsedShelfOffset : shelfOffset;
                             Point3d tipPt = new Point3d(item.ArrowX, item.ArrowY, 0.0);
                             Point3d elbowPt = new Point3d(item.ElbowX, item.ElbowY, 0.0);
+                            double farShelfX = (Math.Abs(item.ElbowX - item.ShelfX1) <= Math.Abs(item.ElbowX - item.ShelfX2))
+                                ? item.ShelfX2
+                                : item.ShelfX1;
+                            Point3d shelfEndPt = new Point3d(farShelfX, item.ShelfY, 0.0);
                             Vector3d vDir = tipPt - elbowPt;
                             double dLen = vDir.Length;
-                            double arrLen = Math.Max(itemTh * 1.15, Math.Min(dLen * 0.28, Math.Max(itemTh * 1.55, medSpan * 0.24)));
+                            double arrLen = Math.Max(itemTh * 1.15, Math.Min(dLen * 0.42, Math.Max(itemTh * 1.55, medSpan * 0.24)));
 
+                            Leader ldr = new Leader();
+                            ldr.SetDatabaseDefaults(db);
+                            ldr.Layer = safeCalloutLayer;
+                            ldr.ColorIndex = (short)arrowColorIdx;
+                            ldr.DimensionStyle = db.Dimstyle;
+                            try { ldr.Dimldrblk = ObjectId.Null; } catch { }
+                            ldr.HasArrowHead = true;
+                            ldr.IsSplined = false;
+                            ldr.Dimclrd = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
+                                Autodesk.AutoCAD.Colors.ColorMethod.ByAci, (short)arrowColorIdx);
+                            ldr.Dimasz = Math.Max(1e-4, arrLen);
+                            ldr.AppendVertex(tipPt);
                             if (dLen > 1e-6)
-                            {
-                                Vector3d dir = vDir / dLen;
-                                Vector3d perp = new Vector3d(-dir.Y, dir.X, 0.0);
-                                Point3d arrBase = tipPt - dir * arrLen;
-                                double halfAw = arrLen * 0.34;
-                                Solid head = new Solid(tipPt, arrBase + perp * halfAw, arrBase - perp * halfAw);
-                                head.Layer = safeCalloutLayer;
-                                head.ColorIndex = (short)arrowColorIdx;
-                                ObjectId hid = ms.AppendEntity(head);
-                                tr.AddNewlyCreatedDBObject(head, true);
-                                createdIds.Add(hid);
-                                createdHandles.Add(head.Handle.ToString());
-
-                                if (dLen > arrLen * 1.05)
-                                {
-                                    Line shaft = new Line(arrBase, elbowPt);
-                                    shaft.Layer = safeCalloutLayer;
-                                    shaft.ColorIndex = (short)arrowColorIdx;
-                                    ObjectId sid = ms.AppendEntity(shaft);
-                                    tr.AddNewlyCreatedDBObject(shaft, true);
-                                    createdIds.Add(sid);
-                                    createdHandles.Add(shaft.Handle.ToString());
-                                }
-                            }
-
-                            Line shelf = new Line(
-                                new Point3d(item.ShelfX1, item.ShelfY, 0.0),
-                                new Point3d(item.ShelfX2, item.ShelfY, 0.0));
-                            shelf.Layer = safeCalloutLayer;
-                            shelf.ColorIndex = (short)arrowColorIdx;
-                            ObjectId shId = ms.AppendEntity(shelf);
-                            tr.AddNewlyCreatedDBObject(shelf, true);
-                            createdIds.Add(shId);
-                            createdHandles.Add(shelf.Handle.ToString());
+                                ldr.AppendVertex(elbowPt);
+                            ldr.AppendVertex(shelfEndPt);
+                            ObjectId ldrId = ms.AppendEntity(ldr);
+                            tr.AddNewlyCreatedDBObject(ldr, true);
+                            createdIds.Add(ldrId);
+                            createdHandles.Add(ldr.Handle.ToString());
 
                             MText mt = new MText();
                             mt.SetDatabaseDefaults(db);
@@ -8423,13 +8933,22 @@ namespace AIEngineer.AutoCAD
                         double titleH = rowH * 1.25;
                         double headerH = rowH * 1.08;
                         double footerH = rowH * 0.95;
-                        double[] colW = new double[]
-                        {
-                            rowH * 1.55, // رقم البلوك
-                            rowH * 3.15, // اسم البلوك
-                            rowH * 3.10, // إحداثي X
-                            rowH * 3.10  // إحداثي Y
-                        };
+                        double[] colW = isGroupedMulti
+                            ? new double[]
+                            {
+                                rowH * 1.55, // رقم البلوك
+                                rowH * 2.95, // اسم البلوك
+                                rowH * 1.45, // النقطة
+                                rowH * 3.00, // إحداثي X
+                                rowH * 3.00  // إحداثي Y
+                            }
+                            : new double[]
+                            {
+                                rowH * 1.55, // رقم البلوك / النقطة
+                                rowH * 3.15, // اسم البلوك
+                                rowH * 3.10, // إحداثي X
+                                rowH * 3.10  // إحداثي Y
+                            };
                         double tblW = 0.0;
                         for (int c = 0; c < colW.Length; c++) tblW += colW[c];
                         double tblH = titleH + headerH + (targets.Count * rowH) + footerH;
@@ -8523,7 +9042,16 @@ namespace AIEngineer.AutoCAD
                         for (int r = 1; r <= targets.Count; r++)
                         {
                             double ry = yHeaderBot - (r * rowH);
-                            addTblLine(x0, ry, x0 + tblW, ry, 8);
+                            if (isGroupedMulti)
+                            {
+                                bool isBlockEnd = (r == targets.Count) || (targets[r].BlockIndex != targets[r - 1].BlockIndex);
+                                double lineStartX = isBlockEnd ? x0 : colX[2];
+                                addTblLine(lineStartX, ry, x0 + tblW, ry, isBlockEnd ? (short)7 : (short)8);
+                            }
+                            else
+                            {
+                                addTblLine(x0, ry, x0 + tblW, ry, 8);
+                            }
                         }
                         for (int c = 1; c < colW.Length; c++)
                         {
@@ -8545,7 +9073,9 @@ namespace AIEngineer.AutoCAD
                         createdIds.Add(titleMt.ObjectId);
                         createdHandles.Add(titleMt.Handle.ToString());
 
-                        string[] tblHeaders = new string[] { "رقم البلوك", "اسم البلوك", "إحداثي X", "إحداثي Y" };
+                        string[] tblHeaders = isGroupedMulti
+                            ? new string[] { "رقم البلوك", "اسم البلوك", "النقطة", "إحداثي X", "إحداثي Y" }
+                            : new string[] { (pointsPerBlock > 1 ? "رقم النقطة" : "رقم البلوك"), "اسم البلوك", "إحداثي X", "إحداثي Y" };
                         for (int c = 0; c < tblHeaders.Length; c++)
                         {
                             MText hMt = CreateLegendCellMText(
@@ -8557,34 +9087,82 @@ namespace AIEngineer.AutoCAD
                             createdHandles.Add(hMt.Handle.ToString());
                         }
 
-                        for (int r = 0; r < targets.Count; r++)
+                        if (isGroupedMulti)
                         {
-                            CoordTargetItem item = targets[r];
-                            double rCy = yHeaderBot - (r + 0.5) * rowH;
+                            int r = 0;
+                            while (r < targets.Count)
+                            {
+                                int grpStart = r;
+                                int blkIdx = targets[r].BlockIndex;
+                                while (r < targets.Count && targets[r].BlockIndex == blkIdx) r++;
+                                int grpCount = r - grpStart;
+                                double grpMidY = yHeaderBot - (grpStart + grpCount * 0.5) * rowH;
 
-                            MText c0 = CreateLegendCellMText(ms, tr, unicodeStyleId, numPrefix + item.Index.ToString(CultureInfo.InvariantCulture),
-                                colX[0] + colW[0] * 0.5, rCy, colW[0] * 0.86, rowH * 0.76, rowH * 0.25, rowH, AttachmentPoint.MiddleCenter, 2, safeTableLayer);
-                            MText c1 = CreateLegendCellMText(ms, tr, unicodeStyleId, item.BlockName,
-                                colX[1] + colW[1] * 0.5, rCy, colW[1] * 0.90, rowH * 0.78, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 7, safeTableLayer);
-                            MText c2 = CreateLegendCellMText(ms, tr, unicodeStyleId, item.ReportX.ToString(fmt, CultureInfo.InvariantCulture),
-                                colX[2] + colW[2] * 0.5, rCy, colW[2] * 0.90, rowH * 0.78, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 3, safeTableLayer);
-                            MText c3 = CreateLegendCellMText(ms, tr, unicodeStyleId, item.ReportY.ToString(fmt, CultureInfo.InvariantCulture),
-                                colX[3] + colW[3] * 0.5, rCy, colW[3] * 0.90, rowH * 0.78, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 3, safeTableLayer);
+                                MText c0 = CreateLegendCellMText(ms, tr, unicodeStyleId, numPrefix + blkIdx.ToString(CultureInfo.InvariantCulture),
+                                    colX[0] + colW[0] * 0.5, grpMidY, colW[0] * 0.86, rowH * grpCount * 0.76, rowH * 0.27, rowH, AttachmentPoint.MiddleCenter, 2, safeTableLayer);
+                                MText c1 = CreateLegendCellMText(ms, tr, unicodeStyleId, targets[grpStart].BlockName,
+                                    colX[1] + colW[1] * 0.5, grpMidY, colW[1] * 0.90, rowH * grpCount * 0.78, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 7, safeTableLayer);
+                                createdIds.Add(c0.ObjectId); createdHandles.Add(c0.Handle.ToString());
+                                createdIds.Add(c1.ObjectId); createdHandles.Add(c1.Handle.ToString());
 
-                            createdIds.Add(c0.ObjectId); createdHandles.Add(c0.Handle.ToString());
-                            createdIds.Add(c1.ObjectId); createdHandles.Add(c1.Handle.ToString());
-                            createdIds.Add(c2.ObjectId); createdHandles.Add(c2.Handle.ToString());
-                            createdIds.Add(c3.ObjectId); createdHandles.Add(c3.Handle.ToString());
+                                for (int sub = grpStart; sub < r; sub++)
+                                {
+                                    CoordTargetItem item = targets[sub];
+                                    double rCy = yHeaderBot - (sub + 0.5) * rowH;
+                                    MText c2 = CreateLegendCellMText(ms, tr, unicodeStyleId, item.SubPointLabel,
+                                        colX[2] + colW[2] * 0.5, rCy, colW[2] * 0.86, rowH * 0.76, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 4, safeTableLayer);
+                                    MText c3 = CreateLegendCellMText(ms, tr, unicodeStyleId, item.ReportX.ToString(fmt, CultureInfo.InvariantCulture),
+                                        colX[3] + colW[3] * 0.5, rCy, colW[3] * 0.90, rowH * 0.78, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 3, safeTableLayer);
+                                    MText c4 = CreateLegendCellMText(ms, tr, unicodeStyleId, item.ReportY.ToString(fmt, CultureInfo.InvariantCulture),
+                                        colX[4] + colW[4] * 0.5, rCy, colW[4] * 0.90, rowH * 0.78, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 3, safeTableLayer);
+                                    createdIds.Add(c2.ObjectId); createdHandles.Add(c2.Handle.ToString());
+                                    createdIds.Add(c3.ObjectId); createdHandles.Add(c3.Handle.ToString());
+                                    createdIds.Add(c4.ObjectId); createdHandles.Add(c4.Handle.ToString());
+                                }
+                            }
+
+                            double fCy = (yDataBot + yBottom) * 0.5;
+                            double spanL = colX[4] - x0;
+                            MText fLbl = CreateLegendCellMText(ms, tr, unicodeStyleId, "إجمالي البلوكات / النقاط (Total)",
+                                x0 + spanL * 0.5, fCy, spanL * 0.92, footerH * 0.76, footerH * 0.26, rowH, AttachmentPoint.MiddleCenter, 4, safeTableLayer);
+                            MText fCnt = CreateLegendCellMText(ms, tr, unicodeStyleId,
+                                blockTargets.Count.ToString(CultureInfo.InvariantCulture) + " / " + targets.Count.ToString(CultureInfo.InvariantCulture),
+                                colX[4] + colW[4] * 0.5, fCy, colW[4] * 0.86, footerH * 0.76, footerH * 0.27, rowH, AttachmentPoint.MiddleCenter, 3, safeTableLayer);
+                            createdIds.Add(fLbl.ObjectId); createdHandles.Add(fLbl.Handle.ToString());
+                            createdIds.Add(fCnt.ObjectId); createdHandles.Add(fCnt.Handle.ToString());
                         }
+                        else
+                        {
+                            for (int r = 0; r < targets.Count; r++)
+                            {
+                                CoordTargetItem item = targets[r];
+                                double rCy = yHeaderBot - (r + 0.5) * rowH;
 
-                        double fCy = (yDataBot + yBottom) * 0.5;
-                        double spanL = colX[3] - x0;
-                        MText fLbl = CreateLegendCellMText(ms, tr, unicodeStyleId, "إجمالي البلوكات (Total)",
-                            x0 + spanL * 0.5, fCy, spanL * 0.92, footerH * 0.76, footerH * 0.27, rowH, AttachmentPoint.MiddleCenter, 4, safeTableLayer);
-                        MText fCnt = CreateLegendCellMText(ms, tr, unicodeStyleId, targets.Count.ToString(CultureInfo.InvariantCulture),
-                            colX[3] + colW[3] * 0.5, fCy, colW[3] * 0.86, footerH * 0.76, footerH * 0.29, rowH, AttachmentPoint.MiddleCenter, 3, safeTableLayer);
-                        createdIds.Add(fLbl.ObjectId); createdHandles.Add(fLbl.Handle.ToString());
-                        createdIds.Add(fCnt.ObjectId); createdHandles.Add(fCnt.Handle.ToString());
+                                MText c0 = CreateLegendCellMText(ms, tr, unicodeStyleId, numPrefix + item.Index.ToString(CultureInfo.InvariantCulture),
+                                    colX[0] + colW[0] * 0.5, rCy, colW[0] * 0.86, rowH * 0.76, rowH * 0.25, rowH, AttachmentPoint.MiddleCenter, 2, safeTableLayer);
+                                MText c1 = CreateLegendCellMText(ms, tr, unicodeStyleId, item.BlockName,
+                                    colX[1] + colW[1] * 0.5, rCy, colW[1] * 0.90, rowH * 0.78, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 7, safeTableLayer);
+                                MText c2 = CreateLegendCellMText(ms, tr, unicodeStyleId, item.ReportX.ToString(fmt, CultureInfo.InvariantCulture),
+                                    colX[2] + colW[2] * 0.5, rCy, colW[2] * 0.90, rowH * 0.78, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 3, safeTableLayer);
+                                MText c3 = CreateLegendCellMText(ms, tr, unicodeStyleId, item.ReportY.ToString(fmt, CultureInfo.InvariantCulture),
+                                    colX[3] + colW[3] * 0.5, rCy, colW[3] * 0.90, rowH * 0.78, rowH * 0.24, rowH, AttachmentPoint.MiddleCenter, 3, safeTableLayer);
+
+                                createdIds.Add(c0.ObjectId); createdHandles.Add(c0.Handle.ToString());
+                                createdIds.Add(c1.ObjectId); createdHandles.Add(c1.Handle.ToString());
+                                createdIds.Add(c2.ObjectId); createdHandles.Add(c2.Handle.ToString());
+                                createdIds.Add(c3.ObjectId); createdHandles.Add(c3.Handle.ToString());
+                            }
+
+                            double fCy = (yDataBot + yBottom) * 0.5;
+                            double spanL = colX[3] - x0;
+                            string footerLblTxt = pointsPerBlock > 1 ? "إجمالي النقاط (Total Points)" : "إجمالي البلوكات (Total)";
+                            MText fLbl = CreateLegendCellMText(ms, tr, unicodeStyleId, footerLblTxt,
+                                x0 + spanL * 0.5, fCy, spanL * 0.92, footerH * 0.76, footerH * 0.27, rowH, AttachmentPoint.MiddleCenter, 4, safeTableLayer);
+                            MText fCnt = CreateLegendCellMText(ms, tr, unicodeStyleId, targets.Count.ToString(CultureInfo.InvariantCulture),
+                                colX[3] + colW[3] * 0.5, fCy, colW[3] * 0.86, footerH * 0.76, footerH * 0.29, rowH, AttachmentPoint.MiddleCenter, 3, safeTableLayer);
+                            createdIds.Add(fLbl.ObjectId); createdHandles.Add(fLbl.Handle.ToString());
+                            createdIds.Add(fCnt.ObjectId); createdHandles.Add(fCnt.Handle.ToString());
+                        }
                     }
 
                     for (int i = 0; i < targets.Count; i++)
@@ -8593,6 +9171,9 @@ namespace AIEngineer.AutoCAD
                         Dictionary<string, object> row = new Dictionary<string, object>
                         {
                             { "index", item.Index },
+                            { "block_index", item.BlockIndex },
+                            { "point_index", item.SubPointIndex },
+                            { "point_label", item.SubPointLabel },
                             { "handle", item.Handle },
                             { "block_name", item.BlockName },
                             { "x", Math.Round(item.ReportX, decimals) },
@@ -8600,6 +9181,8 @@ namespace AIEngineer.AutoCAD
                             { "center", Pt2(item.CenterX, item.CenterY) },
                             { "arrow_target", Pt2(item.ArrowX, item.ArrowY) }
                         };
+                        if (item.HasCustomPoint)
+                            row["local_point"] = Pt2(item.LocalX, item.LocalY);
                         if (Math.Abs(item.InsertX - item.CenterX) > 1e-2 || Math.Abs(item.InsertY - item.CenterY) > 1e-2)
                             row["insertion_point"] = Pt2(item.InsertX, item.InsertY);
                         if (drawCallouts && item.Placed)
@@ -8607,7 +9190,7 @@ namespace AIEngineer.AutoCAD
                             row["label_position"] = Pt2(item.TextCenterX, item.ShelfY);
                             row["obstacle_free"] = (item.ObstacleHits == 0);
                         }
-                        if (blockRowsOut.Count < 100) blockRowsOut.Add(row);
+                        if (blockRowsOut.Count < 500) blockRowsOut.Add(row);
                     }
 
                     db.UpdateExt(true);
@@ -8618,7 +9201,8 @@ namespace AIEngineer.AutoCAD
                 {
                     CadUndoEntry undo = new CadUndoEntry();
                     undo.ToolName = "annotate_block_coordinates";
-                    undo.Summary = "Annotated coordinates for " + targets.Count.ToString(CultureInfo.InvariantCulture) + " block(s)";
+                    undo.Summary = "Annotated coordinates (" + blockTargets.Count.ToString(CultureInfo.InvariantCulture) + " blocks, " +
+                                   targets.Count.ToString(CultureInfo.InvariantCulture) + " points)";
                     undo.ErasedIds.AddRange(erasedIds);
                     undo.CreatedIds.AddRange(createdIds);
                     PushUndoEntry(doc, undo);
@@ -8682,23 +9266,61 @@ namespace AIEngineer.AutoCAD
                     ? ("جدول إحداثيات بلوك " + targets[0].BlockName + " (COORDINATES)")
                     : "جدول إحداثيات البلوكات (COORDINATES SCHEDULE)");
             string xlNumFmt = "0." + new string('0', decimals);
-            ExcelSheetData coordSheet = new ExcelSheetData
+            ExcelSheetData coordSheet;
+            if (isGroupedMulti)
             {
-                Title = xlTitle,
-                SheetName = distinctTargetNames.Count == 1 ? targets[0].BlockName : "Coordinates",
-                Headers = new List<string> { "رقم البلوك", "اسم البلوك", "إحداثي X", "إحداثي Y" },
-                FooterRow = new List<string> { "", "إجمالي البلوكات (Total)", "", targets.Count.ToString(CultureInfo.InvariantCulture) }
-            };
-            for (int i = 0; i < targets.Count; i++)
-            {
-                CoordTargetItem item = targets[i];
-                coordSheet.Rows.Add(new List<string>
+                coordSheet = new ExcelSheetData
                 {
-                    numPrefix + item.Index.ToString(CultureInfo.InvariantCulture),
-                    item.BlockName,
-                    item.ReportX.ToString(xlNumFmt, CultureInfo.InvariantCulture),
-                    item.ReportY.ToString(xlNumFmt, CultureInfo.InvariantCulture)
-                });
+                    Title = xlTitle,
+                    SheetName = distinctTargetNames.Count == 1 ? targets[0].BlockName : "Coordinates",
+                    Headers = new List<string> { "رقم البلوك", "اسم البلوك", "النقطة", "إحداثي X", "إحداثي Y" },
+                    FooterRow = new List<string>
+                    {
+                        "", "إجمالي البلوكات / النقاط (Total)", "",
+                        blockTargets.Count.ToString(CultureInfo.InvariantCulture) + " blocks",
+                        targets.Count.ToString(CultureInfo.InvariantCulture) + " pts"
+                    }
+                };
+                int prevBlk = -1;
+                for (int i = 0; i < targets.Count; i++)
+                {
+                    CoordTargetItem item = targets[i];
+                    bool firstOfBlock = (item.BlockIndex != prevBlk);
+                    prevBlk = item.BlockIndex;
+                    coordSheet.Rows.Add(new List<string>
+                    {
+                        firstOfBlock ? (numPrefix + item.BlockIndex.ToString(CultureInfo.InvariantCulture)) : "",
+                        firstOfBlock ? item.BlockName : "",
+                        item.SubPointLabel,
+                        item.ReportX.ToString(xlNumFmt, CultureInfo.InvariantCulture),
+                        item.ReportY.ToString(xlNumFmt, CultureInfo.InvariantCulture)
+                    });
+                }
+            }
+            else
+            {
+                coordSheet = new ExcelSheetData
+                {
+                    Title = xlTitle,
+                    SheetName = distinctTargetNames.Count == 1 ? targets[0].BlockName : "Coordinates",
+                    Headers = new List<string> { (pointsPerBlock > 1 ? "رقم النقطة" : "رقم البلوك"), "اسم البلوك", "إحداثي X", "إحداثي Y" },
+                    FooterRow = new List<string>
+                    {
+                        "", (pointsPerBlock > 1 ? "إجمالي النقاط (Total Points)" : "إجمالي البلوكات (Total)"), "",
+                        targets.Count.ToString(CultureInfo.InvariantCulture)
+                    }
+                };
+                for (int i = 0; i < targets.Count; i++)
+                {
+                    CoordTargetItem item = targets[i];
+                    coordSheet.Rows.Add(new List<string>
+                    {
+                        numPrefix + item.Index.ToString(CultureInfo.InvariantCulture),
+                        item.BlockName,
+                        item.ReportX.ToString(xlNumFmt, CultureInfo.InvariantCulture),
+                        item.ReportY.ToString(xlNumFmt, CultureInfo.InvariantCulture)
+                    });
+                }
             }
             lock (s_lastCoordLock)
             {
@@ -8708,13 +9330,17 @@ namespace AIEngineer.AutoCAD
 
             Dictionary<string, object> result = new Dictionary<string, object>
             {
+                { "block_count", blockTargets.Count },
                 { "total_count", targets.Count },
+                { "points_per_block", pointsPerBlock },
+                { "multi_point_mode", multiPointMode },
+                { "leader_entity_type", "Leader" },
                 { "block_names", new List<string>(distinctTargetNames) },
                 { "selection_expanded_from_sample", selectionExpandedFromSample },
                 { "sort_order", sortOrder },
                 { "sort_order_ar", DescribeCoordSortOrderAr(sortOrder) },
-                { "coordinate_source", coordSource },
-                { "arrow_target_mode", arrowTarget },
+                { "coordinate_source", hasActiveSamplePoints ? "sample_block_points" : coordSource },
+                { "arrow_target_mode", hasActiveSamplePoints ? "sample_block_points" : arrowTarget },
                 { "callouts_drawn", drawCallouts },
                 { "table_drawn", drawTable },
                 { "created_count", createdIds.Count },
@@ -8723,6 +9349,20 @@ namespace AIEngineer.AutoCAD
                 { "undo_history_steps", GetUndoHistoryCount(doc) },
                 { "coordinates", blockRowsOut }
             };
+            if (hasActiveSamplePoints)
+            {
+                List<object> localPtsOut = new List<object>();
+                for (int p = 0; p < activeLocalPoints.Count; p++)
+                {
+                    localPtsOut.Add(new Dictionary<string, object>
+                    {
+                        { "label", activeLocalPoints[p].Label },
+                        { "x", Round(activeLocalPoints[p].LocalX) },
+                        { "y", Round(activeLocalPoints[p].LocalY) }
+                    });
+                }
+                result["local_points"] = localPtsOut;
+            }
             if (GetBool(args, "export_excel", false))
             {
                 string xlTag = (distinctTargetNames.Count == 1 ? targets[0].BlockName : "blocks") + "_coordinates";

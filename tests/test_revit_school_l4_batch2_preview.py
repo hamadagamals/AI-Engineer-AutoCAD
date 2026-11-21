@@ -19,6 +19,11 @@ IES = BASE / "official-library/downloads/CoreLine-Highbay-911401629308-IES-20261
 HANDOFF = BASE / "scratch/SCHOOL_L4_BATCH1_HANDOFF_592c9a53-1f9c-4160-bc7a-e0a7bd36e5ce.json"
 VERIFICATION = BASE / "scratch/SCHOOL_L4_BATCH1_VERIFICATION_e88d158a-c3d8-46b1-8a9d-fca777402734.json"
 
+pytestmark = pytest.mark.skipif(
+    not FAMILY.is_file() or not IES.is_file() or not HANDOFF.is_file() or not VERIFICATION.is_file(),
+    reason="Field-project Revit L4 Batch 2 assets are absent in this checkout (gitignored workspace/revit-school).",
+)
+
 
 def _arguments(tmp_path: Path) -> dict[str, Path]:
     return {

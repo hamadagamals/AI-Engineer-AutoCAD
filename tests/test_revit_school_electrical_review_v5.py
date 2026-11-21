@@ -5,6 +5,8 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHOOL = ROOT / "workspace/revit-school"
@@ -15,6 +17,11 @@ FINAL_VALIDATION = REVIEW / "School-Electrical-V5-Final-ReadOnly-Validation-2026
 LIVE_HANDOFF = REVIEW / "School-Electrical-V5-Live-Handoff-20261031.json"
 SOURCE = SCHOOL / "scratch/School-Architectural-electrical-Classroom1500-Sample.rvt"
 OUTPUT_RVT = SCHOOL / "scratch/School-Electrical-Review-V5-20261031.rvt"
+
+pytestmark = pytest.mark.skipif(
+    not PREVIEW.is_file() or not FEASIBILITY.is_file() or not SOURCE.is_file(),
+    reason="Field-project Revit V5 review evidence is absent in this checkout (gitignored workspace/revit-school).",
+)
 
 
 def test_v5_execution_preview_is_bound_to_the_source_and_live_geometry() -> None:

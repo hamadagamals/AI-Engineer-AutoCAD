@@ -6,12 +6,19 @@ import json
 import math
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHOOL = ROOT / "workspace" / "revit-school"
 REVIEW = SCHOOL / "previews" / "electrical-distribution"
 PREVIEW = REVIEW / "School-Electrical-Revit-Review-V4-Preview-20261030.json"
 REPORT = REVIEW / "School-Electrical-Review-V4-Live-Report-20261030.json"
+
+pytestmark = pytest.mark.skipif(
+    not PREVIEW.is_file() or not REPORT.is_file(),
+    reason="Field-project Revit V4 review evidence is absent in this checkout (gitignored workspace/revit-school).",
+)
 
 
 def test_v4_preview_is_bound_to_unchanged_source() -> None:

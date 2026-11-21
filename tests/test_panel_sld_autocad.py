@@ -27,6 +27,11 @@ from integrations.panel_sld_autocad import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PREVIEW = PROJECT_ROOT / "workspace" / "reports" / "db3-ga2-sld-preview-20260824.json"
 
+pytestmark = pytest.mark.skipif(
+    not PREVIEW.is_file(),
+    reason="Field-project DB3-GA2 SLD preview JSON is absent in this checkout (gitignored workspace/reports).",
+)
+
 
 def _preview() -> dict[str, object]:
     return json.loads(PREVIEW.read_text(encoding="utf-8"))

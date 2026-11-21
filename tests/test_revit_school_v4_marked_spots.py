@@ -3,9 +3,17 @@
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 REVIEW = ROOT / "workspace/revit-school/previews/electrical-distribution"
+
+pytestmark = pytest.mark.skipif(
+    not (REVIEW / "School-V4-Marked-Spots-Revit-Query-20261030.json").is_file()
+    or not (REVIEW / "School-Electrical-Review-V4-Live-Report-20261030.json").is_file(),
+    reason="Field-project Revit V4 marked-spots evidence is absent in this checkout (gitignored workspace/revit-school).",
+)
 
 
 def test_marked_spot_query_is_bound_to_v4_and_read_only() -> None:

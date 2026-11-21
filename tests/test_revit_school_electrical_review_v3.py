@@ -5,10 +5,18 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHOOL = ROOT / "workspace" / "revit-school"
 REVIEW = SCHOOL / "previews" / "electrical-distribution"
+
+pytestmark = pytest.mark.skipif(
+    not (REVIEW / "School-Electrical-Revit-Review-V3-Preview-20261030.json").is_file()
+    or not (SCHOOL / "scratch" / "School-Architectural-electrical-Classroom1500-Sample.rvt").is_file(),
+    reason="Field-project Revit V3 review evidence is absent in this checkout (gitignored workspace/revit-school).",
+)
 
 
 def _read(name: str) -> dict:

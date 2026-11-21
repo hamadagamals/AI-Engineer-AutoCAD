@@ -24,12 +24,21 @@ EVIDENCE = ROOT / "workspace" / "revit-school" / "previews" / "electrical-distri
 
 @pytest.fixture(scope="module")
 def evidence() -> tuple[dict, dict, dict]:
-    preview = json.loads((EVIDENCE / "School-Electrical-V5-Execution-Preview-20261031.json").read_text(encoding="utf-8"))
-    handoff = json.loads((EVIDENCE / "School-Electrical-V5-Live-Handoff-20261031.json").read_text(encoding="utf-8"))
+    required = (
+        "School-Electrical-V5-Execution-Preview-20261031.json",
+        "School-Electrical-V5-Live-Handoff-20261031.json",
+        "School-V5-Existing-Lighting-Count-20261031.json",
+        "School-V5-Existing-Outlets-Count-20261031.json",
+        "School-V5-Existing-Equipment-Count-20261031.json",
+    )
+    if any(not (EVIDENCE / name).is_file() for name in required):
+        pytest.skip("Field-project Revit V5 load-readiness evidence is absent in this checkout (gitignored workspace/revit-school).")
+    preview = json.loads((EVIDENCE / required[0]).read_text(encoding="utf-8"))
+    handoff = json.loads((EVIDENCE / required[1]).read_text(encoding="utf-8"))
     inventory = {
-        "lighting_fixtures": json.loads((EVIDENCE / "School-V5-Existing-Lighting-Count-20261031.json").read_text(encoding="utf-8")),
-        "electrical_fixtures": json.loads((EVIDENCE / "School-V5-Existing-Outlets-Count-20261031.json").read_text(encoding="utf-8")),
-        "electrical_equipment": json.loads((EVIDENCE / "School-V5-Existing-Equipment-Count-20261031.json").read_text(encoding="utf-8")),
+        "lighting_fixtures": json.loads((EVIDENCE / required[2]).read_text(encoding="utf-8")),
+        "electrical_fixtures": json.loads((EVIDENCE / required[3]).read_text(encoding="utf-8")),
+        "electrical_equipment": json.loads((EVIDENCE / required[4]).read_text(encoding="utf-8")),
     }
     return preview, handoff, inventory
 

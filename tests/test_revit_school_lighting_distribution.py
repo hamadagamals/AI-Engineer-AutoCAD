@@ -7,6 +7,12 @@ from integrations.revit_school_lighting_distribution import build_preview
 
 ROOT = Path(__file__).resolve().parents[1]
 
+pytestmark = pytest.mark.skipif(
+    not (ROOT / "workspace/revit-school/School-Architectural-readonly-inventory.json").is_file()
+    or not (ROOT / "workspace/revit-school/outputs/School-Electrical-Distribution-Preview.xlsx").is_file(),
+    reason="Field-project Revit lighting distribution assets are absent in this checkout (gitignored workspace/revit-school).",
+)
+
 
 def test_l4_gym_preview_is_bounded_and_non_executable() -> None:
     preview = build_preview(

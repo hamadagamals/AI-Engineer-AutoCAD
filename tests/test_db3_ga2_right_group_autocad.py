@@ -18,6 +18,11 @@ PREVIEW = (
     / "workspace" / "reports" / "db3-ga2-right-group-highlight-preview-20260824.json"
 )
 
+pytestmark = pytest.mark.skipif(
+    not PREVIEW.is_file(),
+    reason="Field-project DB3-GA2 preview JSON is absent in this checkout (gitignored workspace/reports).",
+)
+
 
 def test_exact_overlay_plan_is_preview_bound_and_non_destructive_to_source() -> None:
     preview = json.loads(PREVIEW.read_text(encoding="utf-8"))

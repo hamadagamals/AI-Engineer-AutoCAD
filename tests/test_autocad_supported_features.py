@@ -33,6 +33,7 @@ def test_performance_targets_are_bounded_and_do_not_claim_unmeasured_success() -
     text = (PROJECT_ROOT / "docs" / "AUTOCAD_PERFORMANCE_TARGETS.md").read_text(
         encoding="utf-8"
     )
+    normalized = " ".join(text.split())
     for required in (
         "512 entities, 128 layers",
         "1,792 ordered preview items",
@@ -44,6 +45,6 @@ def test_performance_targets_are_bounded_and_do_not_claim_unmeasured_success() -
         "five-run median plus maximum",
         "source drawing SHA-256",
         "one-use approval",
-        "complete release performance gate is not",
+        "complete release gate remains open only for the second initialized Windows/AutoCAD profile",
     ):
-        assert required in text
+        assert required in normalized

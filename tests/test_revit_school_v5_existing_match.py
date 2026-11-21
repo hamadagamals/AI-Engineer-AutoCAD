@@ -19,14 +19,15 @@ EVIDENCE = ROOT / "workspace" / "revit-school" / "previews" / "electrical-distri
 
 @pytest.fixture(scope="module")
 def evidence() -> tuple[dict, list[dict]]:
-    preview = json.loads((EVIDENCE / "School-Electrical-V5-Execution-Preview-20261031.json").read_text(encoding="utf-8"))
-    pages = [
-        json.loads((EVIDENCE / name).read_text(encoding="utf-8"))
-        for name in (
-            "School-V5-Existing-Lighting-Page1-20261031.json",
-            "School-V5-Existing-Lighting-Page2-20261031.json",
-        )
-    ]
+    required = (
+        "School-Electrical-V5-Execution-Preview-20261031.json",
+        "School-V5-Existing-Lighting-Page1-20261031.json",
+        "School-V5-Existing-Lighting-Page2-20261031.json",
+    )
+    if any(not (EVIDENCE / name).is_file() for name in required):
+        pytest.skip("Field-project Revit V5 evidence is absent in this checkout (gitignored workspace/revit-school).")
+    preview = json.loads((EVIDENCE / required[0]).read_text(encoding="utf-8"))
+    pages = [json.loads((EVIDENCE / name).read_text(encoding="utf-8")) for name in required[1:]]
     return preview, pages
 
 

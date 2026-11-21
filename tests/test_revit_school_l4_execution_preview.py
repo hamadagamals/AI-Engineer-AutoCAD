@@ -18,6 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 FAMILY = ROOT / "workspace/revit-school/official-library/extracted/CoreLine-Highbay-G5-Revit/REVIT_CL Highbay gen5 complete/63_UN_HighBay_Coreline Highbay BY120P G5 PSU 105-150_Signify.rfa"
 IES = ROOT / "workspace/revit-school/official-library/downloads/CoreLine-Highbay-911401629308-IES-20261016.ies"
 
+pytestmark = pytest.mark.skipif(
+    not FAMILY.is_file() or not IES.is_file(),
+    reason="Field-project Revit L4 execution preview assets are absent in this checkout (gitignored workspace/revit-school).",
+)
+
 
 def _arguments(tmp_path: Path) -> dict[str, Path]:
     return {

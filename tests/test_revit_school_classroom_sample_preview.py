@@ -10,6 +10,12 @@ from integrations.revit_school_classroom_sample_preview import build_preview, lo
 ROOT = Path(__file__).resolve().parents[1]
 BASE = ROOT / "workspace/revit-school"
 
+pytestmark = pytest.mark.skipif(
+    not (BASE / "School-Architectural-readonly-inventory.json").is_file()
+    or not (BASE / "scratch/School-Architectural-electrical-L4-Complete.rvt").is_file(),
+    reason="Field-project Revit school assets are absent in this checkout (gitignored workspace/revit-school).",
+)
+
 
 def _args(tmp_path: Path) -> dict[str, Path]:
     return {

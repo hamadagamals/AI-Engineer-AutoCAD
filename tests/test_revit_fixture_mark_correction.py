@@ -15,9 +15,16 @@ from integrations.revit_fixture_mark_correction import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "workspace/revit-school/previews/electrical-distribution"
 SOURCE = ROOT / "workspace/revit-school/scratch/School-Electrical-V5-Classroom1501-Physical-Sample-20261031.rvt"
+
+pytestmark = pytest.mark.skipif(
+    not SOURCE.is_file()
+    or not (EVIDENCE / "School-V5-Classroom1501-Physical-Category-20261031.json").is_file()
+    or not (EVIDENCE / "School-V5-Classroom1501-Physical-Sample-Preview-20261031.json").is_file(),
+    reason="Field-project Revit acceptance artifacts are absent in this checkout (gitignored workspace/revit-school).",
+)
 
 
 def _create(tmp_path: Path, category: Path = EVIDENCE / "School-V5-Classroom1501-Physical-Category-20261031.json") -> dict[str, object]:

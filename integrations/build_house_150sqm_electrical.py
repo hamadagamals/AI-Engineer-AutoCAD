@@ -211,7 +211,8 @@ def build_electrical(output_dir: Path) -> dict[str, object]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", type=Path, default=Path("D:/program/apartment_150sqm"))
+    default_out = Path(__file__).resolve().parent.parent / "workspace" / "apartment_150sqm"
+    parser.add_argument("--output-dir", type=Path, default=default_out)
     args = parser.parse_args()
     print(json.dumps(build_electrical(args.output_dir), ensure_ascii=False, indent=2))
     return 0
