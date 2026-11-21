@@ -70,6 +70,7 @@ $assembly = Join-Path $resolvedOutput "AIEngineer.AutoCAD.Context.dll"
     (Join-Path $pluginRoot "CadTextAndAttributesTools.cs") `
     (Join-Path $pluginRoot "CadGeometryQaAndLayoutTools.cs") `
     (Join-Path $pluginRoot "CadLightingAndDialuxTools.cs") `
+    (Join-Path $pluginRoot "VoiceAssistant.cs") `
     (Join-Path $pluginRoot "DirectCadAgent.cs") `
     (Join-Path $pluginRoot "PaletteCommands.cs")
 if ($LASTEXITCODE -ne 0) {

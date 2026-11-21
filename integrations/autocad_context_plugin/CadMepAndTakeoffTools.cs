@@ -1448,14 +1448,58 @@ namespace AIEngineer.AutoCAD
                 if (poly != null && poly.NumberOfVertices >= 2)
                 {
                     Polyline flatPoly = new Polyline(poly.NumberOfVertices);
+                    bool useWcs = !poly.Normal.IsParallelTo(Vector3d.ZAxis, new Tolerance(1e-6, 1e-6));
                     for (int i = 0; i < poly.NumberOfVertices; i++)
                     {
-                        Point2d pt = poly.GetPoint2dAt(i);
-                        flatPoly.AddVertexAt(i, pt, poly.GetBulgeAt(i), 0.0, 0.0);
+                        Point2d pt;
+                        if (useWcs)
+                        {
+                            Point3d wp = poly.GetPoint3dAt(i);
+                            pt = new Point2d(wp.X, wp.Y);
+                        }
+                        else
+                        {
+                            pt = poly.GetPoint2dAt(i);
+                        }
+                        flatPoly.AddVertexAt(i, pt, useWcs ? 0.0 : poly.GetBulgeAt(i), 0.0, 0.0);
                     }
                     flatPoly.Closed = poly.Closed;
                     return flatPoly;
                 }
+
+                // Sample multi-point curves (Polyline2d, Polyline3d, Spline, Arc, Circle, Ellipse)
+                // instead of collapsing them to a single straight line.
+                try
+                {
+                    double spParam = srcCurve.StartParam;
+                    double epParam = srcCurve.EndParam;
+                    if (epParam > spParam + 1e-9)
+                    {
+                        int steps = (srcCurve is Line) ? 2 : 48;
+                        Polyline sampled = new Polyline(steps + 1);
+                        int added = 0;
+                        Point2d prev = Point2d.Origin;
+                        for (int i = 0; i <= steps; i++)
+                        {
+                            double par = spParam + (epParam - spParam) * (i / (double)steps);
+                            Point3d p = srcCurve.GetPointAtParameter(par);
+                            Point2d p2 = new Point2d(p.X, p.Y);
+                            if (added == 0 || prev.GetDistanceTo(p2) > 1e-7)
+                            {
+                                sampled.AddVertexAt(added++, p2, 0.0, 0.0, 0.0);
+                                prev = p2;
+                            }
+                        }
+                        if (added >= 2)
+                        {
+                            sampled.Closed = srcCurve.Closed;
+                            return sampled;
+                        }
+                        sampled.Dispose();
+                    }
+                }
+                catch { }
+
                 Point3d sp = srcCurve.StartPoint;
                 Point3d ep = srcCurve.EndPoint;
                 if (Math.Abs(sp.X - ep.X) > 1e-7 || Math.Abs(sp.Y - ep.Y) > 1e-7)
@@ -1465,6 +1509,17 @@ namespace AIEngineer.AutoCAD
             }
             catch { }
             return null;
+        }
+
+        private static void AppendSegmentSamples(List<Point2d> pts, Point2d a, Point2d b, int maxExtra)
+        {
+            double dist = a.GetDistanceTo(b);
+            if (dist <= 1e-6 || maxExtra <= 0) return;
+            for (int k = 1; k <= maxExtra; k++)
+            {
+                double t = k / (double)(maxExtra + 1);
+                pts.Add(new Point2d(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t));
+            }
         }
 
         private static List<Point2d> SampleCurvePoints2D(Curve flatCurve, int minArcSamples)
@@ -1479,6 +1534,7 @@ namespace AIEngineer.AutoCAD
                 int segCount = pl.Closed ? vCount : (vCount - 1);
                 for (int i = 0; i < vCount; i++)
                     pts.Add(pl.GetPoint2dAt(i));
+                int perSegCap = Math.Max(2, Math.Min(12, 96 / Math.Max(1, segCount)));
                 for (int s = 0; s < segCount; s++)
                 {
                     double bulge = 0.0;
@@ -1498,6 +1554,12 @@ namespace AIEngineer.AutoCAD
                         }
                         catch { }
                     }
+                    else
+                    {
+                        Point2d pa = pl.GetPoint2dAt(s);
+                        Point2d pb = pl.GetPoint2dAt((s + 1) % vCount);
+                        AppendSegmentSamples(pts, pa, pb, perSegCap);
+                    }
                 }
                 return pts;
             }
@@ -1505,9 +1567,11 @@ namespace AIEngineer.AutoCAD
             Line ln = flatCurve as Line;
             if (ln != null)
             {
-                pts.Add(new Point2d(ln.StartPoint.X, ln.StartPoint.Y));
-                pts.Add(new Point2d((ln.StartPoint.X + ln.EndPoint.X) * 0.5, (ln.StartPoint.Y + ln.EndPoint.Y) * 0.5));
-                pts.Add(new Point2d(ln.EndPoint.X, ln.EndPoint.Y));
+                Point2d a = new Point2d(ln.StartPoint.X, ln.StartPoint.Y);
+                Point2d b = new Point2d(ln.EndPoint.X, ln.EndPoint.Y);
+                pts.Add(a);
+                AppendSegmentSamples(pts, a, b, 15);
+                pts.Add(b);
                 return pts;
             }
 
@@ -1711,6 +1775,7 @@ namespace AIEngineer.AutoCAD
             BlockReference br,
             Extents3d blockExt,
             double tol,
+            double unitsPerM,
             out int matchedPathIndex,
             out double matchedDistAlongPath)
         {
@@ -1720,6 +1785,21 @@ namespace AIEngineer.AutoCAD
             List<Curve> subCurves = new List<Curve>();
             List<List<Point2d>> closedPolys = new List<List<Point2d>>();
             List<Extents3d> fallbackExtents = new List<Extents3d>();
+
+            double bw = Math.Max(0.0, blockExt.MaxPoint.X - blockExt.MinPoint.X);
+            double bh = Math.Max(0.0, blockExt.MaxPoint.Y - blockExt.MinPoint.Y);
+            double blockSpan = Math.Max(bw, bh);
+            Point2d blkCenter = new Point2d((blockExt.MinPoint.X + blockExt.MaxPoint.X) * 0.5, (blockExt.MinPoint.Y + blockExt.MaxPoint.Y) * 0.5);
+            Point2d blkPos = new Point2d(br.Position.X, br.Position.Y);
+            bool hasValidPos =
+                blockSpan <= 20.0 * unitsPerM &&
+                blkPos.X >= blockExt.MinPoint.X - Math.Max(tol, blockSpan * 0.25) &&
+                blkPos.X <= blockExt.MaxPoint.X + Math.Max(tol, blockSpan * 0.25) &&
+                blkPos.Y >= blockExt.MinPoint.Y - Math.Max(tol, blockSpan * 0.25) &&
+                blkPos.Y <= blockExt.MaxPoint.Y + Math.Max(tol, blockSpan * 0.25);
+            double centerHitTol = (blockSpan > 0.0 && blockSpan <= 10.0 * unitsPerM)
+                ? Math.Max(tol, Math.Min(blockSpan * 0.25, 0.25 * unitsPerM))
+                : 0.0;
 
             try
             {
@@ -1735,6 +1815,38 @@ namespace AIEngineer.AutoCAD
                     Curve flatPath = pc.FlatCurve;
                     if (flatPath == null) continue;
 
+                    // 0. Check block insertion point & fixture center (catches cable lines snapped to insertion point or passing straight through open symbols)
+                    if (hasValidPos)
+                    {
+                        try
+                        {
+                            Point3d cpPos = flatPath.GetClosestPointTo(new Point3d(blkPos.X, blkPos.Y, 0.0), false);
+                            double dPos = Math.Sqrt(Math.Pow(cpPos.X - blkPos.X, 2) + Math.Pow(cpPos.Y - blkPos.Y, 2));
+                            if (dPos <= tol)
+                            {
+                                matchedPathIndex = pc.PathIndex;
+                                try { matchedDistAlongPath = flatPath.GetDistAtPoint(cpPos); } catch { }
+                                return true;
+                            }
+                        }
+                        catch { }
+                    }
+                    if (centerHitTol > 0.0)
+                    {
+                        try
+                        {
+                            Point3d cpCtr = flatPath.GetClosestPointTo(new Point3d(blkCenter.X, blkCenter.Y, 0.0), false);
+                            double dCtr = Math.Sqrt(Math.Pow(cpCtr.X - blkCenter.X, 2) + Math.Pow(cpCtr.Y - blkCenter.Y, 2));
+                            if (dCtr <= centerHitTol)
+                            {
+                                matchedPathIndex = pc.PathIndex;
+                                try { matchedDistAlongPath = flatPath.GetDistAtPoint(cpCtr); } catch { }
+                                return true;
+                            }
+                        }
+                        catch { }
+                    }
+
                     // Collect path samples overlapping block bounds (+tol) for point-in-closed-symbol & near-point tests
                     List<Point2d> localPathSamples = new List<Point2d>();
                     for (int si = 0; si < pc.Samples.Count; si++)
@@ -1745,7 +1857,6 @@ namespace AIEngineer.AutoCAD
                             localPathSamples.Add(sp);
                     }
                     // Always test closest point on path to block center as an extra local sample (catches straight segments passing straight over a closed fixture)
-                    Point2d blkCenter = new Point2d((blockExt.MinPoint.X + blockExt.MaxPoint.X) * 0.5, (blockExt.MinPoint.Y + blockExt.MaxPoint.Y) * 0.5);
                     try
                     {
                         Point3d cpCenter = flatPath.GetClosestPointTo(new Point3d(blkCenter.X, blkCenter.Y, 0.0), false);
@@ -1888,8 +1999,8 @@ namespace AIEngineer.AutoCAD
                         }
                     }
 
-                    // 3. Fallback when block has no vector Curve/Hatch/Solid geometry
-                    if (subCurves.Count == 0 && closedPolys.Count == 0)
+                    // 3. Fallback extents (any sub-entities that failed vector projection, or empty vector geometry)
+                    if (fallbackExtents.Count > 0 || (subCurves.Count == 0 && closedPolys.Count == 0))
                     {
                         if (fallbackExtents.Count == 0) fallbackExtents.Add(blockExt);
                         for (int fi = 0; fi < fallbackExtents.Count; fi++)
@@ -1947,6 +2058,188 @@ namespace AIEngineer.AutoCAD
             return false;
         }
 
+        private sealed class CurveChainNode
+        {
+            public ObjectId Id;
+            public string Handle;
+            public string Layer;
+            public bool IsExplicitColor;
+            public int ColorKey;
+            public Point2d StartXY;
+            public Point2d EndXY;
+        }
+
+        private static bool TryGetCurveEndpointsXY(Curve cv, out Point2d sp, out Point2d ep)
+        {
+            sp = Point2d.Origin;
+            ep = Point2d.Origin;
+            if (cv == null || cv.IsErased) return false;
+            if (cv is Circle || cv is Ellipse || cv.Closed) return false;
+            try
+            {
+                Point3d p0 = cv.StartPoint;
+                Point3d p1 = cv.EndPoint;
+                sp = new Point2d(p0.X, p0.Y);
+                ep = new Point2d(p1.X, p1.Y);
+                return sp.GetDistanceTo(ep) > 1e-6;
+            }
+            catch { return false; }
+        }
+
+        private static void ExpandConnectedPathCurves(
+            Database db,
+            Transaction tr,
+            List<ObjectId> pathCurveIds,
+            List<string> pathHandles,
+            Dictionary<string, bool> layerHiddenFlags,
+            bool visibleOnly,
+            double snapTol)
+        {
+            if (pathCurveIds == null || pathCurveIds.Count == 0) return;
+
+            HashSet<string> targetLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Queue<CurveChainNode> queue = new Queue<CurveChainNode>();
+            HashSet<ObjectId> visited = new HashSet<ObjectId>();
+
+            for (int i = 0; i < pathCurveIds.Count; i++)
+            {
+                ObjectId oid = pathCurveIds[i];
+                Curve cv = tr.GetObject(oid, OpenMode.ForRead) as Curve;
+                Point2d sp, ep;
+                if (!TryGetCurveEndpointsXY(cv, out sp, out ep)) continue;
+                targetLayers.Add(cv.Layer ?? "0");
+                visited.Add(oid);
+                queue.Enqueue(new CurveChainNode
+                {
+                    Id = oid,
+                    Handle = cv.Handle.ToString(),
+                    Layer = cv.Layer ?? "0",
+                    IsExplicitColor = (cv.ColorIndex != 256 && cv.ColorIndex != 0),
+                    ColorKey = cv.ColorIndex,
+                    StartXY = sp,
+                    EndXY = ep
+                });
+            }
+            if (queue.Count == 0) return;
+
+            BlockTableRecord ms = (BlockTableRecord)tr.GetObject(
+                SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+            List<CurveChainNode> candidates = new List<CurveChainNode>();
+            foreach (ObjectId mid in ms)
+            {
+                if (mid.IsErased || visited.Contains(mid)) continue;
+                Entity ent = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                Curve cv = ent as Curve;
+                if (cv == null || ent.IsErased) continue;
+                if (IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer)) continue;
+                if (!targetLayers.Contains(ent.Layer ?? "0")) continue;
+                if (visibleOnly && !IsEntityVisible(ent, layerHiddenFlags)) continue;
+                Point2d sp, ep;
+                if (!TryGetCurveEndpointsXY(cv, out sp, out ep)) continue;
+                candidates.Add(new CurveChainNode
+                {
+                    Id = mid,
+                    Handle = ent.Handle.ToString(),
+                    Layer = ent.Layer ?? "0",
+                    IsExplicitColor = (ent.ColorIndex != 256 && ent.ColorIndex != 0),
+                    ColorKey = ent.ColorIndex,
+                    StartXY = sp,
+                    EndXY = ep
+                });
+            }
+            if (candidates.Count == 0) return;
+
+            const int MaxChainCurves = 256;
+            while (queue.Count > 0 && pathCurveIds.Count < MaxChainCurves)
+            {
+                CurveChainNode cur = queue.Dequeue();
+                Point2d[] ends = new Point2d[] { cur.StartXY, cur.EndXY };
+                bool isLayerZero = string.Equals(cur.Layer, "0", StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(cur.Layer, "Defpoints", StringComparison.OrdinalIgnoreCase);
+
+                for (int ei = 0; ei < ends.Length; ei++)
+                {
+                    Point2d pt = ends[ei];
+                    List<CurveChainNode> hitsAtPt = new List<CurveChainNode>();
+                    for (int ci = 0; ci < candidates.Count; ci++)
+                    {
+                        CurveChainNode cand = candidates[ci];
+                        if (visited.Contains(cand.Id)) continue;
+                        if (!string.Equals(cand.Layer, cur.Layer, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (cur.IsExplicitColor && cand.IsExplicitColor && cur.ColorKey != cand.ColorKey) continue;
+                        if (cand.StartXY.GetDistanceTo(pt) <= snapTol || cand.EndXY.GetDistanceTo(pt) <= snapTol)
+                            hitsAtPt.Add(cand);
+                    }
+                    // On Layer 0 (often shared with building walls/grids), only follow clean 1-to-1 continuations unless explicit color matches
+                    int maxBranch = isLayerZero ? (cur.IsExplicitColor ? 2 : 1) : 4;
+                    if (hitsAtPt.Count == 0 || hitsAtPt.Count > maxBranch) continue;
+
+                    for (int hi = 0; hi < hitsAtPt.Count && pathCurveIds.Count < MaxChainCurves; hi++)
+                    {
+                        CurveChainNode nxt = hitsAtPt[hi];
+                        if (visited.Add(nxt.Id))
+                        {
+                            pathCurveIds.Add(nxt.Id);
+                            pathHandles.Add(nxt.Handle);
+                            queue.Enqueue(nxt);
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void ProbeNestedBlocksAlongPath(
+            Transaction tr,
+            BlockReference parentBr,
+            string parentName,
+            List<PathCurveCandidate> pathCandidates,
+            double unitsPerM,
+            int depth,
+            Dictionary<string, int> nestedCounts)
+        {
+            if (parentBr == null || depth > 2) return;
+            DBObjectCollection exploded = new DBObjectCollection();
+            try
+            {
+                parentBr.Explode(exploded);
+                foreach (DBObject obj in exploded)
+                {
+                    BlockReference childBr = obj as BlockReference;
+                    if (childBr == null) continue;
+                    try
+                    {
+                        string cbn = ResolveBlockName(tr, childBr);
+                        if (string.IsNullOrEmpty(cbn) || IsAnonymousBlockName(cbn) || IsSystemBlockName(cbn)) continue;
+                        Extents3d cex;
+                        try { cex = childBr.GeometricExtents; } catch { continue; }
+                        if (!IsFiniteBounds(cex)) continue;
+                        double span = Math.Max(Math.Max(0.0, cex.MaxPoint.X - cex.MinPoint.X), Math.Max(0.0, cex.MaxPoint.Y - cex.MinPoint.Y));
+                        double tol = Math.Max(1e-3, Math.Min(span * 0.12, 0.15 * unitsPerM));
+                        int hp;
+                        double hd;
+                        if (span <= 20.0 * unitsPerM && DoesPathHitBlockXY(pathCandidates, childBr, cex, tol, unitsPerM, out hp, out hd))
+                        {
+                            string key = parentName + " -> " + cbn;
+                            nestedCounts[key] = nestedCounts.ContainsKey(key) ? nestedCounts[key] + 1 : 1;
+                        }
+                        else if (span > 10.0 * unitsPerM)
+                        {
+                            ProbeNestedBlocksAlongPath(tr, childBr, parentName + " -> " + cbn, pathCandidates, unitsPerM, depth + 1, nestedCounts);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            finally
+            {
+                foreach (DBObject obj in exploded)
+                {
+                    try { if (obj != null) obj.Dispose(); } catch { }
+                }
+            }
+        }
+
         private static Dictionary<string, object> FindBlocksAlongPath(Document doc, Dictionary<string, object> args)
         {
             Database db = doc.Database;
@@ -1965,11 +2258,12 @@ namespace AIEngineer.AutoCAD
             bool drawLegend = GetBool(args, "draw_legend", true);
             bool usePreviousPath = GetBool(args, "use_previous_path", false);
             bool pickIfEmpty = GetBool(args, "pick_if_empty", true);
+            bool followConnected = GetBool(args, "follow_connected", true);
             bool zoom = GetBool(args, "zoom", true);
             string zoomMode = (GetStr(args, "zoom_mode") ?? "auto").Trim().ToLowerInvariant();
             string title = GetStr(args, "title");
             if (string.IsNullOrWhiteSpace(title))
-                title = "جدول حصر ومفاتيح بلوكات المسار المحدد (PATH BLOCK LEGEND)";
+                title = "جدول حصر ومفاتيح بلوكات المسار المحدد";
             string legendPosition = GetStr(args, "position") ?? "outside_right";
 
             double unitsPerM = Convert.ToDouble(GetUnitsInfo(db)["units_per_m"], CultureInfo.InvariantCulture);
@@ -2071,10 +2365,13 @@ namespace AIEngineer.AutoCAD
             }
 
             RecordUserSelectionSnapshot(doc, pathHandles);
+            List<string> initialPathHandles = new List<string>(pathHandles);
 
             List<PathCurveCandidate> pathCandidates = new List<PathCurveCandidate>();
             List<PathBlockMatchItem> matchedItems = new List<PathBlockMatchItem>();
             Dictionary<string, int> countsByBlock = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, int> nestedBlocksAlongPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> pathEntityTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             double totalPathLenUnits = 0.0;
             Extents3d? selectedAndPathExt = null;
             bool switchedToModel = false;
@@ -2091,12 +2388,18 @@ namespace AIEngineer.AutoCAD
                     using (Transaction tr = db.TransactionManager.StartTransaction())
                     {
                         Dictionary<string, bool> layerHiddenFlags = BuildLayerHiddenMap(db, tr);
+                        if (followConnected && explicitHandles.Count == 0)
+                        {
+                            double chainSnapTol = Math.Max(1e-3, 0.01 * unitsPerM);
+                            ExpandConnectedPathCurves(db, tr, pathCurveIds, pathHandles, layerHiddenFlags, visibleOnly, chainSnapTol);
+                        }
                         HashSet<ObjectId> pathIdSet = new HashSet<ObjectId>(pathCurveIds);
 
                         for (int i = 0; i < pathCurveIds.Count; i++)
                         {
                             Curve srcCurve = tr.GetObject(pathCurveIds[i], OpenMode.ForRead) as Curve;
                             if (srcCurve == null || srcCurve.IsErased) continue;
+                            pathEntityTypes.Add(srcCurve.GetType().Name);
                             Curve flat = FlattenCurveToXY(srcCurve);
                             if (flat == null) continue;
 
@@ -2182,12 +2485,15 @@ namespace AIEngineer.AutoCAD
                             double blockSpan = Math.Max(bw, bh);
                             double tol = explicitTolerance.HasValue
                                 ? Math.Max(1e-5, explicitTolerance.Value)
-                                : Math.Max(1e-4, Math.Min(blockSpan * 0.04, Math.Max(1e-3, blockSpan * 0.08)));
+                                : Math.Max(1e-3, Math.Min(blockSpan * 0.12, 0.15 * unitsPerM));
 
                             int hitPathIdx;
                             double hitDist;
-                            if (!DoesPathHitBlockXY(pathCandidates, br, bex, tol, out hitPathIdx, out hitDist))
+                            if (!DoesPathHitBlockXY(pathCandidates, br, bex, tol, unitsPerM, out hitPathIdx, out hitDist))
                                 continue;
+
+                            if (blockSpan > 10.0 * unitsPerM)
+                                ProbeNestedBlocksAlongPath(tr, br, bn, pathCandidates, unitsPerM, 1, nestedBlocksAlongPath);
 
                             double cx = (bex.MinPoint.X + bex.MaxPoint.X) * 0.5;
                             double cy = (bex.MinPoint.Y + bex.MaxPoint.Y) * 0.5;
@@ -2260,7 +2566,7 @@ namespace AIEngineer.AutoCAD
                     {
                         { "handles", matchedHandles.ToArray() },
                         { "title", title },
-                        { "footer_label", "إجمالي البلوكات على المسار المحدد (Total Blocks)" },
+                        { "footer_label", "إجمالي البلوكات على المسار المحدد" },
                         { "position", legendPosition },
                         { "visible_only", visibleOnly },
                         { "include_system_blocks", includeSystem },
@@ -2318,9 +2624,13 @@ namespace AIEngineer.AutoCAD
                 }
                 doc.Editor.UpdateScreen();
 
+                List<string> pathTypeList = new List<string>(pathEntityTypes);
                 Dictionary<string, object> res = new Dictionary<string, object>
                 {
                     { "path_curves_count", pathCurveIds.Count },
+                    { "initial_path_handles", initialPathHandles },
+                    { "chain_followed", pathCurveIds.Count > initialPathHandles.Count },
+                    { "path_entity_types", pathTypeList },
                     { "path_handles", pathHandles },
                     { "total_path_length_m", Math.Round(totalPathLenUnits / unitsPerM, 3) },
                     { "matched_blocks_count", matchedItems.Count },
@@ -2332,6 +2642,8 @@ namespace AIEngineer.AutoCAD
                     { "legend_drawn", legendResult != null && legendResult.ContainsKey("ok") && legendResult["ok"] is bool && (bool)legendResult["ok"] },
                     { "switched_to_model", switchedToModel }
                 };
+                if (nestedBlocksAlongPath.Count > 0)
+                    res["nested_blocks_along_path"] = nestedBlocksAlongPath;
                 if (selectedAndPathExt.HasValue)
                 {
                     res["selected_bounds"] = new double[]

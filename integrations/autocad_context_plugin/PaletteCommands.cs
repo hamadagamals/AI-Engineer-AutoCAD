@@ -624,6 +624,9 @@ namespace AIEngineer.AutoCAD
         private readonly Button _refresh = new Button();
         private readonly Button _start = new Button();
         private readonly Button _send = new Button();
+        private readonly Button _voiceMic = new Button();
+        private readonly CheckBox _voiceAutoSend = new CheckBox();
+        private readonly CheckBox _voiceSpeakReply = new CheckBox();
         private readonly Button _cancel = new Button();
         private readonly Button _commitDrawing = new Button();
         private readonly Button _rollbackDrawing = new Button();
@@ -636,6 +639,9 @@ namespace AIEngineer.AutoCAD
         private readonly HttpClient _client;
         private DirectAiConfig _directConfig;
         private readonly DirectCadAgentSession _directSession = new DirectCadAgentSession();
+        private readonly WaveInAudioRecorder _voiceRecorder = new WaveInAudioRecorder();
+        private readonly System.Windows.Forms.Timer _voiceTimer = new System.Windows.Forms.Timer();
+        private bool _voiceTranscribing;
         private bool _suppressProviderEvents;
         private string _sessionId;
         private string _ownerKey;
@@ -827,7 +833,7 @@ namespace AIEngineer.AutoCAD
             _status.AutoSize = true;
             _status.MaximumSize = new Size(260, 0);
 
-            Button[] compactButtons = new Button[] { _refresh, _start, _send, _commitDrawing, _rollbackDrawing, _cancel };
+            Button[] compactButtons = new Button[] { _refresh, _start, _send, _voiceMic, _commitDrawing, _rollbackDrawing, _cancel };
             foreach (Button btn in compactButtons)
             {
                 btn.AutoSize = true;
@@ -837,6 +843,41 @@ namespace AIEngineer.AutoCAD
             }
             _includeDrawingContext.AutoSize = true;
             _includeDrawingContext.Margin = new Padding(2);
+            _voiceAutoSend.AutoSize = true;
+            _voiceAutoSend.Margin = new Padding(4, 5, 2, 2);
+            _voiceAutoSend.Checked = _directConfig != null ? _directConfig.VoiceAutoSend : true;
+            _voiceAutoSend.CheckedChanged += delegate
+            {
+                if (_suppressProviderEvents || _directConfig == null) return;
+                _directConfig.VoiceAutoSend = _voiceAutoSend.Checked;
+                _directConfig.Save();
+            };
+            _voiceSpeakReply.AutoSize = true;
+            _voiceSpeakReply.Margin = new Padding(4, 5, 2, 2);
+            _voiceSpeakReply.Checked = _directConfig != null ? _directConfig.VoiceSpeakReplies : true;
+            _voiceSpeakReply.CheckedChanged += delegate
+            {
+                if (_suppressProviderEvents || _directConfig == null) return;
+                _directConfig.VoiceSpeakReplies = _voiceSpeakReply.Checked;
+                _directConfig.Save();
+                if (!_voiceSpeakReply.Checked) VoiceSpeechOutput.Stop();
+            };
+            _voiceTimer.Interval = 300;
+            _voiceTimer.Tick += async delegate
+            {
+                if (!_voiceRecorder.IsRecording)
+                {
+                    _voiceTimer.Stop();
+                    return;
+                }
+                int sec = _voiceRecorder.ElapsedSeconds;
+                UpdateVoiceMicVisuals();
+                if (sec >= 120)
+                {
+                    _voiceTimer.Stop();
+                    await ToggleVoiceRecordingAsync();
+                }
+            };
 
             FlowLayoutPanel contextButtons = new FlowLayoutPanel();
             contextButtons.Dock = DockStyle.Fill;
@@ -854,6 +895,9 @@ namespace AIEngineer.AutoCAD
             actionButtons.WrapContents = true;
             actionButtons.Margin = new Padding(0, 2, 0, 2);
             actionButtons.Controls.Add(_send);
+            actionButtons.Controls.Add(_voiceMic);
+            actionButtons.Controls.Add(_voiceAutoSend);
+            actionButtons.Controls.Add(_voiceSpeakReply);
             actionButtons.Controls.Add(_commitDrawing);
             actionButtons.Controls.Add(_rollbackDrawing);
             actionButtons.Controls.Add(_cancel);
@@ -899,6 +943,7 @@ namespace AIEngineer.AutoCAD
             _refresh.Click += delegate { RefreshContext(); };
             _start.Click += async delegate { await StartSession(); };
             _send.Click += async delegate { await SendMessage(); };
+            _voiceMic.Click += async delegate { await ToggleVoiceRecordingAsync(); };
             _commitDrawing.Click += delegate {
                 _waitingForDrawingClarification = false;
                 Autodesk.AutoCAD.ApplicationServices.Document doc =
@@ -1069,6 +1114,9 @@ namespace AIEngineer.AutoCAD
             _sortRow.Visible = IsDirectMode;
             _refresh.Text = IsArabic ? "تحديث السياق" : "Refresh context";
             _send.Text = IsArabic ? "اسأل AI" : "Ask AI";
+            _voiceAutoSend.Text = IsArabic ? "إرسال تلقائي" : "Auto-send";
+            _voiceSpeakReply.Text = IsArabic ? "🔊 نطق الرد" : "🔊 Speak";
+            UpdateVoiceMicVisuals();
             _commitDrawing.Text = IsArabic ? "✅ اعتماد الرسم (تمام)" : "✅ Commit (تمام)";
             _rollbackDrawing.Text = IsArabic ? "❌ تراجع" : "❌ Rollback";
             _commitDrawing.BackColor = Color.FromArgb(220, 245, 220);
@@ -1159,6 +1207,7 @@ namespace AIEngineer.AutoCAD
 
         private async Task StartSession()
         {
+            VoiceSpeechOutput.Stop();
             if (IsDirectMode)
             {
                 _directSession.ClearHistory();
@@ -1651,7 +1700,14 @@ namespace AIEngineer.AutoCAD
                 answerRequest["review_id"] = _pendingReviewId;
                 Dictionary<string, object> response = await Post(
                     "/v1/copilot/sessions/" + _sessionId + "/answers", answerRequest, _ownerKey);
-                ShowSession(RequiredObject(response, "session"));
+                Dictionary<string, object> updatedSession = RequiredObject(response, "session");
+                ShowSession(updatedSession);
+                if (_voiceSpeakReply.Checked)
+                {
+                    string lastReply = ExtractLastAssistantMessage(updatedSession);
+                    if (!string.IsNullOrWhiteSpace(lastReply))
+                        VoiceSpeechOutput.SpeakAsync(lastReply);
+                }
                 _pendingReviewId = null;
                 SetStatus(IsArabic ? "تم استلام إجابة مقيدة وموثقة." : "Bounded cited answer received.");
             }
@@ -1670,6 +1726,7 @@ namespace AIEngineer.AutoCAD
             if (!BeginOperation()) return;
             try
             {
+                VoiceSpeechOutput.Stop();
                 string provider = SelectedProvider;
                 string model = SelectedModel;
                 if (!string.IsNullOrWhiteSpace(model))
@@ -1702,6 +1759,8 @@ namespace AIEngineer.AutoCAD
                     reply.ProviderUsed + " (" + reply.ModelUsed + "): " + reply.Text + Environment.NewLine + Environment.NewLine);
                 _transcript.SelectionStart = _transcript.TextLength;
                 _transcript.ScrollToCaret();
+                if (_voiceSpeakReply.Checked && !string.IsNullOrWhiteSpace(reply.Text))
+                    VoiceSpeechOutput.SpeakAsync(reply.Text);
                 RefreshContext();
                 SetStatus(IsArabic
                     ? "تم الرد مباشرة من " + reply.ProviderUsed + " (" + reply.ModelUsed + ")."
@@ -1724,6 +1783,7 @@ namespace AIEngineer.AutoCAD
 
         private async Task CancelSession()
         {
+            VoiceSpeechOutput.Stop();
             if (IsDirectMode)
             {
                 _directSession.ClearHistory();
@@ -1948,14 +2008,19 @@ namespace AIEngineer.AutoCAD
         private void UpdateActionState()
         {
             bool active = !String.IsNullOrEmpty(_sessionId) && !String.IsNullOrEmpty(_ownerKey);
+            bool voiceBlocked = _busy || _voiceTranscribing;
+            _voiceMic.Enabled = !voiceBlocked || _voiceRecorder.IsRecording;
+            _voiceAutoSend.Enabled = !voiceBlocked;
+            _voiceSpeakReply.Enabled = true;
+
             if (IsDirectMode)
             {
                 _start.Text = IsArabic ? "محادثة جديدة" : "New chat";
-                _providerCombo.Enabled = !_busy;
-                _modelCombo.Enabled = !_busy;
-                _coordSortCombo.Enabled = !_busy;
-                _apiSettings.Enabled = !_busy;
-                if (_busy)
+                _providerCombo.Enabled = !voiceBlocked;
+                _modelCombo.Enabled = !voiceBlocked;
+                _coordSortCombo.Enabled = !voiceBlocked;
+                _apiSettings.Enabled = !voiceBlocked;
+                if (voiceBlocked)
                 {
                     _start.Enabled = _send.Enabled = _cancel.Enabled = false;
                     _prepareReview.Enabled = _approveReview.Enabled = _rejectReview.Enabled = false;
@@ -1967,12 +2032,12 @@ namespace AIEngineer.AutoCAD
                 _prepareReview.Enabled = _approveReview.Enabled = _rejectReview.Enabled = false;
                 return;
             }
-            _providerCombo.Enabled = !_busy;
-            _apiSettings.Enabled = !_busy;
+            _providerCombo.Enabled = !voiceBlocked;
+            _apiSettings.Enabled = !voiceBlocked;
             _start.Text = IsArabic
                 ? (active ? "المحادثة نشطة" : "محادثة جديدة")
                 : (active ? "Chat active" : "New chat");
-            if (_busy)
+            if (voiceBlocked)
             {
                 _start.Enabled = _send.Enabled = _cancel.Enabled = false;
                 _prepareReview.Enabled = _approveReview.Enabled = _rejectReview.Enabled = false;
@@ -1985,6 +2050,185 @@ namespace AIEngineer.AutoCAD
             bool reviewPending = active && !String.IsNullOrEmpty(_pendingReviewId);
             _approveReview.Enabled = reviewPending;
             _rejectReview.Enabled = reviewPending;
+        }
+
+        private void UpdateVoiceMicVisuals()
+        {
+            if (_voiceTranscribing)
+            {
+                _voiceMic.Text = IsArabic ? "⏳ تحويل الصوت..." : "⏳ Transcribing...";
+                _voiceMic.BackColor = Color.FromArgb(255, 243, 205);
+                _voiceMic.FlatStyle = FlatStyle.Flat;
+                return;
+            }
+            if (_voiceRecorder.IsRecording)
+            {
+                int sec = _voiceRecorder.ElapsedSeconds;
+                _voiceMic.Text = (IsArabic ? "⏹ إيقاف (" : "⏹ Stop (") +
+                                 sec.ToString(CultureInfo.InvariantCulture) + "s)";
+                _voiceMic.BackColor = Color.FromArgb(255, 214, 214);
+                _voiceMic.FlatStyle = FlatStyle.Flat;
+                return;
+            }
+            _voiceMic.Text = IsArabic ? "🎤 صوت" : "🎤 Voice";
+            _voiceMic.BackColor = SystemColors.Control;
+            _voiceMic.FlatStyle = FlatStyle.Standard;
+        }
+
+        private async Task ToggleVoiceRecordingAsync()
+        {
+            if (_voiceTranscribing || _busy) return;
+
+            if (!_voiceRecorder.IsRecording)
+            {
+                VoiceSpeechOutput.Stop();
+                _directConfig = DirectAiConfig.Load();
+                if (!VoiceTranscriber.HasCloudSttKey(_directConfig))
+                {
+                    string keyMsg = IsArabic
+                        ? "للتواصل الصوتي الدقيق بجميع اللهجات العربية والإنجليزية، أضف مفتاح Gemini أو OpenAI من زر [🔑 API] (ويمكنك الإبقاء على أي مزود للشات)."
+                        : "Configure a Gemini or OpenAI API key in [🔑 API] to enable dialect-accurate voice recognition.";
+                    _transcript.AppendText((IsArabic ? "ℹ️ [الصوت]: " : "ℹ️ [Voice]: ") + keyMsg + Environment.NewLine + Environment.NewLine);
+                    _transcript.SelectionStart = _transcript.TextLength;
+                    _transcript.ScrollToCaret();
+                    SetStatus(keyMsg);
+                    return;
+                }
+
+                try
+                {
+                    _voiceRecorder.Start();
+                    _voiceTimer.Start();
+                    UpdateVoiceMicVisuals();
+                    UpdateActionState();
+                    SetStatus(IsArabic
+                        ? "🎤 جاري التسجيل... تحدث بالعربية (أي لهجة) أو بالإنجليزية ثم اضغط إيقاف."
+                        : "🎤 Recording... speak in Arabic (any dialect) or English, then click Stop.");
+                }
+                catch (System.Exception ex)
+                {
+                    _voiceTimer.Stop();
+                    UpdateVoiceMicVisuals();
+                    UpdateActionState();
+                    SetStatus((IsArabic ? "تعذر بدء التسجيل: " : "Recording failed: ") + ex.Message);
+                }
+                return;
+            }
+
+            _voiceTimer.Stop();
+            double durationSec;
+            int peak;
+            byte[] wav = _voiceRecorder.StopAndGetWavBytes(out durationSec, out peak);
+            if (wav == null || wav.Length <= 44 || durationSec < 0.25)
+            {
+                UpdateVoiceMicVisuals();
+                UpdateActionState();
+                SetStatus(IsArabic
+                    ? "التسجيل قصير جداً أو فارغ — اضغط 🎤 وتحدث ثم اضغط إيقاف."
+                    : "Recording too short or empty — click 🎤, speak, then click Stop.");
+                return;
+            }
+            if (peak < 80)
+            {
+                UpdateVoiceMicVisuals();
+                UpdateActionState();
+                SetStatus(IsArabic
+                    ? "لم يُلتقط صوت واضح من الميكروفون (تأكد أن المايك غير مكتوم)."
+                    : "No clear microphone audio detected (check mute/input device).");
+                return;
+            }
+
+            _voiceTranscribing = true;
+            UpdateVoiceMicVisuals();
+            UpdateActionState();
+            SetStatus(IsArabic ? "⏳ جاري تحويل الصوت إلى نص..." : "⏳ Transcribing speech...");
+
+            string transcribed = "";
+            try
+            {
+                DirectAiConfig cfgSnapshot = _directConfig ?? DirectAiConfig.Load();
+                bool arabicUi = IsArabic;
+                transcribed = await Task.Run(delegate
+                {
+                    return VoiceTranscriber.TranscribeWav(cfgSnapshot, wav, arabicUi);
+                });
+            }
+            catch (System.Exception ex)
+            {
+                _transcript.AppendText(
+                    (IsArabic ? "⚠️ [خطأ الصوت]: " : "⚠️ [Voice Error]: ") +
+                    ex.Message + Environment.NewLine + Environment.NewLine);
+                _transcript.SelectionStart = _transcript.TextLength;
+                _transcript.ScrollToCaret();
+                ShowError(ex);
+                return;
+            }
+            finally
+            {
+                _voiceTranscribing = false;
+                UpdateVoiceMicVisuals();
+                UpdateActionState();
+            }
+
+            if (string.IsNullOrWhiteSpace(transcribed))
+            {
+                SetStatus(IsArabic ? "لم يتم التعرف على كلام واضح في التسجيل." : "No recognizable speech detected.");
+                return;
+            }
+
+            string trimmed = transcribed.Trim();
+            _message.Text = string.IsNullOrWhiteSpace(_message.Text)
+                ? trimmed
+                : (_message.Text.Trim() + " " + trimmed);
+
+            if (_voiceAutoSend.Checked)
+            {
+                await SendMessage();
+            }
+            else
+            {
+                _message.Focus();
+                _message.SelectionStart = _message.TextLength;
+                _message.SelectionLength = 0;
+                SetStatus(IsArabic
+                    ? "✅ تم تحويل الصوت إلى نص — راجعه ثم اضغط [اسأل AI] أو Enter."
+                    : "✅ Transcribed — review and press [Ask AI] or Enter.");
+            }
+        }
+
+        private static string ExtractLastAssistantMessage(Dictionary<string, object> session)
+        {
+            if (session == null) return "";
+            object raw;
+            if (!session.TryGetValue("messages", out raw)) return "";
+            IEnumerable messages = raw as IEnumerable;
+            if (messages == null) return "";
+            string last = "";
+            foreach (object item in messages)
+            {
+                Dictionary<string, object> msg = item as Dictionary<string, object>;
+                if (msg == null) continue;
+                object roleObj;
+                object contentObj;
+                if (msg.TryGetValue("role", out roleObj) && roleObj != null &&
+                    string.Equals(roleObj.ToString(), "assistant", StringComparison.OrdinalIgnoreCase) &&
+                    msg.TryGetValue("content", out contentObj) && contentObj != null)
+                {
+                    last = contentObj.ToString();
+                }
+            }
+            return last;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                try { _voiceTimer.Stop(); _voiceTimer.Dispose(); } catch { }
+                try { _voiceRecorder.Dispose(); } catch { }
+                try { VoiceSpeechOutput.Stop(); } catch { }
+            }
+            base.Dispose(disposing);
         }
 
         private void RequireSession()

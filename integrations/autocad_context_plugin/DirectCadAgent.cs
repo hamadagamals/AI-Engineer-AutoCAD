@@ -38,6 +38,8 @@ namespace AIEngineer.AutoCAD
         public string OpenAIBaseUrl = "https://api.openai.com/v1";
         public string OpenAIApiMode = "responses"; // "responses" or "chat_completions"
         public string PreferredCoordSortOrder = SortOrderAsk;
+        public bool VoiceAutoSend = true;
+        public bool VoiceSpeakReplies = true;
 
         public static string ConfigFilePath
         {
@@ -71,6 +73,8 @@ namespace AIEngineer.AutoCAD
                         cfg.OpenAIBaseUrl = GetStr(d, "openai_base_url", cfg.OpenAIBaseUrl);
                         cfg.OpenAIApiMode = GetStr(d, "openai_api_mode", cfg.OpenAIApiMode);
                         cfg.PreferredCoordSortOrder = NormalizeSortOrderPref(GetStr(d, "preferred_coord_sort_order", cfg.PreferredCoordSortOrder));
+                        cfg.VoiceAutoSend = GetBoolCfg(d, "voice_auto_send", cfg.VoiceAutoSend);
+                        cfg.VoiceSpeakReplies = GetBoolCfg(d, "voice_speak_replies", cfg.VoiceSpeakReplies);
                     }
                 }
             }
@@ -118,6 +122,8 @@ namespace AIEngineer.AutoCAD
             d["openai_base_url"] = (OpenAIBaseUrl ?? "https://api.openai.com/v1").Trim().TrimEnd('/');
             d["openai_api_mode"] = (OpenAIApiMode ?? "responses").Trim();
             d["preferred_coord_sort_order"] = NormalizeSortOrderPref(PreferredCoordSortOrder);
+            d["voice_auto_send"] = VoiceAutoSend;
+            d["voice_speak_replies"] = VoiceSpeakReplies;
 
             JavaScriptSerializer ser = new JavaScriptSerializer();
             File.WriteAllText(path, ser.Serialize(d), Encoding.UTF8);
@@ -235,6 +241,13 @@ namespace AIEngineer.AutoCAD
                 string s = v.ToString().Trim();
                 if (!string.IsNullOrEmpty(s)) return s;
             }
+            return defVal;
+        }
+
+        private static bool GetBoolCfg(Dictionary<string, object> d, string key, bool defVal)
+        {
+            object v;
+            if (d.TryGetValue(key, out v) && v is bool) return (bool)v;
             return defVal;
         }
     }
@@ -2091,7 +2104,8 @@ namespace AIEngineer.AutoCAD
                             }
                         }
                     },
-                    { "title", Prop("string", "Optional legend title (default 'جدول حصر ومفاتيح بلوكات المسار المحدد (PATH BLOCK LEGEND)').") },
+                    { "title", Prop("string", "Optional legend title (default 'جدول حصر ومفاتيح بلوكات المسار المحدد').") },
+                    { "follow_connected", Prop("boolean", "Auto-follow endpoint-connected Line/Polyline/Arc segments on the same layer from the selected segment (default true).") },
                     { "position", Prop("string", "'outside_right' (default), 'outside_left', 'outside_top', or 'outside_bottom'.") },
                     { "clear_layers", ArrProp("string", "Optional non-0 layers of old/unwanted tables (e.g. ['_AI_BOQ_TABLE']) to erase before drawing the clean legend.") },
                     { "replace_existing", Prop("boolean", "Replace previous _AI_BLOCK_LEGEND before drawing (default true).") },
