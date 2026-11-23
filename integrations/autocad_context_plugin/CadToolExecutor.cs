@@ -1830,18 +1830,41 @@ namespace AIEngineer.AutoCAD
                             yTop = dMidY + tableH / 2.0;
                         }
 
-                        // Avoid colliding with an existing _AI_COORD_TABLE on the same side
-                        Extents3d? coordTblExt = CollectLayerExtents(ms, tr, "_AI_COORD_TABLE");
-                        if (coordTblExt.HasValue && IsFiniteBounds(coordTblExt.Value))
+                        // Avoid colliding with ANY existing AI schedule/diagram tables (stack cleanly downward)
+                        string[] blockerLayers = new string[]
                         {
-                            Extents3d ce = coordTblExt.Value;
+                            "_AI_COORD_TABLE", "_AI_CIRCUIT_SCHEDULE", "_AI_PANEL_SCHEDULE", "_AI_SLD",
+                            "_AI_ELECTRICAL_QA", "_AI_LV_CALC_TABLE", "_AI_BOQ_TABLE", "_AI_EXCEL_TABLE",
+                            "_AI_LIGHTING_TABLE", "_AI_BLOCK_LEGEND"
+                        };
+                        List<Extents3d> blockers = new List<Extents3d>();
+                        for (int bi = 0; bi < blockerLayers.Length; bi++)
+                        {
+                            if (replaceExisting && string.Equals(blockerLayers[bi], safeLegendLayer, StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            Extents3d? bExt = CollectLayerExtents(ms, tr, blockerLayers[bi]);
+                            if (bExt.HasValue && IsFiniteBounds(bExt.Value))
+                                blockers.Add(bExt.Value);
+                        }
+                        double hPad = Math.Max(rowH * 1.5, dwgSpan * 0.02);
+                        double vPad = Math.Max(rowH * 2.5, dwgSpan * 0.03);
+                        for (int pass = 0; pass < blockers.Count + 3; pass++)
+                        {
+                            bool shifted = false;
                             double lx1 = x0, ly1 = yTop - tableH, lx2 = x0 + tableW, ly2 = yTop;
-                            bool hitCoord = !(lx2 < ce.MinPoint.X - rowH * 0.5 || lx1 > ce.MaxPoint.X + rowH * 0.5 ||
-                                              ly2 < ce.MinPoint.Y - rowH * 0.5 || ly1 > ce.MaxPoint.Y + rowH * 0.5);
-                            if (hitCoord)
+                            for (int bi = 0; bi < blockers.Count; bi++)
                             {
-                                yTop = ce.MaxPoint.Y + Math.Max(rowH * 1.8, dwgSpan * 0.025) + tableH;
+                                Extents3d ce = blockers[bi];
+                                bool hitBlk = !(lx2 < ce.MinPoint.X - hPad || lx1 > ce.MaxPoint.X + hPad ||
+                                                ly2 < ce.MinPoint.Y - hPad || ly1 > ce.MaxPoint.Y + hPad);
+                                if (hitBlk)
+                                {
+                                    yTop = ce.MinPoint.Y - vPad;
+                                    shifted = true;
+                                    break;
+                                }
                             }
+                            if (!shifted) break;
                         }
                     }
 

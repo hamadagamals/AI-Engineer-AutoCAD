@@ -61,7 +61,7 @@ _QUIT _Y
     $cleanLines = $rawLines | ForEach-Object { $_ -replace "\0", "" }
     $cleanText = $cleanLines -join "`n"
 
-    $cleanLines | Select-String -Pattern "AUTOCAD_TOOLS|ROUTER_COUNTS|JIT_PHASE2_OK|TEST1A|TEST1C|TEST2|TEST3|BENCHMARK_30C_300F_MS|ACCORE_REGRESSION_" | ForEach-Object {
+    $cleanLines | Select-String -Pattern "AUTOCAD_TOOLS|ROUTER_COUNTS|JIT_PHASE2_OK|TEST1A|TEST1C|TEST2|TEST3|TEST5|TEST6|TEST7|TEST8|BENCHMARK_30C_300F_MS|ACCORE_REGRESSION_" | ForEach-Object {
         Write-Host $_.Line
     }
 

@@ -1,8 +1,12 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
+using System.Web.Script.Serialization;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
@@ -190,7 +194,8 @@ namespace AIEngineer.AutoCAD
                 if (ext.HasValue && IsFiniteBounds(ext.Value)) blockers.Add(ext.Value);
             }
 
-            for (int pass = 0; pass < blockers.Count + 2; pass++)
+            double vShiftMargin = Math.Max(gap * 0.65, Math.Max(usedTextH * 6.0, totalTableH * 0.12));
+            for (int pass = 0; pass < blockers.Count + 3; pass++)
             {
                 bool shifted = false;
                 double ax1 = topLeftX;
@@ -200,10 +205,10 @@ namespace AIEngineer.AutoCAD
                 for (int b = 0; b < blockers.Count; b++)
                 {
                     Extents3d blk = blockers[b];
-                    if (RectsOverlap(ax1 - gap * 0.2, ay1 - gap * 0.2, ax2 + gap * 0.2, ay2 + gap * 0.2,
+                    if (RectsOverlap(ax1 - gap * 0.25, ay1 - gap * 0.25, ax2 + gap * 0.25, ay2 + gap * 0.25,
                                      blk.MinPoint.X, blk.MinPoint.Y, blk.MaxPoint.X, blk.MaxPoint.Y))
                     {
-                        topLeftY = blk.MinPoint.Y - gap * 0.65;
+                        topLeftY = blk.MinPoint.Y - vShiftMargin;
                         shifted = true;
                         break;
                     }
@@ -2412,6 +2417,21 @@ namespace AIEngineer.AutoCAD
             double maxBreakGap,
             double maxLateralTol)
         {
+            Point2d dummy;
+            return IsCollinearBreakBridgeMatch(pt, outDir, hasOutDir, cand, maxBreakGap, maxLateralTol, 0.80, out dummy);
+        }
+
+        private static bool IsCollinearBreakBridgeMatch(
+            Point2d pt,
+            Point2d outDir,
+            bool hasOutDir,
+            CurveChainNode cand,
+            double maxBreakGap,
+            double maxLateralTol,
+            double minAlign,
+            out Point2d matchedCandPt)
+        {
+            matchedCandPt = Point2d.Origin;
             if (!hasOutDir) return false;
             Point2d[] cEnds = new Point2d[] { cand.StartXY, cand.EndXY };
             Point2d[] cDirs = new Point2d[] { cand.StartOutDir, cand.EndOutDir };
@@ -2433,8 +2453,9 @@ namespace AIEngineer.AutoCAD
                 if (cHas[k])
                 {
                     double align = -(cDirs[k].X * outDir.X + cDirs[k].Y * outDir.Y);
-                    if (align < 0.85) continue;
+                    if (align < minAlign) continue;
                 }
+                matchedCandPt = cp;
                 return true;
             }
             return false;
@@ -2498,7 +2519,8 @@ namespace AIEngineer.AutoCAD
             HashSet<ObjectId> visited,
             List<CurveChainNode> candidates,
             List<CurveChainNode> allNodeRefs,
-            List<BridgeBlockCandidate> bridgeBlocks)
+            List<BridgeBlockCandidate> bridgeBlocks,
+            List<CrossingObstacleSegment> obstacleSegments)
         {
             BlockTableRecord ms = (BlockTableRecord)tr.GetObject(
                 SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
@@ -2515,6 +2537,12 @@ namespace AIEngineer.AutoCAD
                 if (cv != null)
                 {
                     if (visited.Contains(mid)) continue;
+                    if (obstacleSegments != null)
+                    {
+                        CrossingObstacleSegment obs = TryCreateObstacleSegment(mid, cv, layerColorMap);
+                        if (obs != null) obstacleSegments.Add(obs);
+                    }
+
                     string cLayer = ent.Layer ?? "0";
                     if (IsArchitecturalLayerName(cLayer) && !targetLayers.Contains(cLayer)) continue;
 
@@ -2636,6 +2664,7 @@ namespace AIEngineer.AutoCAD
             CurveChainNode cur,
             SpatialGrid2D<CurveChainNode> curveGrid,
             SpatialGrid2D<BridgeBlockCandidate> terminatorGrid,
+            SpatialGrid2D<CrossingObstacleSegment> obstacleGrid,
             double maxTermTol,
             List<ObjectId> touchedTerminatorBlockIds,
             HashSet<ObjectId> visited,
@@ -2647,11 +2676,15 @@ namespace AIEngineer.AutoCAD
             bool connectGaps,
             double breakGapMax,
             double breakLateralTol,
+            double crossingGapMax,
+            double crossingLateralTol,
+            double obsTol,
             CircuitChainScope scope,
             int maxChainCurves,
             List<CurveChainNode> scratchTight,
             List<CurveChainNode> scratchBreak,
-            List<BridgeBlockCandidate> scratchTerms)
+            List<BridgeBlockCandidate> scratchTerms,
+            List<CrossingObstacleSegment> scratchObs)
         {
             Point2d[] ends = new Point2d[] { cur.StartXY, cur.EndXY };
             Point2d[] dirs = new Point2d[] { cur.StartOutDir, cur.EndOutDir };
@@ -2702,13 +2735,46 @@ namespace AIEngineer.AutoCAD
                         if (pt.X < cand.MinX - breakGapMax || pt.X > cand.MaxX + breakGapMax ||
                             pt.Y < cand.MinY - breakGapMax || pt.Y > cand.MaxY + breakGapMax)
                             continue;
-                        if (IsCollinearBreakBridgeMatch(pt, dirs[ei], true, cand, breakGapMax, breakLateralTol))
+                        Point2d matchedEnd;
+                        if (IsCollinearBreakBridgeMatch(pt, dirs[ei], true, cand, breakGapMax, breakLateralTol, 0.80, out matchedEnd))
                         {
-                            double d = Math.Min(cand.StartXY.GetDistanceTo(pt), cand.EndXY.GetDistanceTo(pt));
+                            double d = matchedEnd.GetDistanceTo(pt);
                             if (d < bestDist) { bestDist = d; bestCollinear = cand; }
                         }
                     }
                     if (bestCollinear != null) hitsAtPt.Add(bestCollinear);
+                }
+
+                // Pass 3: Verified crossing bridge ("كوبري تقاطع مؤكد") across a transverse/other-color wire obstacle
+                if (hitsAtPt.Count == 0 && connectGaps && hasDirs[ei] && obstacleGrid != null && obstacleGrid.Count > 0 && crossingGapMax > breakGapMax)
+                {
+                    CurveChainNode bestCross = null;
+                    double bestCrossDist = double.MaxValue;
+                    curveGrid.Query(pt.X - crossingGapMax, pt.Y - crossingGapMax, pt.X + crossingGapMax, pt.Y + crossingGapMax, scratchBreak);
+                    for (int ci = 0; ci < scratchBreak.Count; ci++)
+                    {
+                        CurveChainNode cand = scratchBreak[ci];
+                        if (visited.Contains(cand.Id) || (globalSkipIds != null && globalSkipIds.Contains(cand.Id))) continue;
+                        if (!IsNodeInChainScope(cur, cand, scope)) continue;
+                        if (pt.X < cand.MinX - crossingGapMax || pt.X > cand.MaxX + crossingGapMax ||
+                            pt.Y < cand.MinY - crossingGapMax || pt.Y > cand.MaxY + crossingGapMax)
+                            continue;
+
+                        Point2d candEndPt;
+                        if (!IsCollinearBreakBridgeMatch(pt, dirs[ei], true, cand, crossingGapMax, crossingLateralTol, 0.65, out candEndPt))
+                            continue;
+
+                        if (!HasCrossingObstacleInGap(pt, candEndPt, cur.Id, cand.Id, cur.EffectiveColorKey, obstacleGrid, obsTol, scratchObs))
+                            continue;
+
+                        double d = candEndPt.GetDistanceTo(pt);
+                        if (d < bestCrossDist)
+                        {
+                            bestCrossDist = d;
+                            bestCross = cand;
+                        }
+                    }
+                    if (bestCross != null) hitsAtPt.Add(bestCross);
                 }
 
                 int maxBranch = (isLayerZero && !cur.IsNonNeutralColor && !cur.HasBulges) ? 2 : 8;
@@ -2737,6 +2803,7 @@ namespace AIEngineer.AutoCAD
             SpatialGrid2D<CurveChainNode> curveGrid,
             SpatialGrid2D<BridgeBlockCandidate> bridgeGrid,
             SpatialGrid2D<BridgeBlockCandidate> terminatorGrid,
+            SpatialGrid2D<CrossingObstacleSegment> obstacleGrid,
             double maxBridgeTol,
             double maxTermTol,
             double snapTol,
@@ -2759,11 +2826,20 @@ namespace AIEngineer.AutoCAD
                 ? Math.Max(1e-3, Math.Min(snapTol, medianFixtureSpan * 0.10))
                 : Math.Max(1e-3, Math.Min(snapTol, 0.06 * unitsPerM));
             double breakGapMax = medianFixtureSpan > 1e-3
-                ? Math.Max(tightSnapTol * 2.0, medianFixtureSpan * 0.90)
-                : Math.Max(1e-3, 0.75 * unitsPerM);
+                ? Math.Max(tightSnapTol * 2.0, medianFixtureSpan * 1.15)
+                : Math.Max(1e-3, 0.90 * unitsPerM);
             double breakLateralTol = medianFixtureSpan > 1e-3
-                ? Math.Max(1e-3, medianFixtureSpan * 0.12)
-                : Math.Max(1e-3, 0.08 * unitsPerM);
+                ? Math.Max(1e-3, medianFixtureSpan * 0.16)
+                : Math.Max(1e-3, 0.10 * unitsPerM);
+            double crossingGapMax = medianFixtureSpan > 1e-3
+                ? Math.Max(breakGapMax * 1.8, Math.Min(3.0 * unitsPerM, medianFixtureSpan * 3.5))
+                : Math.Max(1e-3, 2.5 * unitsPerM);
+            double crossingLateralTol = medianFixtureSpan > 1e-3
+                ? Math.Max(breakLateralTol * 2.0, medianFixtureSpan * 0.35)
+                : Math.Max(1e-3, 0.25 * unitsPerM);
+            double obsTol = medianFixtureSpan > 1e-3
+                ? Math.Max(0.25 * unitsPerM, medianFixtureSpan * 0.45)
+                : Math.Max(0.25 * unitsPerM, 0.25);
 
             HashSet<ObjectId> visitedBlocks = new HashSet<ObjectId>();
             int bridgedCount = 0;
@@ -2774,15 +2850,16 @@ namespace AIEngineer.AutoCAD
             List<BridgeBlockCandidate> scratchTerms = new List<BridgeBlockCandidate>(8);
             List<BridgeBlockCandidate> scratchBridges = new List<BridgeBlockCandidate>(16);
             List<CurveChainNode> scratchOut = new List<CurveChainNode>(16);
+            List<CrossingObstacleSegment> scratchObs = new List<CrossingObstacleSegment>(16);
 
             while (queue.Count > 0 && pathCurveIds.Count < maxChainCurves && !circuitGuardTriggered)
             {
                 CurveChainNode cur = queue.Dequeue();
 
                 EnqueueConnectedCurvesAtEndpoints(
-                    cur, curveGrid, terminatorGrid, maxTermTol, touchedTerminatorBlockIds, visited, globalSkipIds, queue, pathCurveIds, pathHandles,
-                    tightSnapTol, connectGaps, breakGapMax, breakLateralTol,
-                    scope, maxChainCurves, scratchTight, scratchBreak, scratchTerms);
+                    cur, curveGrid, terminatorGrid, obstacleGrid, maxTermTol, touchedTerminatorBlockIds, visited, globalSkipIds, queue, pathCurveIds, pathHandles,
+                    tightSnapTol, connectGaps, breakGapMax, breakLateralTol, crossingGapMax, crossingLateralTol, obsTol,
+                    scope, maxChainCurves, scratchTight, scratchBreak, scratchTerms, scratchObs);
 
                 if (bridgeThroughBlocks && bridgeGrid != null && bridgeGrid.Count > 0)
                 {
@@ -2918,17 +2995,18 @@ namespace AIEngineer.AutoCAD
 
                 List<CurveChainNode> candidates = new List<CurveChainNode>();
                 List<BridgeBlockCandidate> bridgeBlocks = new List<BridgeBlockCandidate>();
+                List<CrossingObstacleSegment> obstacleSegments = new List<CrossingObstacleSegment>();
                 CollectChainTraceCandidates(
                     db, tr, layerHiddenFlags, layerColorMap, visibleOnly, bridgeThroughBlocks,
                     unitsPerM, medianFixtureSpan, drawingSpan, includeContainerBlocks, excludeBlocks, blockFilter,
                     strictColor, strictLayer, targetLayers, seedColorKeys, anyNeutralSeed,
-                    visited, candidates, allNodeRefs, bridgeBlocks);
+                    visited, candidates, allNodeRefs, bridgeBlocks, obstacleSegments);
 
                 if (candidates.Count == 0 && bridgeBlocks.Count == 0) return 0;
 
                 double estBreakMax = medianFixtureSpan > 1e-3
-                    ? Math.Max(snapTol * 2.0, medianFixtureSpan * 0.90)
-                    : Math.Max(1e-3, 0.75 * unitsPerM);
+                    ? Math.Max(snapTol * 2.0, medianFixtureSpan * 1.15)
+                    : Math.Max(1e-3, 0.90 * unitsPerM);
                 double gridCell = medianFixtureSpan > 1e-3
                     ? Math.Max(0.25, Math.Max(estBreakMax * 1.5, medianFixtureSpan * 2.5))
                     : Math.Max(1.0, estBreakMax * 1.5);
@@ -2938,6 +3016,13 @@ namespace AIEngineer.AutoCAD
                 {
                     CurveChainNode c = candidates[ci];
                     curveGrid.Add(c.MinX, c.MinY, c.MaxX, c.MaxY, c);
+                }
+
+                SpatialGrid2D<CrossingObstacleSegment> obstacleGrid = new SpatialGrid2D<CrossingObstacleSegment>(gridCell);
+                for (int oi = 0; oi < obstacleSegments.Count; oi++)
+                {
+                    CrossingObstacleSegment ob = obstacleSegments[oi];
+                    obstacleGrid.Add(ob.MinX, ob.MinY, ob.MaxX, ob.MaxY, ob);
                 }
 
                 SpatialGrid2D<BridgeBlockCandidate> bridgeGrid = new SpatialGrid2D<BridgeBlockCandidate>(gridCell);
@@ -2973,7 +3058,7 @@ namespace AIEngineer.AutoCAD
 
                 return ExpandConnectedPathCurvesCore(
                     queue, visited, null, pathCurveIds, pathHandles,
-                    curveGrid, bridgeGrid, terminatorGrid, maxBridgeTol, maxTermTol,
+                    curveGrid, bridgeGrid, terminatorGrid, obstacleGrid, maxBridgeTol, maxTermTol,
                     snapTol, bridgeThroughBlocks, connectGaps,
                     unitsPerM, medianFixtureSpan, scope, maxCircuitBlocks,
                     out bridgedBlockNames, out touchedTerminatorBlockIds, out circuitGuardTriggered);
@@ -3211,10 +3296,12 @@ namespace AIEngineer.AutoCAD
             out double drawingSpan,
             out double medianFixtureSpan,
             out bool selectionHadOnlyBlocks,
+            out int skippedAiLayerCount,
             List<ObjectId> pathCurveIds,
             List<string> pathHandles,
             List<ObjectId> selectedBlockIds)
         {
+            skippedAiLayerCount = 0;
             drawingSpan = 0.0;
             medianFixtureSpan = 0.0;
             BlockTableRecord msPre = (BlockTableRecord)tr.GetObject(
@@ -3269,6 +3356,11 @@ namespace AIEngineer.AutoCAD
                 if (oid.IsNull || oid.IsErased) continue;
                 Entity ent = tr.GetObject(oid, OpenMode.ForRead) as Entity;
                 if (ent == null || ent.IsErased) continue;
+                if (IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer))
+                {
+                    skippedAiLayerCount++;
+                    continue;
+                }
                 selTotalValid++;
                 if (ent is BlockReference) selBlockCount++;
                 if (ent is BlockReference && !selectedBlockIds.Contains(oid)) selectedBlockIds.Add(oid);
@@ -3647,7 +3739,392 @@ namespace AIEngineer.AutoCAD
             public bool CircuitGuardTriggered;
             public int MaxCircuitBlocks = 35;
             public bool LearnedSampleThisCall;
+            public bool FromSavedMemory;
+            public bool UserLocked;
+            public bool SavedToMemory;
+            public bool MergedWithSaved;
+            public bool SkipAutoMemorySave;
             public List<CircuitTerminatorInfo> Terminators = new List<CircuitTerminatorInfo>();
+        }
+
+        private sealed class SavedCircuitRecord
+        {
+            public string CircuitName = "";
+            public string PanelName = "";
+            public string TerminationType = "open_end";
+            public string WireLayer = "";
+            public string WireColorKey = "";
+            public List<string> PathHandles = new List<string>();
+            public List<string> MatchedBlockHandles = new List<string>();
+            public List<string> TerminatorHandles = new List<string>();
+            public double LengthMeters;
+            public Dictionary<string, int> CountsByBlock = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            public bool UserLocked;
+        }
+
+        private static readonly Dictionary<IntPtr, Dictionary<string, SavedCircuitRecord>> s_savedCircuitsByDb =
+            new Dictionary<IntPtr, Dictionary<string, SavedCircuitRecord>>();
+        private static readonly Dictionary<IntPtr, string> s_lastActiveCircuitNameByDb =
+            new Dictionary<IntPtr, string>();
+        private static readonly HashSet<IntPtr> s_loadedSidecarForDb =
+            new HashSet<IntPtr>();
+
+        private static string NormalizeCircuitKey(string circuitName)
+        {
+            if (string.IsNullOrWhiteSpace(circuitName)) return "";
+            return Regex.Replace(circuitName.Trim().ToUpperInvariant(), @"\s+", "");
+        }
+
+        private static string ResolveCircuitMemorySidecarPath(Document doc, Database db)
+        {
+            try
+            {
+                string docPath = (db != null && !string.IsNullOrWhiteSpace(db.Filename))
+                    ? db.Filename
+                    : (doc != null ? doc.Name : "");
+                if (string.IsNullOrWhiteSpace(docPath) || !Path.IsPathRooted(docPath) || !File.Exists(docPath))
+                    return null;
+                string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (string.IsNullOrWhiteSpace(localApp)) return null;
+                string dir = Path.Combine(Path.Combine(localApp, "AI-Engineer"), "circuit_memory");
+                byte[] hash;
+                using (SHA256 sha = SHA256.Create())
+                {
+                    hash = sha.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(docPath).ToLowerInvariant()));
+                }
+                StringBuilder sb = new StringBuilder(16);
+                for (int i = 0; i < 8 && i < hash.Length; i++) sb.Append(hash[i].ToString("x2", CultureInfo.InvariantCulture));
+                return Path.Combine(dir, sb.ToString() + ".json");
+            }
+            catch { return null; }
+        }
+
+        private static void EnsureSidecarLoadedLocked(Document doc, Database db)
+        {
+            if (db == null || db.UnmanagedObject == IntPtr.Zero) return;
+            IntPtr dbPtr = db.UnmanagedObject;
+            if (s_loadedSidecarForDb.Contains(dbPtr)) return;
+            s_loadedSidecarForDb.Add(dbPtr);
+
+            try
+            {
+                string sidecarPath = ResolveCircuitMemorySidecarPath(doc, db);
+                if (string.IsNullOrEmpty(sidecarPath) || !File.Exists(sidecarPath)) return;
+                string raw = File.ReadAllText(sidecarPath, Encoding.UTF8);
+                JavaScriptSerializer ser = new JavaScriptSerializer();
+                Dictionary<string, object> root = ser.DeserializeObject(raw) as Dictionary<string, object>;
+                if (root == null) return;
+                Dictionary<string, object> recMap = root.ContainsKey("circuits") ? root["circuits"] as Dictionary<string, object> : null;
+                if (recMap == null) return;
+
+                Dictionary<string, SavedCircuitRecord> bucket;
+                if (!s_savedCircuitsByDb.TryGetValue(dbPtr, out bucket))
+                {
+                    bucket = new Dictionary<string, SavedCircuitRecord>(StringComparer.OrdinalIgnoreCase);
+                    s_savedCircuitsByDb[dbPtr] = bucket;
+                }
+                foreach (KeyValuePair<string, object> kv in recMap)
+                {
+                    Dictionary<string, object> rd = kv.Value as Dictionary<string, object>;
+                    if (rd == null) continue;
+                    string cName = GetStr(rd, "circuit_name") ?? kv.Key;
+                    string normKey = NormalizeCircuitKey(cName);
+                    if (string.IsNullOrEmpty(normKey)) continue;
+                    SavedCircuitRecord rec = new SavedCircuitRecord
+                    {
+                        CircuitName = cName,
+                        PanelName = GetStr(rd, "panel_name") ?? "",
+                        TerminationType = GetStr(rd, "termination_type") ?? "open_end",
+                        WireLayer = GetStr(rd, "wire_layer") ?? "",
+                        WireColorKey = GetStr(rd, "wire_color_key") ?? "",
+                        PathHandles = GetStringList(rd, "path_handles"),
+                        MatchedBlockHandles = GetStringList(rd, "matched_block_handles"),
+                        TerminatorHandles = GetStringList(rd, "terminator_handles"),
+                        LengthMeters = GetDouble(rd, "length_m", 0.0),
+                        UserLocked = GetBool(rd, "user_locked", false)
+                    };
+                    Dictionary<string, object> cntObj = rd.ContainsKey("counts_by_block") ? rd["counts_by_block"] as Dictionary<string, object> : null;
+                    if (cntObj != null)
+                    {
+                        foreach (KeyValuePair<string, object> ckv in cntObj)
+                            rec.CountsByBlock[ckv.Key] = Convert.ToInt32(ckv.Value, CultureInfo.InvariantCulture);
+                    }
+                    bucket[normKey] = rec;
+                }
+                string lastAct = GetStr(root, "last_active_circuit");
+                if (!string.IsNullOrWhiteSpace(lastAct)) s_lastActiveCircuitNameByDb[dbPtr] = lastAct;
+            }
+            catch { }
+        }
+
+        private static void PersistSidecarLocked(Document doc, Database db)
+        {
+            try
+            {
+                if (db == null || db.UnmanagedObject == IntPtr.Zero) return;
+                string sidecarPath = ResolveCircuitMemorySidecarPath(doc, db);
+                if (string.IsNullOrEmpty(sidecarPath)) return;
+                IntPtr dbPtr = db.UnmanagedObject;
+                Dictionary<string, SavedCircuitRecord> bucket;
+                if (!s_savedCircuitsByDb.TryGetValue(dbPtr, out bucket)) return;
+
+                Dictionary<string, object> serializedMap = new Dictionary<string, object>();
+                foreach (KeyValuePair<string, SavedCircuitRecord> kv in bucket)
+                {
+                    SavedCircuitRecord r = kv.Value;
+                    serializedMap[kv.Key] = new Dictionary<string, object>
+                    {
+                        { "circuit_name", r.CircuitName },
+                        { "panel_name", r.PanelName },
+                        { "termination_type", r.TerminationType },
+                        { "wire_layer", r.WireLayer },
+                        { "wire_color_key", r.WireColorKey },
+                        { "path_handles", r.PathHandles },
+                        { "matched_block_handles", r.MatchedBlockHandles },
+                        { "terminator_handles", r.TerminatorHandles },
+                        { "length_m", r.LengthMeters },
+                        { "counts_by_block", r.CountsByBlock },
+                        { "user_locked", r.UserLocked }
+                    };
+                }
+                string lastAct = "";
+                s_lastActiveCircuitNameByDb.TryGetValue(dbPtr, out lastAct);
+                Dictionary<string, object> payload = new Dictionary<string, object>
+                {
+                    { "last_active_circuit", lastAct ?? "" },
+                    { "circuits", serializedMap }
+                };
+                string dir = Path.GetDirectoryName(sidecarPath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(sidecarPath, new JavaScriptSerializer().Serialize(payload), Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        private static SavedCircuitRecord CloneSavedRecord(SavedCircuitRecord src)
+        {
+            if (src == null) return null;
+            return new SavedCircuitRecord
+            {
+                CircuitName = src.CircuitName ?? "",
+                PanelName = src.PanelName ?? "",
+                TerminationType = src.TerminationType ?? "open_end",
+                WireLayer = src.WireLayer ?? "",
+                WireColorKey = src.WireColorKey ?? "",
+                PathHandles = new List<string>(src.PathHandles ?? new List<string>()),
+                MatchedBlockHandles = new List<string>(src.MatchedBlockHandles ?? new List<string>()),
+                TerminatorHandles = new List<string>(src.TerminatorHandles ?? new List<string>()),
+                LengthMeters = src.LengthMeters,
+                CountsByBlock = new Dictionary<string, int>(src.CountsByBlock ?? new Dictionary<string, int>(), StringComparer.OrdinalIgnoreCase),
+                UserLocked = src.UserLocked
+            };
+        }
+
+        private static void SaveCircuitRecordToMemory(
+            Document doc,
+            SavedCircuitRecord rec,
+            bool setLastActive,
+            bool allowOverwriteLocked)
+        {
+            if (doc == null || doc.Database == null || rec == null) return;
+            string normKey = NormalizeCircuitKey(rec.CircuitName);
+            if (string.IsNullOrEmpty(normKey)) return;
+            Database db = doc.Database;
+            IntPtr dbPtr = db.UnmanagedObject;
+            if (dbPtr == IntPtr.Zero) return;
+
+            lock (s_lastCoordLock)
+            {
+                EnsureSidecarLoadedLocked(doc, db);
+                Dictionary<string, SavedCircuitRecord> bucket;
+                if (!s_savedCircuitsByDb.TryGetValue(dbPtr, out bucket))
+                {
+                    bucket = new Dictionary<string, SavedCircuitRecord>(StringComparer.OrdinalIgnoreCase);
+                    s_savedCircuitsByDb[dbPtr] = bucket;
+                }
+                SavedCircuitRecord existing;
+                if (bucket.TryGetValue(normKey, out existing) && existing != null && existing.UserLocked && !allowOverwriteLocked && !rec.UserLocked)
+                {
+                    if (setLastActive)
+                    {
+                        s_lastActiveCircuitNameByDb[dbPtr] = existing.CircuitName;
+                        PersistSidecarLocked(doc, db);
+                    }
+                    return;
+                }
+                bucket[normKey] = CloneSavedRecord(rec);
+                if (setLastActive) s_lastActiveCircuitNameByDb[dbPtr] = rec.CircuitName.Trim();
+                PersistSidecarLocked(doc, db);
+            }
+        }
+
+        private static bool TryGetSavedCircuitRecord(Document doc, string circuitName, out SavedCircuitRecord rec)
+        {
+            rec = null;
+            if (doc == null || doc.Database == null || string.IsNullOrWhiteSpace(circuitName)) return false;
+            Database db = doc.Database;
+            IntPtr dbPtr = db.UnmanagedObject;
+            if (dbPtr == IntPtr.Zero) return false;
+            string normKey = NormalizeCircuitKey(circuitName);
+            if (string.IsNullOrEmpty(normKey)) return false;
+
+            lock (s_lastCoordLock)
+            {
+                EnsureSidecarLoadedLocked(doc, db);
+                Dictionary<string, SavedCircuitRecord> bucket;
+                if (!s_savedCircuitsByDb.TryGetValue(dbPtr, out bucket) || bucket == null) return false;
+                SavedCircuitRecord hit;
+                if (bucket.TryGetValue(normKey, out hit) && hit != null)
+                {
+                    rec = CloneSavedRecord(hit);
+                    return true;
+                }
+                string alnumQuery = Regex.Replace(normKey, @"[^A-Z0-9]", "");
+                foreach (KeyValuePair<string, SavedCircuitRecord> kv in bucket)
+                {
+                    if (Regex.Replace(kv.Key, @"[^A-Z0-9]", "") == alnumQuery && kv.Value != null)
+                    {
+                        rec = CloneSavedRecord(kv.Value);
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+
+        private static string GetLastActiveCircuitName(Document doc)
+        {
+            if (doc == null || doc.Database == null || doc.Database.UnmanagedObject == IntPtr.Zero) return "";
+            lock (s_lastCoordLock)
+            {
+                EnsureSidecarLoadedLocked(doc, doc.Database);
+                string nm;
+                return s_lastActiveCircuitNameByDb.TryGetValue(doc.Database.UnmanagedObject, out nm) ? (nm ?? "") : "";
+            }
+        }
+
+        private static List<SavedCircuitRecord> GetLockedCircuitRecordsCopy(Document doc)
+        {
+            List<SavedCircuitRecord> list = new List<SavedCircuitRecord>();
+            if (doc == null || doc.Database == null || doc.Database.UnmanagedObject == IntPtr.Zero) return list;
+            lock (s_lastCoordLock)
+            {
+                EnsureSidecarLoadedLocked(doc, doc.Database);
+                Dictionary<string, SavedCircuitRecord> bucket;
+                if (!s_savedCircuitsByDb.TryGetValue(doc.Database.UnmanagedObject, out bucket) || bucket == null) return list;
+                foreach (SavedCircuitRecord r in bucket.Values)
+                {
+                    if (r != null && r.UserLocked) list.Add(CloneSavedRecord(r));
+                }
+            }
+            return list;
+        }
+
+        private static List<ObjectId> FindCircuitSeedCurveByTagName(
+            Database db,
+            Transaction tr,
+            string circuitName,
+            Dictionary<string, bool> hiddenMap,
+            bool visibleOnly,
+            double refSpan,
+            double unitsPerM)
+        {
+            List<ObjectId> seeds = new List<ObjectId>();
+            string targetNorm = NormalizeCircuitKey(circuitName);
+            if (string.IsNullOrEmpty(targetNorm)) return seeds;
+
+            BlockTableRecord ms = (BlockTableRecord)tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+            List<Point2d> tagAnchors = new List<Point2d>();
+            List<Curve> wireCurves = new List<Curve>();
+
+            foreach (ObjectId mid in ms)
+            {
+                if (mid.IsErased) continue;
+                Entity ent = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                if (ent == null || ent.IsErased) continue;
+                if (IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer)) continue;
+                if (visibleOnly && !IsEntityVisible(ent, hiddenMap)) continue;
+
+                Curve cv = ent as Curve;
+                if (cv != null)
+                {
+                    Point2d sp, ep;
+                    if (TryGetCurveEndpointsXY(cv, out sp, out ep))
+                        wireCurves.Add(cv);
+                    continue;
+                }
+
+                string txt = null;
+                Point2d pos = Point2d.Origin;
+                DBText dbt = ent as DBText;
+                MText mt = ent as MText;
+                MLeader ml = ent as MLeader;
+                BlockReference br = ent as BlockReference;
+                if (dbt != null) { txt = dbt.TextString; pos = new Point2d(dbt.Position.X, dbt.Position.Y); }
+                else if (mt != null) { txt = mt.Text; pos = new Point2d(mt.Location.X, mt.Location.Y); }
+                else if (ml != null && ml.ContentType == ContentType.MTextContent && ml.MText != null)
+                {
+                    txt = ml.MText.Text;
+                    pos = new Point2d(ml.MText.Location.X, ml.MText.Location.Y);
+                }
+                else if (br != null)
+                {
+                    string attr = ResolveCachedBlockTag(tr, br);
+                    if (!string.IsNullOrWhiteSpace(attr))
+                    {
+                        txt = attr;
+                        pos = new Point2d(br.Position.X, br.Position.Y);
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(txt)) continue;
+
+                string pPref;
+                string extracted = ExtractBestCircuitTagFromText(txt, out pPref);
+                string cleanTxt = Regex.Replace(Regex.Replace(txt, @"\\[A-Za-z][^;]*;|[{}]", ""), @"\s+", "").ToUpperInvariant();
+                if (string.Equals(NormalizeCircuitKey(extracted), targetNorm, StringComparison.OrdinalIgnoreCase) ||
+                    cleanTxt.Contains(targetNorm))
+                {
+                    tagAnchors.Add(pos);
+                }
+            }
+
+            if (tagAnchors.Count == 0 || wireCurves.Count == 0) return seeds;
+            double maxSearchR = refSpan > 1e-3 ? Math.Max(refSpan * 8.0, 2.5 * unitsPerM) : Math.Max(5.0 * unitsPerM, 5.0);
+            ObjectId bestCurve = ObjectId.Null;
+            double bestScore = double.MaxValue;
+
+            for (int ci = 0; ci < wireCurves.Count; ci++)
+            {
+                Curve cv = wireCurves[ci];
+                if (IsArchitecturalLayerName(cv.Layer ?? "")) continue;
+                Point2d sp, ep;
+                if (!TryGetCurveEndpointsXY(cv, out sp, out ep)) continue;
+                double dMin = double.MaxValue;
+                for (int ai = 0; ai < tagAnchors.Count; ai++)
+                {
+                    double ds = tagAnchors[ai].GetDistanceTo(sp);
+                    double de = tagAnchors[ai].GetDistanceTo(ep);
+                    if (ds < dMin) dMin = ds;
+                    if (de < dMin) dMin = de;
+                    try
+                    {
+                        Point3d cp = cv.GetClosestPointTo(new Point3d(tagAnchors[ai].X, tagAnchors[ai].Y, 0.0), false);
+                        double dc = tagAnchors[ai].GetDistanceTo(new Point2d(cp.X, cp.Y));
+                        if (dc < dMin) dMin = dc;
+                    }
+                    catch { }
+                }
+                if (dMin > maxSearchR) continue;
+                double priorityBias = (IsCandidateCircuitLayerName(cv.Layer ?? "") || (cv.ColorIndex != 256 && cv.ColorIndex != 0 && cv.ColorIndex != 7)) ? 0.5 : 1.0;
+                double score = dMin * priorityBias;
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    bestCurve = cv.ObjectId;
+                }
+            }
+            if (!bestCurve.IsNull) seeds.Add(bestCurve);
+            return seeds;
         }
 
         private sealed class TracedCircuitSummary
@@ -3923,10 +4400,55 @@ namespace AIEngineer.AutoCAD
                 { "selected_paths", selectPaths && pathCurveIds.Count > 0 },
                 { "selected_blocks", selectBlocks && matchedIds.Count > 0 },
                 { "selected_in_autocad", selectionTargets.Count > 0 },
+                { "from_saved_memory", traceMeta != null && traceMeta.FromSavedMemory },
+                { "user_locked", traceMeta != null && traceMeta.UserLocked },
+                { "saved_to_memory", (traceMeta != null && traceMeta.SavedToMemory) || !string.IsNullOrEmpty(circuitName) },
+                { "merged_with_saved", traceMeta != null && traceMeta.MergedWithSaved },
                 { "legend_drawn", legendResult != null && legendResult.ContainsKey("ok") && legendResult["ok"] is bool && (bool)legendResult["ok"] },
                 { "legend_title", effectiveTitle },
                 { "switched_to_model", switchedToModel }
             };
+            if (!string.IsNullOrEmpty(circuitName) && !(traceMeta != null && traceMeta.SkipAutoMemorySave))
+            {
+                List<string> termHandles = new List<string>();
+                if (traceMeta != null && traceMeta.Terminators != null)
+                {
+                    for (int ti = 0; ti < traceMeta.Terminators.Count; ti++)
+                    {
+                        if (!string.IsNullOrWhiteSpace(traceMeta.Terminators[ti].Handle))
+                            termHandles.Add(traceMeta.Terminators[ti].Handle);
+                    }
+                }
+                string wireLyr = "";
+                if (pathCurveIds.Count > 0)
+                {
+                    try
+                    {
+                        using (Transaction trLyr = doc.Database.TransactionManager.StartTransaction())
+                        {
+                            Curve c0 = trLyr.GetObject(pathCurveIds[0], OpenMode.ForRead) as Curve;
+                            if (c0 != null) wireLyr = c0.Layer ?? "0";
+                            trLyr.Commit();
+                        }
+                    }
+                    catch { }
+                }
+                SavedCircuitRecord rec = new SavedCircuitRecord
+                {
+                    CircuitName = circuitName,
+                    PanelName = panelName,
+                    TerminationType = termType,
+                    WireLayer = wireLyr,
+                    WireColorKey = traceMeta != null ? traceMeta.SeedWireColorKey : "",
+                    PathHandles = new List<string>(pathHandles),
+                    MatchedBlockHandles = new List<string>(matchedHandles),
+                    TerminatorHandles = termHandles,
+                    LengthMeters = lenMeters,
+                    CountsByBlock = new Dictionary<string, int>(countsByBlock, StringComparer.OrdinalIgnoreCase),
+                    UserLocked = (traceMeta != null && traceMeta.UserLocked)
+                };
+                SaveCircuitRecordToMemory(doc, rec, true, traceMeta != null && (traceMeta.UserLocked || traceMeta.MergedWithSaved));
+            }
             if (traceMeta != null && !string.IsNullOrEmpty(traceMeta.UnitScaleWarning))
                 res["unit_scale_warning"] = traceMeta.UnitScaleWarning;
             if (traceMeta != null && traceMeta.LearnedSampleThisCall)
@@ -4178,8 +4700,238 @@ namespace AIEngineer.AutoCAD
             }
         }
 
+        private static Dictionary<string, object> BuildAndFinalizeExplicitCircuit(
+            Document doc,
+            Database db,
+            Dictionary<string, object> args,
+            List<ObjectId> wireIds,
+            List<ObjectId> explicitBlockIds,
+            bool matchBlocksOnWiresIfEmpty,
+            string circuitNameOverride,
+            string panelNameOverride,
+            CircuitSampleProfile learnedProfile,
+            double unitsPerM,
+            bool scaleInferred,
+            string scaleWarning,
+            string insunitsName,
+            double medianFixtureSpan,
+            double drawingSpan,
+            bool visibleOnly,
+            bool includeAnonymous,
+            bool includeSystem,
+            bool includeContainerBlocks,
+            bool includeTerminatorBlocks,
+            bool connectGaps,
+            bool selectBlocks,
+            bool selectPaths,
+            bool drawLegend,
+            bool zoom,
+            string zoomMode,
+            string title,
+            bool hasCustomTitle,
+            string legendPosition,
+            string layerFilter,
+            string blockFilter,
+            List<string> excludeBlocks,
+            double? explicitTolerance,
+            bool fromSavedMemory,
+            bool userLocked,
+            bool savedToMemory,
+            bool mergedWithSaved)
+        {
+            List<ObjectId> dedupWireIds = new List<ObjectId>();
+            HashSet<ObjectId> wireSet = new HashSet<ObjectId>();
+            List<string> pathHandles = new List<string>();
+            if (wireIds != null)
+            {
+                for (int i = 0; i < wireIds.Count; i++)
+                {
+                    ObjectId id = wireIds[i];
+                    if (!id.IsNull && !id.IsErased && wireSet.Add(id))
+                        dedupWireIds.Add(id);
+                }
+            }
+
+            List<ObjectId> dedupBlkIds = new List<ObjectId>();
+            HashSet<ObjectId> blkSet = new HashSet<ObjectId>();
+            if (explicitBlockIds != null)
+            {
+                for (int i = 0; i < explicitBlockIds.Count; i++)
+                {
+                    ObjectId id = explicitBlockIds[i];
+                    if (!id.IsNull && !id.IsErased && !wireSet.Contains(id) && blkSet.Add(id))
+                        dedupBlkIds.Add(id);
+                }
+            }
+
+            List<PathCurveCandidate> pathCandidates = new List<PathCurveCandidate>();
+            List<PathBlockMatchItem> matchedItems = new List<PathBlockMatchItem>();
+            Dictionary<string, int> countsByBlock = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, int> nestedBlocksAlongPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> pathEntityTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            double totalPathLenUnits = 0.0;
+            Extents3d? selectedAndPathExt = null;
+            bool switchedToModel = false;
+            int containerBlocksSkipped = 0;
+
+            CircuitTraceMeta traceMeta = new CircuitTraceMeta
+            {
+                CircuitName = circuitNameOverride ?? "",
+                PanelName = panelNameOverride ?? "",
+                HasCustomTitle = hasCustomTitle,
+                InsunitsName = insunitsName ?? "",
+                UnitScaleInferred = scaleInferred,
+                EffectiveUnitsPerM = unitsPerM,
+                UnitScaleWarning = scaleWarning ?? "",
+                FromSavedMemory = fromSavedMemory,
+                UserLocked = userLocked,
+                SavedToMemory = savedToMemory,
+                MergedWithSaved = mergedWithSaved
+            };
+            if (string.IsNullOrWhiteSpace(traceMeta.PanelName) && !string.IsNullOrWhiteSpace(traceMeta.CircuitName))
+            {
+                int sepIdx = traceMeta.CircuitName.LastIndexOfAny(new char[] { '/', '\\' });
+                if (sepIdx > 0) traceMeta.PanelName = traceMeta.CircuitName.Substring(0, sepIdx).Trim();
+            }
+
+            if ((selectBlocks || selectPaths || zoom) && !db.TileMode)
+            {
+                try { LayoutManager.Current.CurrentLayout = "Model"; switchedToModel = true; } catch { }
+            }
+
+            try
+            {
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    Dictionary<string, bool> layerHiddenFlags = BuildLayerHiddenMap(db, tr);
+                    Dictionary<string, SavedColorState> layerColorMap = BuildLayerColorStateMap(db, tr);
+
+                    List<ObjectId> liveWireIds = new List<ObjectId>();
+                    for (int wi = 0; wi < dedupWireIds.Count; wi++)
+                    {
+                        Curve cv = tr.GetObject(dedupWireIds[wi], OpenMode.ForRead) as Curve;
+                        if (cv == null || cv.IsErased) continue;
+                        liveWireIds.Add(dedupWireIds[wi]);
+                        pathHandles.Add(cv.Handle.ToString());
+                        if (string.IsNullOrEmpty(traceMeta.SeedWireColorKey))
+                        {
+                            bool nn;
+                            traceMeta.SeedWireColorKey = ResolveEntityEffectiveColorKey(cv, layerColorMap, out nn);
+                        }
+                    }
+                    dedupWireIds = liveWireIds;
+
+                    CollectCircuitPathCandidates(tr, dedupWireIds, pathCandidates, pathEntityTypes, ref totalPathLenUnits, ref selectedAndPathExt);
+
+                    double refSpan = (learnedProfile != null && learnedProfile.MedianFixtureSpan > 1e-3)
+                        ? learnedProfile.MedianFixtureSpan
+                        : medianFixtureSpan;
+
+                    if (dedupBlkIds.Count > 0)
+                    {
+                        for (int bi = 0; bi < dedupBlkIds.Count; bi++)
+                        {
+                            ObjectId bid = dedupBlkIds[bi];
+                            BlockReference br = tr.GetObject(bid, OpenMode.ForRead) as BlockReference;
+                            if (br == null || br.IsErased) continue;
+                            if (IsLegendOrHighlightLayer(br.Layer) || IsAiAnnotationLayer(br.Layer)) continue;
+                            string bn = ResolveBlockName(tr, br);
+                            if (string.IsNullOrEmpty(bn)) continue;
+                            if (!includeAnonymous && IsAnonymousBlockName(bn)) continue;
+                            if (!includeSystem && (IsSystemBlockName(bn) || string.Equals(br.Layer, "ASHADE", StringComparison.OrdinalIgnoreCase))) continue;
+                            if (!IsBlockNameAllowedForTrace(bn, blockFilter, excludeBlocks)) continue;
+                            if (!includeTerminatorBlocks && IsCircuitTerminatorArrowBlock(bn)) continue;
+
+                            Extents3d bex;
+                            try { bex = br.GeometricExtents; } catch { continue; }
+                            if (!IsFiniteBounds(bex)) continue;
+
+                            double hitDist = 0.0;
+                            int hitIdx = bi;
+                            if (pathCandidates.Count > 0)
+                            {
+                                double bSpan = Math.Max(bex.MaxPoint.X - bex.MinPoint.X, bex.MaxPoint.Y - bex.MinPoint.Y);
+                                double tol = explicitTolerance.HasValue ? Math.Max(1e-5, explicitTolerance.Value) : Math.Max(1e-3, bSpan * 0.5);
+                                int hp; double hd;
+                                if (DoesPathHitBlockXY(pathCandidates, br, bex, tol, unitsPerM, out hp, out hd))
+                                {
+                                    hitIdx = hp;
+                                    hitDist = hd;
+                                }
+                            }
+
+                            matchedItems.Add(new PathBlockMatchItem
+                            {
+                                Id = bid,
+                                Handle = br.Handle.ToString(),
+                                BlockName = bn,
+                                Layer = br.Layer ?? "0",
+                                ColorIndex = br.ColorIndex,
+                                X = (bex.MinPoint.X + bex.MaxPoint.X) * 0.5,
+                                Y = (bex.MinPoint.Y + bex.MaxPoint.Y) * 0.5,
+                                PathIndex = hitIdx,
+                                DistanceAlongPath = hitDist,
+                                Bounds = bex
+                            });
+                            countsByBlock[bn] = countsByBlock.ContainsKey(bn) ? countsByBlock[bn] + 1 : 1;
+                            if (!selectedAndPathExt.HasValue) selectedAndPathExt = bex;
+                            else { Extents3d c = selectedAndPathExt.Value; c.AddExtents(bex); selectedAndPathExt = c; }
+                        }
+                    }
+                    else if (matchBlocksOnWiresIfEmpty && pathCandidates.Count > 0)
+                    {
+                        BlockTableRecord ms = (BlockTableRecord)tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                        MatchBlocksAlongCircuitPath(
+                            tr, ms, layerHiddenFlags, pathCandidates, new HashSet<ObjectId>(dedupWireIds), new HashSet<ObjectId>(),
+                            visibleOnly, includeAnonymous, includeSystem, includeContainerBlocks, includeTerminatorBlocks, connectGaps,
+                            layerFilter, blockFilter, excludeBlocks, explicitTolerance,
+                            unitsPerM, medianFixtureSpan, drawingSpan, learnedProfile,
+                            matchedItems, countsByBlock, traceMeta.Terminators, ref selectedAndPathExt, out containerBlocksSkipped);
+                    }
+
+                    if (dedupWireIds.Count > 0)
+                    {
+                        BlockTableRecord msTag = (BlockTableRecord)tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                        double tightTipTol = refSpan > 1e-3 ? Math.Max(1e-3, refSpan * 0.12) : Math.Max(1e-3, 0.06 * unitsPerM);
+                        List<Point2d> openTips = CollectOpenWireTips(tr, dedupWireIds, tightTipTol);
+                        double tagSearchRadius = refSpan > 1e-3 ? (refSpan * 4.5) : Math.Max(2.5 * unitsPerM, 2.5);
+                        string foundCName, foundPName, foundTerm;
+                        CollectNearbyCircuitTags(
+                            tr, msTag, layerHiddenFlags, visibleOnly, tagSearchRadius,
+                            traceMeta.Terminators, openTips,
+                            out foundCName, out foundPName, out foundTerm);
+                        if (string.IsNullOrWhiteSpace(traceMeta.CircuitName) && !string.IsNullOrWhiteSpace(foundCName))
+                            traceMeta.CircuitName = foundCName;
+                        if (string.IsNullOrWhiteSpace(traceMeta.PanelName) && !string.IsNullOrWhiteSpace(foundPName))
+                            traceMeta.PanelName = foundPName;
+                        if (!string.IsNullOrWhiteSpace(foundTerm) && foundTerm != "open_end")
+                            traceMeta.TerminationType = foundTerm;
+                    }
+
+                    tr.Commit();
+                }
+            }
+            finally
+            {
+                for (int i = 0; i < pathCandidates.Count; i++)
+                {
+                    try { if (pathCandidates[i].FlatCurve != null) pathCandidates[i].FlatCurve.Dispose(); } catch { }
+                }
+            }
+
+            List<string> initHandles = new List<string>(pathHandles);
+            return FinalizeCircuitPathOutput(
+                doc, args, dedupWireIds, pathHandles, initHandles,
+                0, new List<string>(), containerBlocksSkipped,
+                pathEntityTypes, totalPathLenUnits, unitsPerM, matchedItems,
+                countsByBlock, nestedBlocksAlongPath, learnedProfile, traceMeta, selectedAndPathExt,
+                selectPaths, selectBlocks, drawLegend, zoom, zoomMode, title, legendPosition,
+                visibleOnly, includeSystem, includeAnonymous, switchedToModel);
+        }
+
         private static Dictionary<string, object> FindBlocksAlongPath(Document doc, Dictionary<string, object> args)
         {
+            if (args == null) args = new Dictionary<string, object>();
             Database db = doc.Database;
             List<string> explicitHandles = GetStringList(args, "handles");
             double? explicitTolerance = GetNullableDouble(args, "tolerance");
@@ -4193,8 +4945,12 @@ namespace AIEngineer.AutoCAD
             bool includeAnonymous = GetBool(args, "include_anonymous", false);
             bool includeSystem = GetBool(args, "include_system", false);
             bool selectBlocks = GetBool(args, "select_blocks", true);
-            bool selectPaths = GetBool(args, "select_paths", false);
             bool drawLegend = GetBool(args, "draw_legend", true);
+            string requestedCircuitName = (GetStr(args, "circuit_name") ?? "").Trim();
+            bool mergeWithSaved = GetBool(args, "merge_with_saved", false);
+            bool lockSelectionAsCircuit = GetBool(args, "lock_selection_as_circuit", false);
+            bool hasCircuitIntent = !string.IsNullOrWhiteSpace(requestedCircuitName) || mergeWithSaved || lockSelectionAsCircuit;
+            bool selectPaths = GetBool(args, "select_paths", hasCircuitIntent);
             bool usePreviousPath = GetBool(args, "use_previous_path", false);
             bool pickIfEmpty = GetBool(args, "pick_if_empty", true);
             bool followConnected = GetBool(args, "follow_connected", true);
@@ -4209,7 +4965,7 @@ namespace AIEngineer.AutoCAD
             bool includeContainerBlocks = GetBool(args, "include_container_blocks", false);
             bool includeTerminatorBlocks = GetBool(args, "include_terminator_blocks", false);
             bool zoom = GetBool(args, "zoom", true);
-            string zoomMode = (GetStr(args, "zoom_mode") ?? "auto").Trim().ToLowerInvariant();
+            string zoomMode = (args.ContainsKey("zoom_mode") ? (GetStr(args, "zoom_mode") ?? "auto") : (hasCircuitIntent && !drawLegend ? "selected" : "auto")).Trim().ToLowerInvariant();
             string rawTitle = GetStr(args, "title");
             bool hasCustomTitle = !string.IsNullOrWhiteSpace(rawTitle);
             string title = hasCustomTitle ? rawTitle.Trim() : "جدول حصر ومفاتيح بلوكات المسار المحدد";
@@ -4241,6 +4997,7 @@ namespace AIEngineer.AutoCAD
 
             double drawingSpan = 0.0;
             double medianFixtureSpan = 0.0;
+            int skippedAiLayerCount = 0;
 
             using (DocumentLock docLock = doc.LockDocument())
             {
@@ -4249,9 +5006,201 @@ namespace AIEngineer.AutoCAD
                 {
                     ScanCircuitSeedEntities(
                         db, tr, candidateHandles, visibleOnly, rawUnitsPerM, usePreviousPath, excludeBlocks, blockFilter, learnSample,
-                        ref learnedProfile, out drawingSpan, out medianFixtureSpan, out selectionHadOnlyBlocks,
+                        ref learnedProfile, out drawingSpan, out medianFixtureSpan, out selectionHadOnlyBlocks, out skippedAiLayerCount,
                         pathCurveIds, pathHandles, selectedBlockIds);
                     tr.Commit();
+                }
+
+                bool scaleInferred;
+                string scaleWarning;
+                double effectiveUnitsPerM = ResolveEffectiveUnitsPerMeter(
+                    db, rawUnitsPerM, drawingSpan, medianFixtureSpan, out scaleInferred, out scaleWarning);
+
+                // Case 1: Lock user-selected non-AI wires & blocks as exact circuit definition (e.g. after deselecting unwanted blocks)
+                if (lockSelectionAsCircuit)
+                {
+                    if (pathCurveIds.Count == 0 && selectedBlockIds.Count == 0)
+                        return Err("لتثبيت مكونات اللينية وحذف ما ألغيته، حدد الأسلاك و/أو البلوكات المطلوب الإبقاء عليها في أوتوكاد أولاً.");
+                    string targetName = !string.IsNullOrWhiteSpace(requestedCircuitName) ? requestedCircuitName : GetLastActiveCircuitName(doc);
+                    return BuildAndFinalizeExplicitCircuit(
+                        doc, db, args, pathCurveIds, selectedBlockIds, selectedBlockIds.Count == 0,
+                        targetName, "", learnedProfile, effectiveUnitsPerM, scaleInferred, scaleWarning, insunitsName,
+                        medianFixtureSpan, drawingSpan, visibleOnly, includeAnonymous, includeSystem,
+                        includeContainerBlocks, includeTerminatorBlocks, connectGaps,
+                        selectBlocks, selectPaths, drawLegend, zoom, zoomMode, title, hasCustomTitle, legendPosition,
+                        layerFilter, blockFilter, excludeBlocks, explicitTolerance,
+                        false, true, true, false);
+                }
+
+                // Case 2: Merge newly selected/traced branch onto saved circuit memory
+                if (mergeWithSaved)
+                {
+                    string targetName = !string.IsNullOrWhiteSpace(requestedCircuitName) ? requestedCircuitName : GetLastActiveCircuitName(doc);
+                    SavedCircuitRecord savedRec;
+                    TryGetSavedCircuitRecord(doc, targetName, out savedRec);
+                    if (savedRec == null && pathCurveIds.Count == 0 && selectedBlockIds.Count == 0)
+                        return Err("لم يتم العثور على لينية محفوظة مسبقاً ولا عناصر محددة للإضافة.");
+
+                    List<ObjectId> combinedWires = new List<ObjectId>();
+                    List<ObjectId> combinedBlocks = new List<ObjectId>();
+                    HashSet<ObjectId> seenW = new HashSet<ObjectId>();
+                    HashSet<ObjectId> seenB = new HashSet<ObjectId>();
+
+                    using (Transaction trMerge = db.TransactionManager.StartTransaction())
+                    {
+                        if (savedRec != null)
+                        {
+                            for (int i = 0; i < savedRec.PathHandles.Count; i++)
+                            {
+                                ObjectId oid = ResolveHandle(db, savedRec.PathHandles[i]);
+                                if (!oid.IsNull && !oid.IsErased && seenW.Add(oid)) combinedWires.Add(oid);
+                            }
+                            for (int i = 0; i < savedRec.MatchedBlockHandles.Count; i++)
+                            {
+                                ObjectId oid = ResolveHandle(db, savedRec.MatchedBlockHandles[i]);
+                                if (!oid.IsNull && !oid.IsErased && seenB.Add(oid)) combinedBlocks.Add(oid);
+                            }
+                        }
+
+                        if (pathCurveIds.Count > 0 && followConnected && selectedBlockIds.Count == 0)
+                        {
+                            List<ObjectId> extraWires = new List<ObjectId>(pathCurveIds);
+                            List<string> extraHandles = new List<string>(pathHandles);
+                            Dictionary<string, bool> hiddenFlags = BuildLayerHiddenMap(db, trMerge);
+                            double refSp = (learnedProfile != null && learnedProfile.MedianFixtureSpan > 1e-3) ? learnedProfile.MedianFixtureSpan : medianFixtureSpan;
+                            double snapTolM = explicitTolerance.HasValue ? Math.Max(1e-3, explicitTolerance.Value) : (refSp > 1e-3 ? Math.Max(1e-3, refSp * 0.12) : Math.Max(1e-3, 0.05 * effectiveUnitsPerM));
+                            List<string> bNames; List<ObjectId> tIds; bool gTrig;
+                            ExpandConnectedPathCurves(
+                                db, trMerge, extraWires, extraHandles, hiddenFlags, visibleOnly, snapTolM,
+                                bridgeThroughBlocks, connectGaps, strictColor, strictLayer,
+                                effectiveUnitsPerM, refSp, drawingSpan,
+                                includeContainerBlocks, excludeBlocks, blockFilter, learnedProfile,
+                                maxCircuitBlocks, null, out bNames, out tIds, out gTrig);
+                            pathCurveIds = extraWires;
+                        }
+
+                        for (int i = 0; i < pathCurveIds.Count; i++)
+                        {
+                            if (!pathCurveIds[i].IsNull && !pathCurveIds[i].IsErased && seenW.Add(pathCurveIds[i]))
+                                combinedWires.Add(pathCurveIds[i]);
+                        }
+                        for (int i = 0; i < selectedBlockIds.Count; i++)
+                        {
+                            if (!selectedBlockIds[i].IsNull && !selectedBlockIds[i].IsErased && seenB.Add(selectedBlockIds[i]))
+                                combinedBlocks.Add(selectedBlockIds[i]);
+                        }
+
+                        if (pathCurveIds.Count > 0 && selectedBlockIds.Count == 0)
+                        {
+                            List<PathCurveCandidate> newCands = new List<PathCurveCandidate>();
+                            HashSet<string> pTypes = new HashSet<string>();
+                            double dummyLen = 0.0;
+                            Extents3d? dummyExt = null;
+                            try
+                            {
+                                CollectCircuitPathCandidates(trMerge, pathCurveIds, newCands, pTypes, ref dummyLen, ref dummyExt);
+                                if (newCands.Count > 0)
+                                {
+                                    BlockTableRecord msM = (BlockTableRecord)trMerge.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                                    Dictionary<string, bool> hiddenM = BuildLayerHiddenMap(db, trMerge);
+                                    List<PathBlockMatchItem> newMatched = new List<PathBlockMatchItem>();
+                                    Dictionary<string, int> newCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                                    List<CircuitTerminatorInfo> newTerms = new List<CircuitTerminatorInfo>();
+                                    int cSkip;
+                                    MatchBlocksAlongCircuitPath(
+                                        trMerge, msM, hiddenM, newCands, new HashSet<ObjectId>(pathCurveIds), new HashSet<ObjectId>(),
+                                        visibleOnly, includeAnonymous, includeSystem, includeContainerBlocks, includeTerminatorBlocks, connectGaps,
+                                        layerFilter, blockFilter, excludeBlocks, explicitTolerance,
+                                        effectiveUnitsPerM, medianFixtureSpan, drawingSpan, learnedProfile,
+                                        newMatched, newCounts, newTerms, ref dummyExt, out cSkip);
+                                    for (int mi = 0; mi < newMatched.Count; mi++)
+                                    {
+                                        if (seenB.Add(newMatched[mi].Id)) combinedBlocks.Add(newMatched[mi].Id);
+                                    }
+                                }
+                            }
+                            finally
+                            {
+                                for (int ci = 0; ci < newCands.Count; ci++) { try { if (newCands[ci].FlatCurve != null) newCands[ci].FlatCurve.Dispose(); } catch { } }
+                            }
+                        }
+                        trMerge.Commit();
+                    }
+
+                    string resolvedPanel = savedRec != null ? savedRec.PanelName : "";
+                    string resolvedCircName = savedRec != null && !string.IsNullOrWhiteSpace(savedRec.CircuitName) ? savedRec.CircuitName : targetName;
+                    return BuildAndFinalizeExplicitCircuit(
+                        doc, db, args, combinedWires, combinedBlocks, combinedBlocks.Count == 0,
+                        resolvedCircName, resolvedPanel, learnedProfile, effectiveUnitsPerM, scaleInferred, scaleWarning, insunitsName,
+                        medianFixtureSpan, drawingSpan, visibleOnly, includeAnonymous, includeSystem,
+                        includeContainerBlocks, includeTerminatorBlocks, connectGaps,
+                        selectBlocks, selectPaths, drawLegend, zoom, zoomMode, title, hasCustomTitle, legendPosition,
+                        layerFilter, blockFilter, excludeBlocks, explicitTolerance,
+                        false, true, true, true);
+                }
+
+                // Case 3: Recall or find circuit directly by circuit_name (ignoring accidentally selected AI table entities!)
+                if (!string.IsNullOrWhiteSpace(requestedCircuitName))
+                {
+                    SavedCircuitRecord savedRec;
+                    if (TryGetSavedCircuitRecord(doc, requestedCircuitName, out savedRec))
+                    {
+                        List<ObjectId> savedWires = new List<ObjectId>();
+                        List<ObjectId> savedBlocks = new List<ObjectId>();
+                        using (Transaction trRec = db.TransactionManager.StartTransaction())
+                        {
+                            for (int i = 0; i < savedRec.PathHandles.Count; i++)
+                            {
+                                ObjectId oid = ResolveHandle(db, savedRec.PathHandles[i]);
+                                if (!oid.IsNull && !oid.IsErased) savedWires.Add(oid);
+                            }
+                            for (int i = 0; i < savedRec.MatchedBlockHandles.Count; i++)
+                            {
+                                ObjectId oid = ResolveHandle(db, savedRec.MatchedBlockHandles[i]);
+                                if (!oid.IsNull && !oid.IsErased) savedBlocks.Add(oid);
+                            }
+                            trRec.Commit();
+                        }
+                        if (savedWires.Count > 0 || savedBlocks.Count > 0)
+                        {
+                            return BuildAndFinalizeExplicitCircuit(
+                                doc, db, args, savedWires, savedBlocks, savedBlocks.Count == 0,
+                                savedRec.CircuitName, savedRec.PanelName, learnedProfile, effectiveUnitsPerM, scaleInferred, scaleWarning, insunitsName,
+                                medianFixtureSpan, drawingSpan, visibleOnly, includeAnonymous, includeSystem,
+                                includeContainerBlocks, includeTerminatorBlocks, connectGaps,
+                                selectBlocks, selectPaths, drawLegend, zoom, zoomMode, title, hasCustomTitle, legendPosition,
+                                layerFilter, blockFilter, excludeBlocks, explicitTolerance,
+                                true, savedRec.UserLocked, true, false);
+                        }
+                    }
+
+                    // Not yet in memory: locate wire seed next to tag in ModelSpace
+                    using (Transaction trFindTag = db.TransactionManager.StartTransaction())
+                    {
+                        Dictionary<string, bool> hiddenT = BuildLayerHiddenMap(db, trFindTag);
+                        double refSp = (learnedProfile != null && learnedProfile.MedianFixtureSpan > 1e-3) ? learnedProfile.MedianFixtureSpan : medianFixtureSpan;
+                        List<ObjectId> tagSeeds = FindCircuitSeedCurveByTagName(db, trFindTag, requestedCircuitName, hiddenT, visibleOnly, refSp, effectiveUnitsPerM);
+                        for (int i = 0; i < tagSeeds.Count; i++)
+                        {
+                            if (!pathCurveIds.Contains(tagSeeds[i]))
+                            {
+                                Entity e = trFindTag.GetObject(tagSeeds[i], OpenMode.ForRead) as Entity;
+                                if (e != null)
+                                {
+                                    pathCurveIds.Add(tagSeeds[i]);
+                                    pathHandles.Add(e.Handle.ToString());
+                                }
+                            }
+                        }
+                        trFindTag.Commit();
+                    }
+                    if (pathCurveIds.Count == 0)
+                        return Err("لم يتم العثور على اللينية '" + requestedCircuitName + "' في الذاكرة المحفوظة ولا بجانب نصوص المخطط. جرّب تشغيل trace_all_circuits أو حدد سلكاً منها.");
+                }
+
+                if (pathCurveIds.Count == 0 && skippedAiLayerCount > 0)
+                {
+                    return Err("العنصر المحدد في أوتوكاد ينتمي إلى جدول/طبقة التصدير (_AI_...) وليس إلى أسلاك المخطط. حدد سلكاً من مسار اللينية أو مرر اسم اللينية (مثل ELP-B3.2/1) في circuit_name.");
                 }
 
                 if (pathCurveIds.Count == 0 && pickIfEmpty)
@@ -4259,37 +5208,32 @@ namespace AIEngineer.AutoCAD
                     string pickErr = PromptSingleCurveSeedIfEmpty(doc, db, pathCurveIds, pathHandles);
                     if (!string.IsNullOrEmpty(pickErr)) return Err(pickErr);
                 }
+
+                if (pathCurveIds.Count == 0)
+                {
+                    List<string> prevCurves = GetValidCachedUserCurveHandles(db);
+                    if (prevCurves.Count > 0)
+                        return Err("لم يتم تحديد أي خط أو مسار (Line/Polyline) حالياً، لكن يوجد مسار سابق محفوظ (" + string.Join(",", prevCurves.ToArray()) + "). مرر use_previous_path=true أو حدد الخط في أوتوكاد.");
+                    return Err("لم يتم تحديد أي خط أو مسار (Line/Polyline/Arc) في أوتوكاد. حدد الخط/الكابل أولاً ثم أعد المحاولة.");
+                }
+
+                // Strict sample lock: when teaching a full circuit sample, keep ONLY what user selected cleanly without expanding
+                bool effectiveFollowConnected = followConnected;
+                if (learnSample && (pathCurveIds.Count >= 2 || (pathCurveIds.Count >= 1 && selectedBlockIds.Count >= 2)))
+                    effectiveFollowConnected = false;
+
+                RecordUserSelectionSnapshot(doc, pathHandles);
+                List<string> initialPathHandles = new List<string>(pathHandles);
+
+                return ExecuteCircuitTracePass(
+                    doc, db, args, pathCurveIds, pathHandles, initialPathHandles,
+                    learnedProfile, effectiveUnitsPerM, scaleInferred, scaleWarning, insunitsName, medianFixtureSpan, drawingSpan,
+                    visibleOnly, includeAnonymous, includeSystem, includeContainerBlocks, includeTerminatorBlocks,
+                    selectBlocks, selectPaths, drawLegend, effectiveFollowConnected, bridgeThroughBlocks,
+                    connectGaps, strictColor, strictLayer, learnSample, maxCircuitBlocks,
+                    zoom, zoomMode, title, hasCustomTitle, legendPosition,
+                    layerFilter, blockFilter, excludeBlocks, explicitTolerance);
             }
-
-            if (pathCurveIds.Count == 0)
-            {
-                List<string> prevCurves = GetValidCachedUserCurveHandles(db);
-                if (prevCurves.Count > 0)
-                    return Err("لم يتم تحديد أي خط أو مسار (Line/Polyline) حالياً، لكن يوجد مسار سابق محفوظ (" + string.Join(",", prevCurves.ToArray()) + "). مرر use_previous_path=true أو حدد الخط في أوتوكاد.");
-                return Err("لم يتم تحديد أي خط أو مسار (Line/Polyline/Arc) في أوتوكاد. حدد الخط/الكابل أولاً ثم أعد المحاولة.");
-            }
-
-            bool scaleInferred;
-            string scaleWarning;
-            double effectiveUnitsPerM = ResolveEffectiveUnitsPerMeter(
-                db, rawUnitsPerM, drawingSpan, medianFixtureSpan, out scaleInferred, out scaleWarning);
-
-            // Strict sample lock: when teaching a full circuit sample, keep ONLY what user selected cleanly without expanding
-            bool effectiveFollowConnected = followConnected;
-            if (learnSample && (pathCurveIds.Count >= 2 || (pathCurveIds.Count >= 1 && selectedBlockIds.Count >= 2)))
-                effectiveFollowConnected = false;
-
-            RecordUserSelectionSnapshot(doc, pathHandles);
-            List<string> initialPathHandles = new List<string>(pathHandles);
-
-            return ExecuteCircuitTracePass(
-                doc, db, args, pathCurveIds, pathHandles, initialPathHandles,
-                learnedProfile, effectiveUnitsPerM, scaleInferred, scaleWarning, insunitsName, medianFixtureSpan, drawingSpan,
-                visibleOnly, includeAnonymous, includeSystem, includeContainerBlocks, includeTerminatorBlocks,
-                selectBlocks, selectPaths, drawLegend, effectiveFollowConnected, bridgeThroughBlocks,
-                connectGaps, strictColor, strictLayer, learnSample, maxCircuitBlocks,
-                zoom, zoomMode, title, hasCustomTitle, legendPosition,
-                layerFilter, blockFilter, excludeBlocks, explicitTolerance);
         }
 
         // ==================== Batch All-Circuits Partition & Schedule (`trace_all_circuits`) ====================
@@ -4618,6 +5562,7 @@ namespace AIEngineer.AutoCAD
             SpatialGrid2D<CurveChainNode> sharedCurveGrid,
             SpatialGrid2D<BridgeBlockCandidate> bridgeGrid,
             SpatialGrid2D<BridgeBlockCandidate> terminatorGrid,
+            SpatialGrid2D<CrossingObstacleSegment> sharedObstacleGrid,
             double maxBridgeTol,
             double maxTermTol,
             Dictionary<string, SavedColorState> colorMap,
@@ -4672,7 +5617,7 @@ namespace AIEngineer.AutoCAD
             bool guardTriggered;
             ExpandConnectedPathCurvesCore(
                 queue, compVisited, globalVisitedCurves, compIds, compHandles,
-                sharedCurveGrid, bridgeGrid, terminatorGrid, maxBridgeTol, maxTermTol,
+                sharedCurveGrid, bridgeGrid, terminatorGrid, sharedObstacleGrid, maxBridgeTol, maxTermTol,
                 snapTol, bridgeThroughBlocks, connectGaps,
                 effectiveUnitsPerM, refSpan, scope, maxCircuitBlocks,
                 out bridgedNames, out termIds, out guardTriggered);
@@ -4762,6 +5707,107 @@ namespace AIEngineer.AutoCAD
             };
         }
 
+        private static TracedCircuitSummary HydrateSummaryFromSavedRecord(
+            Database db,
+            Transaction tr,
+            SavedCircuitRecord lr,
+            Dictionary<string, SavedColorState> colorMap,
+            double effectiveUnitsPerM)
+        {
+            if (lr == null) return null;
+            List<ObjectId> compIds = new List<ObjectId>();
+            double totalLenUnits = 0.0;
+            Extents3d? compExt = null;
+            string wireLayer = lr.WireLayer ?? "0";
+            string wireColor = lr.WireColorKey ?? "ACI:7";
+
+            for (int i = 0; i < lr.PathHandles.Count; i++)
+            {
+                ObjectId oid = ResolveHandle(db, lr.PathHandles[i]);
+                if (oid.IsNull || oid.IsErased) continue;
+                Curve cv = tr.GetObject(oid, OpenMode.ForRead) as Curve;
+                if (cv == null || cv.IsErased) continue;
+                compIds.Add(oid);
+                if (compIds.Count == 1)
+                {
+                    wireLayer = cv.Layer ?? "0";
+                    bool nn;
+                    wireColor = ResolveEntityEffectiveColorKey(cv, colorMap, out nn);
+                }
+                try { totalLenUnits += cv.GetDistanceAtParameter(cv.EndParam) - cv.GetDistanceAtParameter(cv.StartParam); } catch { }
+                try
+                {
+                    Extents3d ex = cv.GeometricExtents;
+                    if (IsFiniteBounds(ex))
+                    {
+                        if (!compExt.HasValue) compExt = ex;
+                        else { Extents3d c = compExt.Value; c.AddExtents(ex); compExt = c; }
+                    }
+                }
+                catch { }
+            }
+
+            List<ObjectId> matchedIds = new List<ObjectId>();
+            List<string> matchedHandles = new List<string>();
+            Dictionary<string, int> countsByBlock = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < lr.MatchedBlockHandles.Count; i++)
+            {
+                ObjectId oid = ResolveHandle(db, lr.MatchedBlockHandles[i]);
+                if (oid.IsNull || oid.IsErased) continue;
+                BlockReference br = tr.GetObject(oid, OpenMode.ForRead) as BlockReference;
+                if (br == null || br.IsErased) continue;
+                string bn = ResolveBlockName(tr, br);
+                if (string.IsNullOrEmpty(bn)) continue;
+                matchedIds.Add(oid);
+                matchedHandles.Add(br.Handle.ToString());
+                countsByBlock[bn] = countsByBlock.ContainsKey(bn) ? countsByBlock[bn] + 1 : 1;
+                try
+                {
+                    Extents3d ex = br.GeometricExtents;
+                    if (IsFiniteBounds(ex))
+                    {
+                        if (!compExt.HasValue) compExt = ex;
+                        else { Extents3d c = compExt.Value; c.AddExtents(ex); compExt = c; }
+                    }
+                }
+                catch { }
+            }
+
+            if (compIds.Count == 0 && matchedIds.Count == 0) return null;
+
+            List<KeyValuePair<string, int>> pairs = new List<KeyValuePair<string, int>>(countsByBlock);
+            pairs.Sort(delegate(KeyValuePair<string, int> a, KeyValuePair<string, int> b)
+            {
+                int c = b.Value.CompareTo(a.Value);
+                return c != 0 ? c : string.Compare(a.Key, b.Key, StringComparison.OrdinalIgnoreCase);
+            });
+            List<string> parts = new List<string>();
+            for (int pi = 0; pi < pairs.Count; pi++)
+                parts.Add(pairs[pi].Key + " x" + pairs[pi].Value.ToString(CultureInfo.InvariantCulture));
+
+            return new TracedCircuitSummary
+            {
+                CircuitName = lr.CircuitName,
+                PanelName = lr.PanelName,
+                TerminationType = string.IsNullOrWhiteSpace(lr.TerminationType) ? "panel_connection" : lr.TerminationType,
+                WireLayer = wireLayer,
+                WireColorKey = wireColor,
+                PathCurvesCount = compIds.Count,
+                LengthUnits = totalLenUnits,
+                LengthMeters = Math.Round(totalLenUnits / effectiveUnitsPerM, 2),
+                MatchedBlocksCount = matchedIds.Count,
+                CountsByBlock = countsByBlock,
+                CountsSummary = parts.Count > 0 ? string.Join(", ", parts.ToArray()) : "-",
+                GuardTriggered = false,
+                MinX = compExt.HasValue ? compExt.Value.MinPoint.X : 0.0,
+                MinY = compExt.HasValue ? compExt.Value.MinPoint.Y : 0.0,
+                EndSummary = "معتمد ومقفل من المستخدم (" + matchedIds.Count.ToString(CultureInfo.InvariantCulture) + " وحدة)",
+                MatchedBlockIds = matchedIds,
+                PathCurveIds = compIds,
+                MatchedHandles = matchedHandles
+            };
+        }
+
         private static DrawingCircuitScanResult ScanAllCircuitsInternal(
             Document doc,
             Database db,
@@ -4777,6 +5823,7 @@ namespace AIEngineer.AutoCAD
             bool strictLayer = GetBool(args, "strict_layer", false);
             bool connectGaps = GetBool(args, "connect_gaps", true);
             bool bridgeThroughBlocks = GetBool(args, "bridge_through_blocks", true);
+            bool overwriteLocked = GetBool(args, "overwrite_locked", false);
             int maxCircuitBlocks = GetInt(args, "max_circuit_blocks", 35);
             if (maxCircuitBlocks < 0) maxCircuitBlocks = 0;
             int maxCircuits = GetInt(args, "max_circuits", 200);
@@ -4838,12 +5885,13 @@ namespace AIEngineer.AutoCAD
             }
 
             double snapTol = refSpan > 1e-3 ? Math.Max(1e-3, refSpan * 0.12) : Math.Max(1e-3, 0.05 * effectiveUnitsPerM);
-            double estBreakMax = refSpan > 1e-3 ? Math.Max(snapTol * 2.0, refSpan * 0.90) : Math.Max(1e-3, 0.75 * effectiveUnitsPerM);
+            double estBreakMax = refSpan > 1e-3 ? Math.Max(snapTol * 2.0, refSpan * 1.15) : Math.Max(1e-3, 0.90 * effectiveUnitsPerM);
             double gridCell = refSpan > 1e-3 ? Math.Max(0.25, Math.Max(estBreakMax * 1.5, refSpan * 2.5)) : Math.Max(1.0, estBreakMax * 1.5);
 
             List<CurveChainNode> allNodeRefs = new List<CurveChainNode>();
             Dictionary<ObjectId, CurveChainNode> curveNodesById = new Dictionary<ObjectId, CurveChainNode>();
             SpatialGrid2D<CurveChainNode> sharedCurveGrid = new SpatialGrid2D<CurveChainNode>(gridCell);
+            SpatialGrid2D<CrossingObstacleSegment> sharedObstacleGrid = new SpatialGrid2D<CrossingObstacleSegment>(gridCell);
             SpatialGrid2D<BridgeBlockCandidate> bridgeGrid = new SpatialGrid2D<BridgeBlockCandidate>(gridCell);
             SpatialGrid2D<BridgeBlockCandidate> terminatorGrid = new SpatialGrid2D<BridgeBlockCandidate>(gridCell);
             double maxBridgeTol = 0.0;
@@ -4862,6 +5910,10 @@ namespace AIEngineer.AutoCAD
                     if (cv == null || ent.IsErased) continue;
                     if (IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer)) continue;
                     if (visibleOnly && !IsEntityVisible(ent, hiddenMap)) continue;
+
+                    CrossingObstacleSegment obs = TryCreateObstacleSegment(mid, cv, colorMap);
+                    if (obs != null) sharedObstacleGrid.Add(obs.MinX, obs.MinY, obs.MaxX, obs.MaxY, obs);
+
                     string cLayer = ent.Layer ?? "0";
                     if (IsArchitecturalLayerName(cLayer) && !seedLayerSet.Contains(cLayer) && !seedIdSet.Contains(mid)) continue;
 
@@ -4916,12 +5968,30 @@ namespace AIEngineer.AutoCAD
                 }
 
                 HashSet<ObjectId> globalVisited = new HashSet<ObjectId>();
+                if (!overwriteLocked)
+                {
+                    List<SavedCircuitRecord> lockedList = GetLockedCircuitRecordsCopy(doc);
+                    for (int li = 0; li < lockedList.Count && scan.Circuits.Count < maxCircuits; li++)
+                    {
+                        SavedCircuitRecord lr = lockedList[li];
+                        if (!string.IsNullOrWhiteSpace(layerFilter) && !MatchesPatternOrSubstring(lr.WireLayer, layerFilter)) continue;
+                        if (!string.IsNullOrWhiteSpace(colorFilter) && !MatchesPatternOrSubstring(lr.WireColorKey, colorFilter)) continue;
+                        TracedCircuitSummary hydrated = HydrateSummaryFromSavedRecord(db, tr, lr, colorMap, effectiveUnitsPerM);
+                        if (hydrated == null || (!includeEmpty && hydrated.MatchedBlocksCount == 0)) continue;
+                        for (int pi = 0; pi < hydrated.PathCurveIds.Count; pi++)
+                            globalVisited.Add(hydrated.PathCurveIds[pi]);
+                        scan.Circuits.Add(hydrated);
+                        scan.TotalBlocks += hydrated.MatchedBlocksCount;
+                        scan.TotalLengthM += hydrated.LengthMeters;
+                    }
+                }
+
                 for (int si = 0; si < seedCurveIds.Count && scan.Circuits.Count < maxCircuits; si++)
                 {
                     ObjectId seedId = seedCurveIds[si];
                     if (globalVisited.Contains(seedId)) continue;
                     TracedCircuitSummary summary = TraceSingleCircuitComponentCached(
-                        db, tr, scan.Cache, curveNodesById, sharedCurveGrid, bridgeGrid, terminatorGrid,
+                        db, tr, scan.Cache, curveNodesById, sharedCurveGrid, bridgeGrid, terminatorGrid, sharedObstacleGrid,
                         maxBridgeTol, maxTermTol, colorMap, learnedProfile,
                         seedId, globalVisited, strictColor, strictLayer, connectGaps, bridgeThroughBlocks,
                         maxCircuitBlocks, effectiveUnitsPerM, refSpan, drawingSpan);
@@ -4945,6 +6015,28 @@ namespace AIEngineer.AutoCAD
                     c = b.MinY.CompareTo(a.MinY);
                     return c != 0 ? c : a.MinX.CompareTo(b.MinX);
                 });
+
+                for (int ci = 0; ci < scan.Circuits.Count; ci++)
+                {
+                    TracedCircuitSummary c = scan.Circuits[ci];
+                    if (string.IsNullOrWhiteSpace(c.CircuitName)) continue;
+                    List<string> pHandles = new List<string>(c.PathCurveIds.Count);
+                    for (int pi = 0; pi < c.PathCurveIds.Count; pi++)
+                        pHandles.Add(c.PathCurveIds[pi].Handle.ToString());
+                    SaveCircuitRecordToMemory(doc, new SavedCircuitRecord
+                    {
+                        CircuitName = c.CircuitName,
+                        PanelName = c.PanelName,
+                        TerminationType = c.TerminationType,
+                        WireLayer = c.WireLayer,
+                        WireColorKey = c.WireColorKey,
+                        PathHandles = pHandles,
+                        MatchedBlockHandles = new List<string>(c.MatchedHandles),
+                        LengthMeters = c.LengthMeters,
+                        CountsByBlock = new Dictionary<string, int>(c.CountsByBlock, StringComparer.OrdinalIgnoreCase),
+                        UserLocked = false
+                    }, false, overwriteLocked);
+                }
             }
             finally
             {

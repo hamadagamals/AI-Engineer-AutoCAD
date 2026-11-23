@@ -32,6 +32,7 @@ namespace AIEngineer.AutoCAD
         public string Provider = ProviderGemini;
         public string GeminiApiKey = "";
         public string GeminiModel = "gemini-3.5-flash";
+        public bool ModelMigratedV2 = false;
         public string ClaudeApiKey = "";
         public string ClaudeModel = "claude-sonnet-4-20250514";
         public string OpenAIApiKey = "";
@@ -114,6 +115,7 @@ namespace AIEngineer.AutoCAD
                         cfg.Provider = GetStr(d, "provider", cfg.Provider);
                         cfg.GeminiApiKey = UnprotectSecret(GetStr(d, "gemini_api_key", ""), out legacyGemini);
                         cfg.GeminiModel = GetStr(d, "gemini_model", cfg.GeminiModel);
+                        cfg.ModelMigratedV2 = GetBoolCfg(d, "model_migrated_v2", false);
                         cfg.ClaudeApiKey = UnprotectSecret(GetStr(d, "claude_api_key", ""), out legacyClaude);
                         cfg.ClaudeModel = GetStr(d, "claude_model", cfg.ClaudeModel);
                         cfg.OpenAIApiKey = UnprotectSecret(GetStr(d, "openai_api_key", ""), out legacyOpenAI);
@@ -123,7 +125,17 @@ namespace AIEngineer.AutoCAD
                         cfg.PreferredCoordSortOrder = NormalizeSortOrderPref(GetStr(d, "preferred_coord_sort_order", cfg.PreferredCoordSortOrder));
                         cfg.VoiceAutoSend = GetBoolCfg(d, "voice_auto_send", cfg.VoiceAutoSend);
                         cfg.VoiceSpeakReplies = GetBoolCfg(d, "voice_speak_replies", cfg.VoiceSpeakReplies);
-                        needsEncryptionMigration = legacyGemini || legacyClaude || legacyOpenAI;
+                        bool modelUpgraded = false;
+                        if (!cfg.ModelMigratedV2)
+                        {
+                            if (string.Equals((cfg.GeminiModel ?? "").Trim(), "gemini-3.5-flash-lite", StringComparison.OrdinalIgnoreCase))
+                            {
+                                cfg.GeminiModel = "gemini-3.5-flash";
+                            }
+                            cfg.ModelMigratedV2 = true;
+                            modelUpgraded = true;
+                        }
+                        needsEncryptionMigration = legacyGemini || legacyClaude || legacyOpenAI || modelUpgraded;
                     }
                 }
             }
@@ -183,6 +195,7 @@ namespace AIEngineer.AutoCAD
                 encGem = Convert.ToString(existingDisk["gemini_api_key"], CultureInfo.InvariantCulture) ?? "";
             d["gemini_api_key"] = encGem;
             d["gemini_model"] = (GeminiModel ?? "gemini-3.5-flash").Trim();
+            d["model_migrated_v2"] = ModelMigratedV2;
 
             string encClaude = ProtectSecret(ClaudeApiKey);
             if (string.IsNullOrEmpty(encClaude) && !string.IsNullOrWhiteSpace(ClaudeApiKey) && existingDisk != null && existingDisk.ContainsKey("claude_api_key"))
@@ -752,7 +765,12 @@ namespace AIEngineer.AutoCAD
             }
             if (res.ContainsKey("matched_instances")) return toolName + "(match:" + res["matched_instances"] + ",conv:" + (res.ContainsKey("converted_count") ? res["converted_count"] : 0) + ")";
             if (res.ContainsKey("matched_blocks_count") && res.ContainsKey("path_curves_count"))
-                return toolName + "(blocks:" + res["matched_blocks_count"] + ",types:" + (res.ContainsKey("block_types_count") ? res["block_types_count"] : 0) + ",sel:" + (res.ContainsKey("selected_in_autocad") ? res["selected_in_autocad"] : false) + ",legend:" + (res.ContainsKey("legend_drawn") ? res["legend_drawn"] : false) + ")";
+            {
+                string cNm = res.ContainsKey("circuit_name") && res["circuit_name"] != null ? res["circuit_name"].ToString() : "";
+                bool fm = res.ContainsKey("from_saved_memory") && res["from_saved_memory"] is bool && (bool)res["from_saved_memory"];
+                bool ul = res.ContainsKey("user_locked") && res["user_locked"] is bool && (bool)res["user_locked"];
+                return toolName + "(circ:" + (string.IsNullOrEmpty(cNm) ? "-" : cNm) + ",blocks:" + res["matched_blocks_count"] + ",types:" + (res.ContainsKey("block_types_count") ? res["block_types_count"] : 0) + ",sel:" + (res.ContainsKey("selected_in_autocad") ? res["selected_in_autocad"] : false) + ",legend:" + (res.ContainsKey("legend_drawn") ? res["legend_drawn"] : false) + (fm ? ",mem:1" : "") + (ul ? ",locked:1" : "") + ")";
+            }
             if (res.ContainsKey("circuits_count") && res.ContainsKey("total_blocks_count") && toolName == "trace_all_circuits")
                 return toolName + "(circuits:" + res["circuits_count"] + ",blocks:" + res["total_blocks_count"] + ",table:" + (res.ContainsKey("table_drawn") ? res["table_drawn"] : false) + ")";
             if (res.ContainsKey("panels_count") && res.ContainsKey("sld_drawn"))
@@ -2115,13 +2133,16 @@ namespace AIEngineer.AutoCAD
                 "6h. ATTRIBUTES & BATCH TEXT TOOLS (`manage_attributes`, `text_tools`): Use `manage_attributes` to extract all BlockReference attributes to Excel (`action: 'extract'`), bulk-update attribute tags (`action: 'update'`), or sync edited attributes back from Excel (`action: 'sync_from_excel'`). Use `text_tools` for batch find & replace across text/mtext/attributes (`action: 'find_replace'`), directional auto-numbering `C1..Cn` (`action: 'auto_number'`), or height/Arial Unicode style standardization (`action: 'standardize'`).\n" +
                 "6i. ADVANCED GEOMETRY, QA/CLEANUP, DWG COMPARE, BLOCK LIBRARY & LAYOUTS/PDF (`advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`): Never manually loop single entity moves/deletes when an exact batch engineering tool exists! Use `advanced_geometry_ops` for `align`, `distribute`, `array_rect`, `array_polar`, `offset`, `revision_cloud`, or `explode`. Use `drawing_qa_cleanup` for `audit_duplicates` (detect/clean stacked duplicate blocks!), `overkill`, `purge`, `standardize_bylayer`, `compare_dwg` (revision clouds + Excel diff), or `check_env`. Use `layout_and_plot_tools` for scaled PaperSpace Layouts/Viewports and `batch_plot_pdf`. Use `manage_block_library` (`save`/`list`/`insert`) for reusable company blocks across projects!\n" +
                 "6j. LIGHTING DESIGN, IES/LDT PHOTOMETRY & DIALUX STF EXPORT (`lighting_design_engine`, `export_dialux_stf`): Whenever the engineer asks to design/distribute lighting automatically according to Egyptian Code (`ECP`) / `EN 12464-1` / `CIBSE`, calculate Lux/Uniformity from `.ies`/`.ldt` files, balance lighting on 3 phases, or export an AutoCAD lighting plan to DIALux evo (`.stf`): ALWAYS call `lighting_design_engine` and/or `export_dialux_stf`! Note honestly that DIALux evo imports `.stf` (`File -> Import -> STF`) cleanly to skip manual room/fixture modeling, while official DIALux evo has no external headless API for running DIALux's own internal raytracer or PDF export.\n" +
-                "6k. LIGHTING/MEP CIRCUIT & BLOCK PATH TRACING (`find_blocks_along_path`, `trace_all_circuits`): Whenever the engineer asks to trace, complete, select, count, name (circuit tag e.g. `LP-B3.2/11`), measure total length, or make a schedule/legend for an individual lighting/MEP circuit OR separate ALL circuits into a master schedule ('كمل المسار لدائرة الانارة', 'حدد مسار اللينيا من أول لمبة لآخر لمبة والسهم', 'اسم اللينيا ورقمها', 'حدد الخطوط المتصلة كدائرة كهربائية بدون البلوكات', 'احصر كل اللينيات في جدول كل لينية لوحدها'):\n" +
-                "   - **NEVER use `quantity_takeoff`** (counts whole drawing) and **NEVER guess bounding boxes in `select_entities`**!\n" +
-                "   - **Strict Isolation, Auto-Scale & Guard (DEFAULT ON):** `find_blocks_along_path` automatically detects `INSUNITS` mismatches (e.g. Meter drawings saved as Inches), enforces `strict_color: true`, bridges fixture gaps & collinear crossing cuts (`connect_gaps: true`, proportional to fixture span), stops at Home-Run `ARROW` / Panel blocks (`include_terminator_blocks: false`), extracts `circuit_name`/`panel_name`, and guards against merging >`max_circuit_blocks` (35) fixtures. If `unit_scale_warning` or `warning` (`circuit_guard_triggered`) is returned, surface it clearly in your reply!\n" +
-                "   - **Pattern A — Engineer shows ONE circuit as sample to learn (`learn_sample: true`):** Pass `learn_sample: true, select_blocks: true, draw_legend: true` ONLY when they explicitly selected a clean sample circuit; `learn_sample: true` locks strictly to the selected entities without re-expanding across neighboring circuits (pass `reset_sample: true` to clear stale samples).\n" +
-                "   - **Pattern B — Engineer selects 1 wire OR 1 lamp (+ wire) of a SINGLE circuit to complete & count ONLY THAT circuit:** Call `find_blocks_along_path(follow_connected: true, bridge_through_blocks: true, connect_gaps: true, strict_color: true, select_blocks: true, draw_legend: true)`! Report `circuit_name`, `panel_name`, `termination_type`, `circuit_start`, `circuit_end`, `total_path_length_m`, and exact `counts_by_block` ONLY from the tool output (never invent a circuit name if `circuit_name` is empty!).\n" +
-                "   - **Pattern C — Engineer wants ONLY connected wires selected WITHOUT blocks:** Pass `select_paths: true, select_blocks: false, follow_connected: true, bridge_through_blocks: true, connect_gaps: true, strict_color: true` (with `draw_legend: false` unless a schedule is requested, and `zoom_mode: \"selected\"`).\n" +
+                "6k. LIGHTING/MEP CIRCUIT & BLOCK PATH TRACING (`find_blocks_along_path`, `trace_all_circuits`): Whenever the engineer asks to trace, complete, select, count, name (circuit tag e.g. `LP-B3.2/11`), measure total length, recall a named circuit, update/merge/prune a circuit, or separate ALL circuits into a master schedule ('كمل المسار لدائرة الانارة', 'حدد مسار اللينيا من أول لمبة لآخر لمبة والسهم', 'اسم اللينيا ورقمها', 'حدد الخطوط المتصلة كدائرة كهربائية بدون البلوكات', 'احصر كل اللينيات في جدول كل لينية لوحدها'):\n" +
+                "   - **NEVER use `quantity_takeoff`** (counts whole drawing), **NEVER guess bounding boxes in `select_entities`**, and **NEVER treat selected tables/frames on `_AI_*` layers as circuit wires**!\n" +
+                "   - **Strict Isolation, Crossing Bridges, Auto-Scale & Guard (DEFAULT ON):** `find_blocks_along_path` detects `INSUNITS` mismatches (Meter drawings saved as Inches), enforces `strict_color: true`, bridges fixture gaps, collinear cuts, AND verified crossing jumps ('كباري التقاطع') across intersecting wires (`connect_gaps: true`), stops at Home-Run `ARROW` / Panel blocks (`include_terminator_blocks: false`), extracts `circuit_name`/`panel_name`, and guards against merging >`max_circuit_blocks` (35) fixtures. If `unit_scale_warning` or `warning` (`circuit_guard_triggered`) is returned, surface it clearly!\n" +
+                "   - **Pattern A — Engineer shows ONE circuit as sample to learn (`learn_sample: true`):** Pass `learn_sample: true, select_blocks: true, draw_legend: true` ONLY when they explicitly selected a clean sample circuit (`learn_sample: true` locks strictly to the selected entities).\n" +
+                "   - **Pattern B — Engineer selects 1 wire OR 1 lamp (+ wire) of a SINGLE circuit to complete & count ONLY THAT circuit:** Call `find_blocks_along_path(follow_connected: true, bridge_through_blocks: true, connect_gaps: true, strict_color: true, select_blocks: true, draw_legend: true)`! Report `circuit_name`, `panel_name`, `termination_type`, `circuit_start`, `circuit_end`, `total_path_length_m`, and exact `counts_by_block` ONLY from tool output.\n" +
+                "   - **Pattern C — Engineer wants ONLY connected wires selected WITHOUT blocks:** Pass `select_paths: true, select_blocks: false, follow_connected: true, bridge_through_blocks: true, connect_gaps: true, strict_color: true` (`draw_legend: false`, `zoom_mode: \"selected\"`).\n" +
                 "   - **Pattern D — Engineer wants ALL circuits separated & scheduled in ONE table (`trace_all_circuits`):** Whenever asked to separate/schedule EVERY circuit on the plan (`افصل كل لينية لوحدها`, `جدول حصر كل اللينيات`), call `trace_all_circuits(draw_table: true, export_excel: <if excel requested>)` directly!\n" +
+                "   - **Pattern E — Engineer asks to select/review a SAVED or NAMED circuit (`ELP-B3.2/1`, 'اعمل سليكت على اللينية دي ومكوناتها بالمخطط للمراجعة'):** Pass `circuit_name: \"<exact tag e.g. ELP-B3.2/1>\", select_blocks: true, select_paths: true, draw_legend: false, zoom_mode: \"selected\"` (even if a schedule table row is currently selected!).\n" +
+                "   - **Pattern F — Engineer adds missing branches/lights OR removes deselected lights from the active circuit:** When they say 'ضيف على اللينية كمان بقيتها / أضف ده', pass `merge_with_saved: true, circuit_name: \"<active circuit if known>\", select_blocks: true, select_paths: true, zoom_mode: \"selected\"`. When they selected ONLY the final kept lights/wires and say 'امسح اللي ألغيت تحديده / اعتمد المحدد فقط', pass `lock_selection_as_circuit: true, circuit_name: \"<active circuit if known>\", select_blocks: true, select_paths: true` so the locked version persists in memory & future `trace_all_circuits`!\n" +
+                "   - **Pattern G — Table Overlap Check:** Whenever tables appear overlapped or engineer asks to separate them, ensure `replace_existing: true` on `draw_block_legend` / `trace_all_circuits` (do NOT draw duplicate unreplaced legends over schedules).\n" +
                 "6l. CONVERTING DRAWN ARROWS / CALLOUT POLYLINES TO NATIVE `Leader` (`convert_arrows_to_leaders`): Whenever the engineer asks to convert existing drawn arrows/callouts (including horizontal shelf + angled pointer + Solid/Hatch/triangle/chevron arrowhead + optional text) in the drawing to native AutoCAD `Leader` ('حول كل الاسهم المرسومة الي leader', 'انا مختار عينة حول كل اللي مثلها الي leader', 'حول السهم المرسوم مع تعديل الاحداثيات الي راس السهم'):\n" +
                 "   - **NEVER call `select_entities(..., highlight_box: true)`**, **NEVER stop to ask unnecessary questions**, and **NEVER manually loop `draw_entities` + `delete_entities`**!\n" +
                 "   - When the engineer selected a **sample arrow** and asks to convert ALL similar arrows across the drawing (`'مختار عينة'`, `'حول كل الذي مثلها'`, `'الباقي مثله'`), ALWAYS pass `match_similar: true` (do NOT pass `selected_only: true` alone unless they literally want ONLY the single selected arrow converted)! It reads the selected sample's layer/color/parts (`horizontal line + pointer line + arrowhead`), matches EVERY identical arrow assembly across ModelSpace, merges them cleanly into native `Leader`s with `Vertex 0` snapped onto the exact sharp apex of each arrowhead pointing to the block, updates X/Y coordinates inside paired texts (`update_coordinates: true`) to match `Vertex 0`, attaches `AIENG_COORD_LDR` XData, erases the old lines/arrowheads in one Undo step, and cleans `_AI_HIGHLIGHT` boxes!\n" +
@@ -2367,6 +2388,9 @@ namespace AIEngineer.AutoCAD
                     { "strict_layer", Prop("boolean", "Restrict tracing strictly to the seed wire's layer even if dashed/solid wires of the same color use sub-layers (default false).") },
                     { "learn_sample", Prop("boolean", "Learn circuit wire layer, wire color, and fixture size from the selected sample circuit strictly without expanding into adjacent circuits (default false).") },
                     { "reset_sample", Prop("boolean", "Clear any previously learned circuit profile for this drawing before tracing (default false).") },
+                    { "circuit_name", Prop("string", "Optional exact circuit tag (e.g. 'ELP-B3.2/1') to recall its saved/verified wires and fixture blocks directly or save/merge under this circuit name.") },
+                    { "merge_with_saved", Prop("boolean", "Append currently selected/traced missing wires and blocks onto the saved circuit record and lock it in memory (default false).") },
+                    { "lock_selection_as_circuit", Prop("boolean", "Lock ONLY the currently selected non-AI wires and fixture blocks as the authoritative circuit definition in memory, removing deselected blocks (default false).") },
                     { "max_circuit_blocks", Prop("integer", "Sanity guard cap on maximum fixtures per single circuit to prevent merging neighboring circuits (default 35; pass 0 to disable).") },
                     { "position", Prop("string", "'outside_right' (default), 'outside_left', 'outside_top', or 'outside_bottom'.") },
                     { "clear_layers", ArrProp("string", "Optional non-0 layers of old/unwanted tables (e.g. ['_AI_BOQ_TABLE']) to erase before drawing the clean legend.") },
@@ -2392,6 +2416,7 @@ namespace AIEngineer.AutoCAD
                     { "bridge_through_blocks", Prop("boolean", "Bridge wires across fixture blocks while stopping at ARROW/Panel terminators (default true).") },
                     { "max_circuit_blocks", Prop("integer", "Maximum fixtures allowed per single circuit guard (default 35; pass 0 for unlimited).") },
                     { "max_circuits", Prop("integer", "Maximum circuits to list (default 200).") },
+                    { "overwrite_locked", Prop("boolean", "If true, overwrite any user-locked circuit edits saved earlier via merge_with_saved/lock_selection_as_circuit (default false).") },
                     { "include_empty", Prop("boolean", "Include wire paths with 0 matched fixture blocks (default false).") },
                     { "fixture_va", Prop("number", "Nominal VA per fixture used for estimated circuit load column (default 40.0).") },
                     { "draw_table", Prop("boolean", "Draw formatted Arabic/English Circuit Schedule table on _AI_CIRCUIT_SCHEDULE in AutoCAD (default true).") },

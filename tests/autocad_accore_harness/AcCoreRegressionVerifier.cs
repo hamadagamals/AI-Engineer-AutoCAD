@@ -319,6 +319,177 @@ namespace AcCoreRegressionHarness
                 ed.WriteMessage("\nTEST2_UNDO=" + jss.Serialize(rUndo) + "\n");
                 AssertTrue(GetBoolVal(rUndo, "ok") && GetIntVal(rUndo, "undone_steps") >= 1, "Test 2 undo failed: " + jss.Serialize(rUndo));
 
+                // 4b. Test 5: Verified Crossing-Bridge Jump (1.40m across orthogonal Green ACI:3 obstacle)
+                ObjectId crossSeedId;
+                List<ObjectId> crossTempIds = new List<ObjectId>();
+                using (Transaction trCross = db.TransactionManager.StartTransaction())
+                {
+                    BlockTable bt = (BlockTable)trCross.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    BlockTableRecord ms = (BlockTableRecord)trCross.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+                    crossTempIds.Add(InsertBlock(ms, trCross, f1Btr, new Point3d(2.0, -15.0, 0), "E-FIXTURES"));
+                    crossTempIds.Add(InsertBlock(ms, trCross, f1Btr, new Point3d(6.5, -15.0, 0), "E-FIXTURES"));
+                    crossTempIds.Add(InsertBlock(ms, trCross, f1Btr, new Point3d(9.5, -15.0, 0), "E-FIXTURES"));
+                    crossSeedId = AddLine(ms, trCross, new Point3d(2.30, -15.0, 0), new Point3d(3.50, -15.0, 0), "E-LIGHTING", 6);
+                    crossTempIds.Add(crossSeedId);
+                    // 1.40m crossing gap [3.50 .. 4.90] across orthogonal Green ACI:3 wire at x=4.20
+                    crossTempIds.Add(AddLine(ms, trCross, new Point3d(4.20, -16.2, 0), new Point3d(4.20, -13.8, 0), "0", 3));
+                    crossTempIds.Add(AddLine(ms, trCross, new Point3d(4.90, -15.0, 0), new Point3d(6.20, -15.0, 0), "E-LIGHTING", 6));
+                    crossTempIds.Add(AddLine(ms, trCross, new Point3d(6.80, -15.0, 0), new Point3d(9.20, -15.0, 0), "E-LIGHTING", 6));
+                    crossTempIds.Add(InsertBlock(ms, trCross, arrowBtr, new Point3d(11.0, -15.0, 0), "E-LIGHTING"));
+                    crossTempIds.Add(AddLine(ms, trCross, new Point3d(9.80, -15.0, 0), new Point3d(11.0, -15.0, 0), "E-LIGHTING", 6));
+                    crossTempIds.Add(AddText(ms, trCross, new Point3d(11.2, -14.85, 0), "LP-CROSS/1", 0.18, "E-LIGHTING"));
+                    trCross.Commit();
+                }
+                ed.SetImpliedSelection(new ObjectId[] { crossSeedId });
+                Dictionary<string, object> r5 = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "pick_if_empty", false }, { "draw_legend", false }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST5=" + jss.Serialize(r5) + "\n");
+                AssertTrue(GetBoolVal(r5, "ok") && GetStrVal(r5, "circuit_name") == "LP-CROSS/1" && GetIntVal(r5, "matched_blocks_count") == 3, "Test 5 crossing-bridge jump failed");
+
+                // Clean up temporary crossing circuit before Test 3 audit
+                using (Transaction trDelCross = db.TransactionManager.StartTransaction())
+                {
+                    for (int di = 0; di < crossTempIds.Count; di++)
+                    {
+                        Entity de = trDelCross.GetObject(crossTempIds[di], OpenMode.ForWrite, false, true) as Entity;
+                        if (de != null && !de.IsErased) de.Erase(true);
+                    }
+                    trDelCross.Commit();
+                }
+
+                // 4c. Test 6: Circuit Memory Recall + AI-Table Selection Guard + Merge + Lock
+                ObjectId schedSampleId = ObjectId.Null;
+                using (Transaction trFindTbl = db.TransactionManager.StartTransaction())
+                {
+                    BlockTableRecord msR = (BlockTableRecord)trFindTbl.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                    foreach (ObjectId oid in msR)
+                    {
+                        Entity ent = trFindTbl.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ent != null && !ent.IsErased && string.Equals(ent.Layer, "_AI_CIRCUIT_SCHEDULE", StringComparison.OrdinalIgnoreCase) && ent is Polyline)
+                        {
+                            schedSampleId = oid;
+                            break;
+                        }
+                    }
+                    trFindTbl.Commit();
+                }
+                AssertTrue(!schedSampleId.IsNull, "Test 6 could not locate _AI_CIRCUIT_SCHEDULE entity");
+                ed.SetImpliedSelection(new ObjectId[] { schedSampleId });
+                Dictionary<string, object> r6a = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "circuit_name", "LP-B3.2/2" }, { "select_blocks", true }, { "select_paths", true }, { "draw_legend", false }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST6A=" + jss.Serialize(r6a) + "\n");
+                AssertTrue(GetBoolVal(r6a, "ok") && GetBoolVal(r6a, "from_saved_memory") && GetIntVal(r6a, "matched_blocks_count") == 4 &&
+                           GetBoolVal(r6a, "selected_paths") && GetBoolVal(r6a, "selected_blocks"), "Test 6A saved memory recall failed");
+
+                // Add extra F1 + wire and merge onto LP-B3.2/2
+                ObjectId extraF1Id, extraWireId;
+                using (Transaction trM = db.TransactionManager.StartTransaction())
+                {
+                    BlockTable bt = (BlockTable)trM.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    BlockTableRecord ms = (BlockTableRecord)trM.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+                    extraF1Id = InsertBlock(ms, trM, f1Btr, new Point3d(34.0, 6.0, 0), "E-FIXTURES");
+                    extraWireId = AddLine(ms, trM, new Point3d(34.3, 6.0, 0), new Point3d(36.0, 6.0, 0), "E-LIGHTING", 6);
+                    trM.Commit();
+                }
+                ed.SetImpliedSelection(new ObjectId[] { extraF1Id, extraWireId });
+                Dictionary<string, object> r6b = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "circuit_name", "LP-B3.2/2" }, { "merge_with_saved", true }, { "draw_legend", false }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST6B=" + jss.Serialize(r6b) + "\n");
+                AssertTrue(GetBoolVal(r6b, "ok") && GetIntVal(r6b, "matched_blocks_count") == 5 && GetBoolVal(r6b, "user_locked") && GetBoolVal(r6b, "merged_with_saved"), "Test 6B merge failed");
+
+                ed.SetImpliedSelection(new ObjectId[0]);
+                Dictionary<string, object> r6bRecall = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "circuit_name", "LP-B3.2/2" }, { "draw_legend", false }, { "zoom", false } }
+                });
+                AssertTrue(GetBoolVal(r6bRecall, "ok") && GetIntVal(r6bRecall, "matched_blocks_count") == 5, "Test 6B merge recall failed");
+
+                // Prune back via lock_selection_as_circuit on 3 F1 + 2 wires (c2SampleIds)
+                ed.SetImpliedSelection(c2SampleIds.ToArray());
+                Dictionary<string, object> r6c = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "circuit_name", "LP-B3.2/2" }, { "lock_selection_as_circuit", true }, { "draw_legend", false }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST6C=" + jss.Serialize(r6c) + "\n");
+                AssertTrue(GetBoolVal(r6c, "ok") && GetIntVal(r6c, "matched_blocks_count") == 3 && GetBoolVal(r6c, "user_locked"), "Test 6C lock failed");
+
+                ed.SetImpliedSelection(new ObjectId[0]);
+                Dictionary<string, object> r6cRecall = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "circuit_name", "LP-B3.2/2" }, { "draw_legend", false }, { "zoom", false } }
+                });
+                AssertTrue(GetBoolVal(r6cRecall, "ok") && GetIntVal(r6cRecall, "matched_blocks_count") == 3, "Test 6C lock recall failed");
+
+                // Cleanup extra block/wire and reset LP-B3.2/2 unlocked state via overwrite_locked before Test 3
+                using (Transaction trClean6 = db.TransactionManager.StartTransaction())
+                {
+                    Entity eF = trClean6.GetObject(extraF1Id, OpenMode.ForWrite, false, true) as Entity;
+                    if (eF != null && !eF.IsErased) eF.Erase(true);
+                    Entity eW = trClean6.GetObject(extraWireId, OpenMode.ForWrite, false, true) as Entity;
+                    if (eW != null && !eW.IsErased) eW.Erase(true);
+                    trClean6.Commit();
+                }
+                execTool.Invoke(null, new object[] {
+                    doc, "trace_all_circuits",
+                    new Dictionary<string, object> { { "draw_table", true }, { "overwrite_locked", true }, { "zoom", false } }
+                });
+
+                // 4d. Test 7: Zero Table Overlap (_AI_CIRCUIT_SCHEDULE vs _AI_BLOCK_LEGEND)
+                ed.SetImpliedSelection(new ObjectId[0]);
+                Dictionary<string, object> r7 = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "circuit_name", "LP-B3.2/1" }, { "draw_legend", true }, { "zoom", false } }
+                });
+                AssertTrue(GetBoolVal(r7, "ok") && GetBoolVal(r7, "legend_drawn"), "Test 7 legend draw failed");
+                using (Transaction trBox = db.TransactionManager.StartTransaction())
+                {
+                    Extents3d? schedBox = null;
+                    Extents3d? legBox = null;
+                    BlockTableRecord msB = (BlockTableRecord)trBox.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                    foreach (ObjectId oid in msB)
+                    {
+                        Entity ent = trBox.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ent == null || ent.IsErased) continue;
+                        Extents3d ex;
+                        try { ex = ent.GeometricExtents; } catch { continue; }
+                        if (string.Equals(ent.Layer, "_AI_CIRCUIT_SCHEDULE", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!schedBox.HasValue) schedBox = ex;
+                            else { Extents3d u = schedBox.Value; u.AddExtents(ex); schedBox = u; }
+                        }
+                        else if (string.Equals(ent.Layer, "_AI_BLOCK_LEGEND", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!legBox.HasValue) legBox = ex;
+                            else { Extents3d u = legBox.Value; u.AddExtents(ex); legBox = u; }
+                        }
+                    }
+                    AssertTrue(schedBox.HasValue && legBox.HasValue, "Test 7 missing schedule/legend extents");
+                    bool overlaps = !(schedBox.Value.MaxPoint.X < legBox.Value.MinPoint.X - 1e-3 ||
+                                      schedBox.Value.MinPoint.X > legBox.Value.MaxPoint.X + 1e-3 ||
+                                      schedBox.Value.MaxPoint.Y < legBox.Value.MinPoint.Y - 1e-3 ||
+                                      schedBox.Value.MinPoint.Y > legBox.Value.MaxPoint.Y + 1e-3);
+                    ed.WriteMessage("\nTEST7_OVERLAP=" + overlaps + "|SCHED_Y=[" + Math.Round(schedBox.Value.MinPoint.Y, 2) + "," + Math.Round(schedBox.Value.MaxPoint.Y, 2) + "]|LEG_Y=[" + Math.Round(legBox.Value.MinPoint.Y, 2) + "," + Math.Round(legBox.Value.MaxPoint.Y, 2) + "]\n");
+                    AssertTrue(!overlaps, "Test 7 tables overlapped!");
+                    trBox.Commit();
+                }
+
+                // 4e. Test 8: Relative Excel Path Redirect out of Program Files
+                Dictionary<string, object> r8 = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "circuit_name", "LP-B3.2/1" }, { "draw_legend", true }, { "export_excel", true }, { "excel_path", "rel_no_dir_test.xlsx" }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST8=" + jss.Serialize(r8) + "\n");
+                string r8Xl = GetStrVal(r8, "excel_path");
+                AssertTrue(GetBoolVal(r8, "ok") && GetBoolVal(r8, "excel_exported") && File.Exists(r8Xl), "Test 8 Excel redirect failed");
+                AssertTrue(r8Xl.IndexOf("Program Files", StringComparison.OrdinalIgnoreCase) < 0, "Test 8 wrote into Program Files");
+                try { File.Delete(r8Xl); } catch { }
+
                 // 5. Test 3: AuditElectricalDrawing (Orphan + Duplicate + Overload + VD>3% + Unit Mismatch)
                 using (Transaction trQa = db.TransactionManager.StartTransaction())
                 {

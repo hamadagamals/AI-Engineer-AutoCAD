@@ -421,5 +421,125 @@ namespace AIEngineer.AutoCAD
 
             return cache;
         }
+
+        private sealed class CrossingObstacleSegment
+        {
+            public ObjectId Id;
+            public string Layer;
+            public string ColorKey;
+            public Point2d StartXY;
+            public Point2d EndXY;
+            public double MinX;
+            public double MinY;
+            public double MaxX;
+            public double MaxY;
+            public double DirX;
+            public double DirY;
+            public bool HasDir;
+        }
+
+        private static bool SegmentsIntersect2D(Point2d a1, Point2d a2, Point2d b1, Point2d b2)
+        {
+            double d1x = a2.X - a1.X;
+            double d1y = a2.Y - a1.Y;
+            double d2x = b2.X - b1.X;
+            double d2y = b2.Y - b1.Y;
+            double denom = d1x * d2y - d1y * d2x;
+            double rx = b1.X - a1.X;
+            double ry = b1.Y - a1.Y;
+            if (Math.Abs(denom) < 1e-10) return false;
+            double t = (rx * d2y - ry * d2x) / denom;
+            double u = (rx * d1y - ry * d1x) / denom;
+            return t >= -1e-6 && t <= 1.0 + 1e-6 && u >= -1e-6 && u <= 1.0 + 1e-6;
+        }
+
+        private static CrossingObstacleSegment TryCreateObstacleSegment(
+            ObjectId id,
+            Curve cv,
+            Dictionary<string, SavedColorState> layerColorMap)
+        {
+            if (cv == null || cv.IsErased) return null;
+            Point2d sp, ep;
+            if (!TryGetCurveEndpointsXY(cv, out sp, out ep)) return null;
+            double minX = Math.Min(sp.X, ep.X);
+            double maxX = Math.Max(sp.X, ep.X);
+            double minY = Math.Min(sp.Y, ep.Y);
+            double maxY = Math.Max(sp.Y, ep.Y);
+            try
+            {
+                Extents3d ex = cv.GeometricExtents;
+                if (IsFiniteBounds(ex))
+                {
+                    minX = Math.Min(minX, ex.MinPoint.X);
+                    minY = Math.Min(minY, ex.MinPoint.Y);
+                    maxX = Math.Max(maxX, ex.MaxPoint.X);
+                    maxY = Math.Max(maxY, ex.MaxPoint.Y);
+                }
+            }
+            catch { }
+
+            double dx = ep.X - sp.X;
+            double dy = ep.Y - sp.Y;
+            double len = Math.Sqrt(dx * dx + dy * dy);
+            bool nn;
+            string cKey = ResolveEntityEffectiveColorKey(cv, layerColorMap, out nn);
+            return new CrossingObstacleSegment
+            {
+                Id = id,
+                Layer = cv.Layer ?? "0",
+                ColorKey = cKey,
+                StartXY = sp,
+                EndXY = ep,
+                MinX = minX,
+                MinY = minY,
+                MaxX = maxX,
+                MaxY = maxY,
+                DirX = len > 1e-6 ? dx / len : 0.0,
+                DirY = len > 1e-6 ? dy / len : 0.0,
+                HasDir = len > 1e-6
+            };
+        }
+
+        private static bool HasCrossingObstacleInGap(
+            Point2d a,
+            Point2d b,
+            ObjectId ignoreId1,
+            ObjectId ignoreId2,
+            string circuitColorKey,
+            SpatialGrid2D<CrossingObstacleSegment> obstacleGrid,
+            double tol,
+            List<CrossingObstacleSegment> scratch)
+        {
+            if (obstacleGrid == null || obstacleGrid.Count == 0) return false;
+            double qMinX = Math.Min(a.X, b.X) - tol;
+            double qMinY = Math.Min(a.Y, b.Y) - tol;
+            double qMaxX = Math.Max(a.X, b.X) + tol;
+            double qMaxY = Math.Max(a.Y, b.Y) + tol;
+            obstacleGrid.Query(qMinX, qMinY, qMaxX, qMaxY, scratch);
+
+            double gDx = b.X - a.X;
+            double gDy = b.Y - a.Y;
+            double gLen = Math.Sqrt(gDx * gDx + gDy * gDy);
+            double gUx = gLen > 1e-6 ? gDx / gLen : 0.0;
+            double gUy = gLen > 1e-6 ? gDy / gLen : 0.0;
+            Point2d mid = new Point2d((a.X + b.X) * 0.5, (a.Y + b.Y) * 0.5);
+
+            for (int i = 0; i < scratch.Count; i++)
+            {
+                CrossingObstacleSegment obs = scratch[i];
+                if (obs.Id == ignoreId1 || obs.Id == ignoreId2) continue;
+
+                bool diffColor = !string.IsNullOrEmpty(circuitColorKey) &&
+                                 !string.Equals(obs.ColorKey, circuitColorKey, StringComparison.OrdinalIgnoreCase);
+                bool transverse = gLen > 1e-6 && obs.HasDir && Math.Abs(obs.DirX * gUx + obs.DirY * gUy) < 0.72;
+                if (!diffColor && !transverse) continue;
+
+                if (SegmentsIntersect2D(a, b, obs.StartXY, obs.EndXY))
+                    return true;
+                if (PointToSegmentDist2D(mid, obs.StartXY, obs.EndXY) <= tol)
+                    return true;
+            }
+            return false;
+        }
     }
 }

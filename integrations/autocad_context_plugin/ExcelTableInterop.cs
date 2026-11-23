@@ -141,6 +141,53 @@ namespace AIEngineer.AutoCAD
             return chosen;
         }
 
+        private static string ResolveWritableExportDirectory()
+        {
+            string[] bases = new string[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                Path.GetTempPath()
+            };
+            for (int i = 0; i < bases.Length; i++)
+            {
+                string b = bases[i];
+                if (string.IsNullOrWhiteSpace(b)) continue;
+                try
+                {
+                    if (!Directory.Exists(b)) continue;
+                    string candidate = Path.Combine(b, "AI-Engineer-Exports");
+                    Directory.CreateDirectory(candidate);
+                    return candidate;
+                }
+                catch { }
+            }
+            string fallback = Path.Combine(Path.GetTempPath(), "AI-Engineer-Exports");
+            Directory.CreateDirectory(fallback);
+            return fallback;
+        }
+
+        private static bool IsProtectedSystemDirectoryPath(string fullPath)
+        {
+            if (string.IsNullOrWhiteSpace(fullPath)) return false;
+            string[] blockedRoots = new string[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows)
+            };
+            for (int i = 0; i < blockedRoots.Length; i++)
+            {
+                string root = blockedRoots[i];
+                if (string.IsNullOrWhiteSpace(root)) continue;
+                string normRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                if (fullPath.StartsWith(normRoot, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(fullPath.TrimEnd(Path.DirectorySeparatorChar), normRoot.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
         public static string WriteSpreadsheet(string targetPath, ExcelSheetData data)
         {
             if (string.IsNullOrWhiteSpace(targetPath))
@@ -148,7 +195,29 @@ namespace AIEngineer.AutoCAD
             if (data == null)
                 throw new ArgumentNullException("data");
 
-            string fullPath = Path.GetFullPath(targetPath);
+            string trimmedTarget = targetPath.Trim();
+            string fullPath;
+            if (!Path.IsPathRooted(trimmedTarget))
+            {
+                string safeName = SanitizeFilePart(Path.GetFileNameWithoutExtension(trimmedTarget));
+                if (string.IsNullOrWhiteSpace(safeName)) safeName = "table";
+                string rawExt = Path.GetExtension(trimmedTarget).ToLowerInvariant();
+                if (rawExt != ".xlsx" && rawExt != ".csv") rawExt = ".xlsx";
+                fullPath = Path.Combine(ResolveWritableExportDirectory(), safeName + rawExt);
+            }
+            else
+            {
+                fullPath = Path.GetFullPath(trimmedTarget);
+                if (IsProtectedSystemDirectoryPath(fullPath))
+                {
+                    string safeName = SanitizeFilePart(Path.GetFileNameWithoutExtension(fullPath));
+                    if (string.IsNullOrWhiteSpace(safeName)) safeName = "table";
+                    string rawExt = Path.GetExtension(fullPath).ToLowerInvariant();
+                    if (rawExt != ".xlsx" && rawExt != ".csv") rawExt = ".xlsx";
+                    fullPath = Path.Combine(ResolveWritableExportDirectory(), safeName + rawExt);
+                }
+            }
+
             string dir = Path.GetDirectoryName(fullPath);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 

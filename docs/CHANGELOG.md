@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-23 - Phase 2.1 Field-Feedback Hotfix (Crossing Bridges, Circuit Memory, Table Collision, Export Path & Model Auto-Upgrade)
+
+- **Crossing-Bridge Wire Tracing (`integrations/autocad_context_plugin/CadSpatialIndex.cs`, `CadMepAndTakeoffTools.cs`):**
+  - Added `CrossingObstacleSegment`, geometric intersection/clearance helpers (`SegmentsIntersect2D`, `TryCreateObstacleSegment`, `HasCrossingObstacleInGap`), and Pass 3 verified crossing-bridge jumps across `IsCollinearBreakBridgeMatch`, `CollectChainTraceCandidates`, `EnqueueConnectedCurvesAtEndpoints`, `ExpandConnectedPathCurvesCore`, and `ScanAllCircuitsInternal` so circuits stay connected across perpendicular jumper/bridge gaps up to `1.80m` (and never jump empty space or stray lines).
+- **Persistent Circuit Memory & AI-Table Selection Guard (`integrations/autocad_context_plugin/CadMepAndTakeoffTools.cs`, `DirectCadAgent.cs`):**
+  - Added per-drawing and persistent JSON sidecar (`%LOCALAPPDATA%\AI-Engineer\circuit_memory\`) circuit registry (`SavedCircuitRecord`) with `circuit_name` recall, `merge_with_saved`, `lock_selection_as_circuit`, and `overwrite_locked` preservation during batch `trace_all_circuits`.
+  - Added `skippedAiLayerCount` guard in `ScanCircuitSeedEntities` so accidentally selecting an `_AI_*` legend/schedule row never hijacks tracing, falling back transparently to `circuit_name` memory or clean guidance.
+- **Zero-Overlap AI Table Placement & Writable Excel Exports (`integrations/autocad_context_plugin/CadToolExecutor.cs`, `ExcelTableInterop.cs`):**
+  - Updated `DrawBlockLegend` and `RenderStyledScheduleTable` to check all AI schedule/diagram layers (`_AI_COORD_TABLE`, `_AI_CIRCUIT_SCHEDULE`, `_AI_PANEL_SCHEDULE`, `_AI_SLD`, `_AI_ELECTRICAL_QA`, `_AI_LV_CALC_TABLE`, `_AI_BOQ_TABLE`, `_AI_EXCEL_TABLE`, `_AI_LIGHTING_TABLE`, `_AI_BLOCK_LEGEND`) and stack non-overlapping vertical bands.
+  - Updated `ExcelTableInterop.WriteSpreadsheet` to redirect relative or protected (`Program Files` / `Windows`) output paths automatically to writable `Desktop\AI-Engineer-Exports`.
+- **Automatic Gemini Config Migration (`integrations/autocad_context_plugin/DirectCadAgent.cs`):**
+  - Added one-time `ModelMigratedV2` (`model_migrated_v2`) migration in `DirectAiConfig.Load()` so existing saved configs using deprecated `gemini-3.5-flash-lite` auto-upgrade to `gemini-3.5-flash` while keeping user API keys intact.
+- **Verification:**
+  - Removed duplicate `PointToSegmentDist2D` in `CadSpatialIndex.cs`, compiled `AIEngineer.AutoCAD.Context.dll` (`1,186,816` bytes), and passed AutoCAD 2021 `accoreconsole.exe` regression Tests 1–8 (`AUTOCAD_TOOLS=37|SCHEMA_ERRORS=0`, `1.40m` crossing bridge `LP-CROSS/1`, `LP-B3.2/2` memory recall over `_AI_CIRCUIT_SCHEDULE` selection + merge + user lock, zero Y-overlap between `_AI_CIRCUIT_SCHEDULE` and `_AI_BLOCK_LEGEND`, relative Excel redirect to `AI-Engineer-Exports`, `291 ms` 30-circuit/300-fixture benchmark, `ACCORE_REGRESSION_PASS`).
+
 ## 2026-11-23 - Phase 2 Consulting Panel/SLD Generator, Electrical QA Auditor, Spatial Grid & AutoCAD Regression Suite
 
 - **2D Spatial Grid & Block Geometry Cache (`integrations/autocad_context_plugin/CadSpatialIndex.cs`, `CadMepAndTakeoffTools.cs`):**
