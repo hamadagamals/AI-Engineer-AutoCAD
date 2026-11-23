@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pytest
 
-from agent.copilot import CopilotCitation, CopilotLanguage, EgressField
+from agent.copilot import CopilotCitation, CopilotLanguage, create_egress_field
 from agent.copilot_provider import CopilotProviderRequest
 from agent.exceptions import ApiConfigurationError, ProviderError
 from agent.operator_runtime import OperatorRuntimeConfig, build_operator_providers
@@ -40,7 +40,7 @@ def _copilot_request() -> CopilotProviderRequest:
         preview_sha256="4" * 64,
         language=CopilotLanguage.ARABIC,
         fields=(
-            EgressField("user_prompt", "ارسم كشافات إنارة في الغرفة 101"),
+            create_egress_field("user_prompt", "ارسم كشافات إنارة في الغرفة 101"),
         ),
     )
 
@@ -109,6 +109,29 @@ def test_claude_developer_and_copilot_generation() -> None:
     parsed = json.loads(dev_output)
     assert parsed["summary"] == "Sample plan"
     assert len(parsed["steps"]) == 2
+
+    copilot_json = json.dumps({
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps({
+                    "language": "ar",
+                    "answer": "تم فحص الغرفة 101 بناءً على طلب المستخدم.",
+                    "citations": [{"source_field": "user_prompt", "title": "الغرفة 101"}],
+                }, ensure_ascii=False),
+            }
+        ]
+    }).encode("utf-8")
+
+    def mock_copilot_post(url: str, headers: dict, body: bytes, timeout: float) -> bytes:
+        assert "x-api-key" in headers
+        return copilot_json
+
+    _, copilot_adapter_2 = create_claude_providers(config, http_post=mock_copilot_post)
+    cop_out = copilot_adapter_2.generate(_copilot_request())
+    assert cop_out.language == CopilotLanguage.ARABIC
+    assert "101" in cop_out.answer
+    assert len(cop_out.citations) == 1
 
 
 def test_operator_runtime_supports_claude() -> None:

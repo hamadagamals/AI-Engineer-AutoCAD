@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>AI-Engineer Direct Copilot</Name>
+    <Assembly>{{ASSEMBLY_PATH}}</Assembly>
+    <AddInId>D91A4F32-8C2E-4B15-A67D-3F9B2E41C802</AddInId>
+    <FullClassName>AIEngineer.Revit.Direct.RevitDirectApplication</FullClassName>
+    <VendorId>AIEN</VendorId>
+    <VendorDescription>AI-Engineer Direct Multi-Version BIM/MEP Copilot (Gemini / Claude / OpenAI)</VendorDescription>
+  </AddIn>
+</RevitAddIns>

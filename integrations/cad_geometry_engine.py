@@ -328,16 +328,55 @@ def _render_entities_to_dxf(entities: list[dict[str, Any]], output_dir: Path, fi
     return out_file
 
 
+def _offline_composite_or_ask(prompt: str, output_dir: Path) -> dict[str, object]:
+    """Deterministic multi-shape offline fallback (e.g. circle + square) or clarification prompt."""
+    lower = prompt.lower()
+    circle_m = re.search(r"(?:ب?قطر(?:ها|ه)?|ب?القطر)\D*?(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", lower)
+    square_m = re.search(r"(?:مربع|مربعات).*?(?:ضلع|ضلعه|طلعة|طول)\D*?(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", lower)
+    if circle_m and square_m:
+        r = (float(circle_m.group(1)) * _parse_unit_scale(circle_m.group(2))) / 2.0
+        s = float(square_m.group(1)) * _parse_unit_scale(square_m.group(2))
+        entities = [
+            {"type": "circle", "center": [0.0, 0.0], "radius": r, "label": f"D={circle_m.group(1)}{circle_m.group(2) or 'سم'}"},
+            {"type": "rect", "x": r + 200.0, "y": -s / 2.0, "width": s, "height": s, "label": f"Square {square_m.group(1)}x{square_m.group(1)}"},
+        ]
+        out_file = _render_entities_to_dxf(entities, output_dir, "custom_composite_geometry.dxf")
+        _clear_pending_context()
+        return {
+            "status": "success",
+            "dxf": str(out_file),
+            "description": f"تم رسم دائرة بقطر {circle_m.group(1)} {circle_m.group(2) or 'سم'} وبجانبها مربع طول ضلعه {square_m.group(1)} {square_m.group(2) or 'سم'} بنجاح بلون المراجعة الأحمر (_AI_PREVIEW_REVIEW).",
+        }
+    return _ask_user(
+        prompt,
+        (
+            f"يا باشمهندس، لتنفيذ رسم «{prompt}» بدقة طبقاً للأصول الهندسية، "
+            "برجاء توضيح الأبعاد أو المقاسات المطلوبة (مثلاً: القطر، الأبعاد بالمتر/السنتيمتر، أو طريقة التوزيع) وسأقوم برسمها فوراً داخل أوتوكاد."
+        ),
+        output_dir,
+    )
+
+
 def _call_gemini_cad_generator(prompt: str, output_dir: Path) -> dict[str, object]:
     """Call Gemini generateContent API for multi-shape, colloquial, or custom CAD drafting."""
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
-        return {"status": "error", "error": "GEMINI_API_KEY environment variable is not set."}
+        lower = prompt.lower()
+        circle_m = re.search(r"(?:ب?قطر(?:ها|ه)?|ب?القطر)\D*?(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", lower)
+        square_m = re.search(r"(?:مربع|مربعات).*?(?:ضلع|ضلعه|طلعة|طول)\D*?(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", lower)
+        if circle_m and square_m:
+            return _offline_composite_or_ask(prompt, output_dir)
+        msg = "GEMINI_API_KEY environment variable is not set."
+        return {"status": "error", "message": msg, "error": msg}
+
     model = os.environ.get("AI_ENGINEER_GEMINI_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
+        msg = "AI_ENGINEER_GEMINI_MODEL contains unsupported characters."
+        return {"status": "error", "message": msg, "error": msg}
 
     import urllib.request
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     system_prompt = (
         "You are an expert AutoCAD CAD geometry planner (all coordinates and dimensions MUST be in millimeters: 1 cm = 10 mm, 1 m = 1000 mm).\n"
         "Understand Arabic engineering terms AND typos/colloquial dialect (for example: 'طول طلعة' or 'طول ضلعه' = square side length; 'وجنبها' = place adjacent on the right with a clean visible gap so shapes do NOT overlap).\n"
@@ -363,7 +402,11 @@ def _call_gemini_cad_generator(prompt: str, output_dir: Path) -> dict[str, objec
     req = urllib.request.Request(
         url,
         data=encoded,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "x-goog-api-key": api_key,
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -392,33 +435,7 @@ def _call_gemini_cad_generator(prompt: str, output_dir: Path) -> dict[str, objec
     except Exception:
         pass
 
-    # Deterministic multi-shape offline fallback (e.g. circle + square) if API unavailable
-    lower = prompt.lower()
-    circle_m = re.search(r"(?:ب?قطر(?:ها|ه)?|ب?القطر)\D*?(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", lower)
-    square_m = re.search(r"مربع.*?(?:ضلع|ضلعه|طلعة|طول)\D*?(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", lower)
-    if circle_m and square_m:
-        r = (float(circle_m.group(1)) * _parse_unit_scale(circle_m.group(2))) / 2.0
-        s = float(square_m.group(1)) * _parse_unit_scale(square_m.group(2))
-        entities = [
-            {"type": "circle", "center": [0.0, 0.0], "radius": r, "label": f"D={circle_m.group(1)}{circle_m.group(2) or 'سم'}"},
-            {"type": "rect", "x": r + 200.0, "y": -s / 2.0, "width": s, "height": s, "label": f"Square {square_m.group(1)}x{square_m.group(1)}"},
-        ]
-        out_file = _render_entities_to_dxf(entities, output_dir, "custom_composite_geometry.dxf")
-        _clear_pending_context()
-        return {
-            "status": "success",
-            "dxf": str(out_file),
-            "description": f"تم رسم دائرة بقطر {circle_m.group(1)} {circle_m.group(2) or 'سم'} وبجانبها مربع طول ضلعه {square_m.group(1)} {square_m.group(2) or 'سم'} بنجاح بلون المراجعة الأحمر (_AI_PREVIEW_REVIEW).",
-        }
-
-    return _ask_user(
-        prompt,
-        (
-            f"يا باشمهندس، لتنفيذ رسم «{prompt}» بدقة طبقاً للأصول الهندسية، "
-            "برجاء توضيح الأبعاد أو المقاسات المطلوبة (مثلاً: القطر، الأبعاد بالمتر/السنتيمتر، أو طريقة التوزيع) وسأقوم برسمها فوراً داخل أوتوكاد."
-        ),
-        output_dir,
-    )
+    return _offline_composite_or_ask(prompt, output_dir)
 
 
 def parse_and_generate(raw_prompt: str, output_dir: Path) -> dict[str, object]:
@@ -436,11 +453,11 @@ def parse_and_generate(raw_prompt: str, output_dir: Path) -> dict[str, object]:
     text = prompt.strip().lower()
 
     # Detect how many geometry families appear so composite prompts go to multi-shape planner
-    has_circle = any(k in text for k in ("دوائر", "دائرة", "دايرة", "circle", "circles"))
-    has_square = any(k in text for k in ("مربع", "square"))
-    has_rect = any(k in text for k in ("مستطيل", "rectangle"))
+    has_circle = bool(re.search(r"\b(?:دوائر|دائرة|دايرة|circle|circles)\b", text))
+    has_square = bool(re.search(r"(?<!متر\s)(?<!م\s)\b(?:مربع|مربعات|square|squares)\b", text))
+    has_rect = bool(re.search(r"\b(?:مستطيل|مستطيلات|rectangle|rectangles)\b", text))
     has_line = bool(re.search(r"(?:^|\s)خط(?:\s|$)|\bline\b", text))
-    has_other_shape = any(k in text for k in ("مثلث", "triangle", "سداسي", "خماسي", "معين", "خزان", "سلم", "قاعدة", "عمود", "قوس", "arc"))
+    has_other_shape = bool(re.search(r"\b(?:مثلث|triangle|سداسي|خماسي|معين|خزان|سلم|قاعدة|عمود(?!ي)|قوس|arc)\b", text))
     shape_families = int(has_circle) + int(has_square or has_rect) + int(has_line) + int(has_other_shape)
 
     # 1. Electrical Blocks (Lamp, Socket, Switch) - if not mixed with generic geometric shapes
@@ -504,8 +521,11 @@ def parse_and_generate(raw_prompt: str, output_dir: Path) -> dict[str, object]:
         dia_m = re.search(r"(?:ب?قطر(?:ها|ه)?|ب?القطر)(?:\s*كل\s*واحدة)?(?:\s*=|\s*:|\s+هو|\s+يساوي)?\s*(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", text)
         radius_m = re.search(r"نصف\s*(?:قطر(?:ها|ه)?|القطر)(?:\s*=|\s*:|\s+هو)?\s*(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", text)
         standalone_dim_m = re.search(r"(?<!\S)(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)\b", text)
+        spacing_m = re.search(r"(?:مسافة|مسافه|تباعد|بينهم|مركزهم)\s*(?:بين(?:هم|مراكزهم)|مركزهم)?\s*(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", text)
         extra_num_m = None
         for nm in re.finditer(r"(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?(?!\s*(?:دوائر|دائرة|دايرة|circles?))", text):
+            if spacing_m and nm.start() >= spacing_m.start(1) and nm.end() <= spacing_m.end():
+                continue
             if not re.match(r"^\s*(?:دوائر|دائرة|دايرة|circles?)", text[nm.end():]):
                 extra_num_m = nm
                 break
@@ -519,7 +539,7 @@ def parse_and_generate(raw_prompt: str, output_dir: Path) -> dict[str, object]:
             )
 
         count_m = re.search(r"(\d+)\s*(?:دوائر|دائرة|دايرة|circles?)", text)
-        count = int(count_m.group(1)) if count_m else 1
+        count = max(1, int(count_m.group(1))) if count_m else 1
 
         if dia_m:
             val = float(dia_m.group(1))
@@ -546,7 +566,6 @@ def parse_and_generate(raw_prompt: str, output_dir: Path) -> dict[str, object]:
             dia_display = val
             dia_unit = extra_num_m.group(2) or "سم"
 
-        spacing_m = re.search(r"(?:مسافة|مسافه|تباعد|بينهم|مركزهم)\s*(?:بين(?:هم|مراكزهم)|مركزهم)?\s*(\d+(?:\.\d+)?)\s*(سم|متر|مم|cm|m|mm)?", text)
         if spacing_m:
             s_val = float(spacing_m.group(1))
             s_scale = _parse_unit_scale(spacing_m.group(2))
@@ -672,9 +691,10 @@ def parse_and_generate(raw_prompt: str, output_dir: Path) -> dict[str, object]:
                 output_dir,
                 "room",
             )
-        w = float(dim_m.group(1)) * 1000.0
-        h = float(dim_m.group(2)) * 1000.0
-        wall = 200.0
+        unit_scale = _parse_unit_scale(dim_m.group(3) or "متر")
+        w = float(dim_m.group(1)) * unit_scale
+        h = float(dim_m.group(2)) * unit_scale
+        wall = min(200.0, min(w, h) * 0.15)
 
         doc = ezdxf.new("R2010", setup=True)
         doc.header["$INSUNITS"] = 4
@@ -703,11 +723,18 @@ def parse_and_generate(raw_prompt: str, output_dir: Path) -> dict[str, object]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt", type=str, required=True)
+    prompt_group = parser.add_mutually_exclusive_group(required=True)
+    prompt_group.add_argument("--prompt", type=str)
+    prompt_group.add_argument("--prompt-file", type=Path)
     default_out = Path(__file__).resolve().parent.parent / "workspace" / "apartment_150sqm"
     parser.add_argument("--output-dir", type=Path, default=default_out)
     args = parser.parse_args()
-    result = parse_and_generate(args.prompt, args.output_dir)
+    prompt_text = (
+        args.prompt_file.read_text(encoding="utf-8")
+        if args.prompt_file is not None
+        else args.prompt
+    )
+    result = parse_and_generate(prompt_text, args.output_dir)
     # Output ASCII-safe JSON so ANY host codepage (cp1252, cp1256, utf-8) decodes cleanly
     print(json.dumps(result, ensure_ascii=True))
     return 0

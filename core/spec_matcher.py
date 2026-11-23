@@ -106,8 +106,8 @@ class ProjectSpecMatcher:
             except ValueError:
                 pass
 
-        # Extract ambient temperature e.g. "ambient temperature: 45 C" or "درجة الحرارة 50"
-        temp_match = re.search(r"(?:ambient|درجة\s+الحرارة|حرارة).{0,60}?(\d{2})\s*(?:°?C|مئوية)?", raw_text, re.IGNORECASE)
+        # Extract ambient temperature e.g. "ambient temperature: 45 C" or "درجة الحرارة 42.5"
+        temp_match = re.search(r"(?:ambient|درجة\s+الحرارة|حرارة).{0,60}?(\d{2}(?:\.\d+)?)\s*(?:°?C|مئوية)?", raw_text, re.IGNORECASE)
         if temp_match:
             try:
                 val = float(temp_match.group(1))
@@ -191,7 +191,10 @@ class ProjectSpecMatcher:
             avl = ()
 
         mfg_upper = manufacturer_name.strip().upper()
-        is_approved = any(mfg_upper in item or item in mfg_upper for item in avl)
+        is_approved = len(mfg_upper) >= 2 and any(
+            mfg_upper == item or mfg_upper in item.split() or item in mfg_upper
+            for item in avl
+        )
 
         status = ComplianceStatus.COMPLIANT if is_approved else ComplianceStatus.REQUIRES_REVIEW
 

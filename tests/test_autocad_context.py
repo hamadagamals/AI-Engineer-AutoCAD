@@ -658,7 +658,7 @@ def test_palette_source_is_loopback_only_read_only_and_bounded() -> None:
     assert "new PaletteSet(" in source
     assert 'new Uri("http://127.0.0.1:"' in source
     assert "handler.UseProxy = false" in source
-    assert "client.Timeout = TimeSpan.FromSeconds(75);" in source
+    assert "BridgeHttpClientFactory.GetSharedClient(75)" in source
     assert 'document.TryGetValue("detail", out raw)' in source
     assert "SafeText(detail, 384)" in source
     assert 'GetEnvironmentVariable("AI_ENGINEER_API_TOKEN")' in source
@@ -697,7 +697,7 @@ def test_palette_source_is_loopback_only_read_only_and_bounded() -> None:
 def test_autocad_project_agent_uses_reviewed_developer_loop() -> None:
     source = PALETTE_SOURCE.read_text(encoding="utf-8")
 
-    assert '_palette.Add("Project Agent", new ProjectAgentPaletteControl())' in source
+    assert '_legacyPalette.Add("Project Agent", new ProjectAgentPaletteControl())' in source
     assert "internal sealed class ProjectAgentPaletteControl" in source
     assert '"/v1/developer/runs"' in source
     assert '"/plan-review"' in source
@@ -869,7 +869,7 @@ def test_palette_manufacturer_discovery_requires_approved_request_and_no_actions
     assert 'choice.Controls.Add(_candidates, 0, 0);' in discovery
     assert '"Copy complete result"' in discovery
     assert 'Clipboard.SetText(_output.Text);' in discovery
-    assert 'client.Timeout = TimeSpan.FromSeconds(210);' in discovery
+    assert 'BridgeHttpClientFactory.GetSharedClient(210)' in discovery
     assert "OpenMode.ForWrite" not in discovery
     assert "SendStringToExecute" not in discovery
     assert "File.WriteAllText" not in discovery

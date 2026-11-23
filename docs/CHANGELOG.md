@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-23 - Audited Multi-Version AutoCAD + Revit Direct Copilot, IEC/ECP LV Calculator & DIALux STFF 1.0.5 Release
+
+- Applied the authoritative audited `AI-Engineer-AutoCAD-fixes` bundle (36 files updated/added, 6 obsolete files removed: `agent/scheduler.py`, `integrations/browser.py`, `integrations/excel.py`, and legacy `0.1.3`–`0.1.5` `.vsix` bundles).
+- **AutoCAD Direct Plugin (`integrations/autocad_context_plugin/`):**
+  - Added deterministic IEC 60364 / ECP LV calculator (`CadLvCalculationsTools.cs` / `calculate_lv_electrical`), single-tab Dark-Theme `AIENGPALETTE` + hidden `AIENGLEGACY` + shared `BridgeHttpClientFactory` (`PaletteCommands.cs`), canonical DIALux STFF 1.0.5 writer (`CadLightingAndDialuxTools.cs`), DPAPI API-key protection + shared `HttpClient` + strengthened Anti-Hallucination guards (`DirectCadAgent.cs`), deadlock-free WinMM voice recorder (`VoiceAssistant.cs`), and multi-version `2015–2030` `build.ps1` / `DwgVersion.Current` / reflection `TrySetFocusToDwgView` compatibility.
+  - Fixed OpenAPI 3.0 array `items` schema on `calculate_lv_electrical.circuits` in `DirectCadAgent.cs` (`34` tools, `0` schema errors), rebuilt `AIEngineer.AutoCAD.Context.dll` against AutoCAD 2021, and deployed to `ProgramData` and `%APPDATA%` bundles.
+- **Universal Multi-Version Revit Direct Plugin (`integrations/revit_direct_plugin/`):**
+  - Added `SimpleJson.cs`, `RevitCompat.cs` (`2015–2026+`, `.NET 4.x` + `net8.0-windows`), `RevitDirectConfigAndVoice.cs`, `RevitLvCalculationsTools.cs`, `RevitLightingAndDialuxTools.cs`, `RevitToolExecutor.cs`, `DirectRevitAgent.cs`, `RevitDockablePaneAndApp.cs`, `build.ps1`, and `.addin.template`.
+- **Python Core & Tests (`core/`, `integrations/`, `tests/`):**
+  - Fixed `ContextLayer.to_dict()` indentation in `integrations/autocad_context.py`, `copilot_instructions(request)` + no-redirect TLS handling in `integrations/claude_provider.py`, vendor/temperature matching in `core/spec_matcher.py`, offline fallback/header auth/word-boundary regexes in `integrations/cad_geometry_engine.py`, clean-checkout runtime defaults in `core/package_manager.py`, and aligned `tests/test_autocad_context.py` and `tests/test_claude_provider.py` (`create_egress_field` + `BridgeHttpClientFactory.GetSharedClient(210)`).
+
 ## 2026-11-01 - School V5 family and power-mark read-only foundation
 
 - Captured the exact loaded Revit family-type inventory: eight lighting types,

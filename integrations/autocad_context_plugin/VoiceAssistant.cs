@@ -9,6 +9,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
@@ -21,9 +22,9 @@ namespace AIEngineer.AutoCAD
         private const short Channels = 1;
         private const int BufferCount = 4;
         private const int BufferSize = 3200; // 100 ms @ 16kHz 16-bit mono
-        private const uint CALLBACK_FUNCTION = 0x00030000;
+        private const uint CALLBACK_EVENT = 0x00050000;
         private const uint WAVE_MAPPER = unchecked((uint)-1);
-        private const uint WIM_DATA = 0x3C0;
+        private const uint WHDR_DONE = 0x00000001;
 
         [StructLayout(LayoutKind.Sequential, Pack = 2)]
         private struct WAVEFORMATEX
@@ -50,8 +51,6 @@ namespace AIEngineer.AutoCAD
             public IntPtr reserved;
         }
 
-        private delegate void WaveInProc(IntPtr hwi, uint uMsg, IntPtr dwInstance, IntPtr dwParam1, IntPtr dwParam2);
-
         [DllImport("winmm.dll")]
         private static extern uint waveInGetNumDevs();
 
@@ -60,7 +59,7 @@ namespace AIEngineer.AutoCAD
             out IntPtr phwi,
             uint uDeviceID,
             ref WAVEFORMATEX pwfx,
-            WaveInProc dwCallback,
+            IntPtr dwCallback,
             IntPtr dwInstance,
             uint fdwOpen);
 
@@ -84,7 +83,8 @@ namespace AIEngineer.AutoCAD
 
         private readonly object _lock = new object();
         private IntPtr _hWaveIn = IntPtr.Zero;
-        private WaveInProc _callbackKeepAlive;
+        private AutoResetEvent _dataEvent;
+        private Thread _readerThread;
         private byte[][] _rawBuffers;
         private GCHandle[] _bufferPins;
         private IntPtr[] _headerPtrs;
@@ -123,11 +123,15 @@ namespace AIEngineer.AutoCAD
 
             _pcmStream = new MemoryStream();
             _stopping = false;
-            _callbackKeepAlive = OnWaveInMessage;
+            _dataEvent = new AutoResetEvent(false);
 
-            int openRes = waveInOpen(out _hWaveIn, WAVE_MAPPER, ref fmt, _callbackKeepAlive, IntPtr.Zero, CALLBACK_FUNCTION);
+            IntPtr eventHandle = _dataEvent.SafeWaitHandle.DangerousGetHandle();
+            int openRes = waveInOpen(out _hWaveIn, WAVE_MAPPER, ref fmt, eventHandle, IntPtr.Zero, CALLBACK_EVENT);
             if (openRes != 0 || _hWaveIn == IntPtr.Zero)
+            {
+                CleanupDevice();
                 throw new InvalidOperationException("تعذر فتح الميكروفون للتسجيل (waveInOpen code=" + openRes + "). تأكد من أذونات الميكروفون في Windows.");
+            }
 
             _rawBuffers = new byte[BufferCount][];
             _bufferPins = new GCHandle[BufferCount];
@@ -169,6 +173,10 @@ namespace AIEngineer.AutoCAD
 
                 _startedUtc = DateTime.UtcNow;
                 _recording = true;
+                _readerThread = new Thread(ReaderLoop);
+                _readerThread.IsBackground = true;
+                _readerThread.Name = "AIEngineer.WaveInReader";
+                _readerThread.Start();
             }
             catch
             {
@@ -177,29 +185,59 @@ namespace AIEngineer.AutoCAD
             }
         }
 
-        private void OnWaveInMessage(IntPtr hwi, uint uMsg, IntPtr dwInstance, IntPtr dwParam1, IntPtr dwParam2)
+        private void ReaderLoop()
         {
-            if (uMsg != WIM_DATA || dwParam1 == IntPtr.Zero) return;
-            try
+            int hdrSize = Marshal.SizeOf(typeof(WAVEHDR));
+            while (!_stopping)
             {
-                WAVEHDR hdr = (WAVEHDR)Marshal.PtrToStructure(dwParam1, typeof(WAVEHDR));
-                if (hdr.dwBytesRecorded > 0 && hdr.lpData != IntPtr.Zero)
+                AutoResetEvent ev = _dataEvent;
+                if (ev == null) break;
+                try { ev.WaitOne(100); }
+                catch { break; }
+                DrainCompletedBuffers(hdrSize, !_stopping);
+            }
+            // Final drain after waveInReset so trailing speech is preserved.
+            DrainCompletedBuffers(hdrSize, false);
+        }
+
+        private void DrainCompletedBuffers(int hdrSize, bool requeue)
+        {
+            IntPtr[] ptrs = _headerPtrs;
+            IntPtr handle = _hWaveIn;
+            if (ptrs == null) return;
+
+            for (int i = 0; i < ptrs.Length; i++)
+            {
+                IntPtr ptr = ptrs[i];
+                if (ptr == IntPtr.Zero) continue;
+                try
                 {
-                    int n = (int)hdr.dwBytesRecorded;
-                    byte[] chunk = new byte[n];
-                    Marshal.Copy(hdr.lpData, chunk, 0, n);
-                    lock (_lock)
+                    WAVEHDR hdr = (WAVEHDR)Marshal.PtrToStructure(ptr, typeof(WAVEHDR));
+                    if ((hdr.dwFlags & WHDR_DONE) == 0) continue;
+
+                    if (hdr.dwBytesRecorded > 0 && hdr.lpData != IntPtr.Zero)
                     {
-                        if (_pcmStream != null)
-                            _pcmStream.Write(chunk, 0, n);
+                        int n = (int)Math.Min(hdr.dwBytesRecorded, (uint)BufferSize);
+                        byte[] chunk = new byte[n];
+                        Marshal.Copy(hdr.lpData, chunk, 0, n);
+                        lock (_lock)
+                        {
+                            if (_pcmStream != null)
+                                _pcmStream.Write(chunk, 0, n);
+                        }
+                    }
+
+                    hdr.dwBytesRecorded = 0;
+                    hdr.dwFlags &= ~WHDR_DONE;
+                    Marshal.StructureToPtr(hdr, ptr, false);
+
+                    if (requeue && !_stopping && handle != IntPtr.Zero)
+                    {
+                        waveInAddBuffer(handle, ptr, hdrSize);
                     }
                 }
-                if (!_stopping && _hWaveIn != IntPtr.Zero)
-                {
-                    waveInAddBuffer(_hWaveIn, dwParam1, Marshal.SizeOf(typeof(WAVEHDR)));
-                }
+                catch { }
             }
-            catch { }
         }
 
         public byte[] StopAndGetWavBytes(out double durationSec, out int peakAmplitude)
@@ -259,12 +297,27 @@ namespace AIEngineer.AutoCAD
 
         private void CleanupDevice()
         {
+            _stopping = true;
             IntPtr handle = _hWaveIn;
-            _hWaveIn = IntPtr.Zero;
             if (handle != IntPtr.Zero)
             {
                 try { waveInReset(handle); } catch { }
             }
+
+            AutoResetEvent ev = _dataEvent;
+            if (ev != null)
+            {
+                try { ev.Set(); } catch { }
+            }
+
+            Thread reader = _readerThread;
+            _readerThread = null;
+            if (reader != null && reader.IsAlive && reader != Thread.CurrentThread)
+            {
+                try { reader.Join(1500); } catch { }
+            }
+
+            _hWaveIn = IntPtr.Zero;
 
             int hdrSize = Marshal.SizeOf(typeof(WAVEHDR));
             if (_headerPtrs != null)
@@ -300,6 +353,12 @@ namespace AIEngineer.AutoCAD
                 }
             }
 
+            if (ev != null)
+            {
+                _dataEvent = null;
+                try { ev.Dispose(); } catch { }
+            }
+
             _rawBuffers = null;
             _bufferPins = null;
             _headerPtrs = null;
@@ -323,17 +382,17 @@ namespace AIEngineer.AutoCAD
 
     internal static class VoiceTranscriber
     {
-        private static readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
         private static readonly HttpClient _http = CreateHttpClient();
+
+        private static JavaScriptSerializer CreateJson()
+        {
+            return new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
+        }
 
         private static HttpClient CreateHttpClient()
         {
-            try
-            {
-                ServicePointManager.SecurityProtocol |=
-                    SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls;
-            }
-            catch { }
+            try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
+            try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)12288; } catch { } // TLS 1.3 when supported
             HttpClient c = new HttpClient();
             c.Timeout = TimeSpan.FromSeconds(90);
             return c;
@@ -452,30 +511,34 @@ namespace AIEngineer.AutoCAD
                 }
             };
 
-            string jsonPayload = _json.Serialize(body);
+            JavaScriptSerializer json = CreateJson();
+            string jsonPayload = json.Serialize(body);
             string lastErr = "Gemini audio request failed.";
 
             for (int i = 0; i < models.Count; i++)
             {
                 string m = models[i];
                 string url = "https://generativelanguage.googleapis.com/v1beta/models/" +
-                             Uri.EscapeDataString(m) + ":generateContent?key=" + Uri.EscapeDataString(apiKey.Trim());
+                             Uri.EscapeDataString(m) + ":generateContent";
                 try
                 {
                     using (HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url))
                     {
                         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                        req.Headers.TryAddWithoutValidation("x-goog-api-key", apiKey.Trim());
                         req.Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-                        HttpResponseMessage resp = _http.SendAsync(req).GetAwaiter().GetResult();
-                        string raw = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                        if (!resp.IsSuccessStatusCode)
+                        using (HttpResponseMessage resp = _http.SendAsync(req).GetAwaiter().GetResult())
                         {
-                            lastErr = "HTTP " + (int)resp.StatusCode + ": " + ExtractApiErr(raw);
-                            continue;
+                            string raw = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                            if (!resp.IsSuccessStatusCode)
+                            {
+                                lastErr = "HTTP " + (int)resp.StatusCode + ": " + ExtractApiErr(raw);
+                                continue;
+                            }
+                            Dictionary<string, object> doc = json.DeserializeObject(raw) as Dictionary<string, object>;
+                            string text = ExtractGeminiText(doc);
+                            return text ?? "";
                         }
-                        Dictionary<string, object> doc = _json.DeserializeObject(raw) as Dictionary<string, object>;
-                        string text = ExtractGeminiText(doc);
-                        return text ?? "";
                     }
                 }
                 catch (Exception ex)
@@ -493,6 +556,7 @@ namespace AIEngineer.AutoCAD
             string[] models = new string[] { "gpt-4o-mini-transcribe", "whisper-1" };
             string prompt = "AutoCAD CAD/MEP engineering speech in Arabic dialects (Egyptian, Gulf, Levantine, MSA) mixed with English terms like Leader, Polyline, Line, Block, Select, FRAM SITE, WALL LIGHT, SPOT, BOLLARD, DIALux, Excel, X, Y.";
             string lastErr = "OpenAI transcription failed.";
+            JavaScriptSerializer json = CreateJson();
 
             for (int i = 0; i < models.Length; i++)
             {
@@ -510,17 +574,19 @@ namespace AIEngineer.AutoCAD
                         {
                             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
                             req.Content = form;
-                            HttpResponseMessage resp = _http.SendAsync(req).GetAwaiter().GetResult();
-                            string raw = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                            if (!resp.IsSuccessStatusCode)
+                            using (HttpResponseMessage resp = _http.SendAsync(req).GetAwaiter().GetResult())
                             {
-                                lastErr = "HTTP " + (int)resp.StatusCode + ": " + ExtractApiErr(raw);
-                                continue;
+                                string raw = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                                if (!resp.IsSuccessStatusCode)
+                                {
+                                    lastErr = "HTTP " + (int)resp.StatusCode + ": " + ExtractApiErr(raw);
+                                    continue;
+                                }
+                                Dictionary<string, object> doc = json.DeserializeObject(raw) as Dictionary<string, object>;
+                                if (doc != null && doc.ContainsKey("text") && doc["text"] != null)
+                                    return doc["text"].ToString().Trim();
+                                return "";
                             }
-                            Dictionary<string, object> doc = _json.DeserializeObject(raw) as Dictionary<string, object>;
-                            if (doc != null && doc.ContainsKey("text") && doc["text"] != null)
-                                return doc["text"].ToString().Trim();
-                            return "";
                         }
                     }
                 }
@@ -560,7 +626,7 @@ namespace AIEngineer.AutoCAD
             if (string.IsNullOrWhiteSpace(raw)) return "empty response";
             try
             {
-                Dictionary<string, object> doc = _json.DeserializeObject(raw) as Dictionary<string, object>;
+                Dictionary<string, object> doc = CreateJson().DeserializeObject(raw) as Dictionary<string, object>;
                 if (doc != null && doc.ContainsKey("error") && doc["error"] is Dictionary<string, object>)
                 {
                     Dictionary<string, object> err = (Dictionary<string, object>)doc["error"];

@@ -168,6 +168,16 @@ class ContextLayer:
     is_frozen: bool
     is_locked: bool
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "color_index": self.color_index,
+            "linetype": self.linetype,
+            "is_off": self.is_off,
+            "is_frozen": self.is_frozen,
+            "is_locked": self.is_locked,
+        }
+
 
 def _compatible_limits(supplied: ContextLimits, policy: ContextLimits) -> bool:
     """Accept exact policy or a legacy context whose only stricter bound is points."""
@@ -180,16 +190,6 @@ def _compatible_limits(supplied: ContextLimits, policy: ContextLimits) -> bool:
         elif value != policy_values[name]:
             return False
     return True
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "name": self.name,
-            "color_index": self.color_index,
-            "linetype": self.linetype,
-            "is_off": self.is_off,
-            "is_frozen": self.is_frozen,
-            "is_locked": self.is_locked,
-        }
 
 
 @dataclass(frozen=True, slots=True)

@@ -90,6 +90,13 @@ class ClaudeProviderConfig:
         )
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse HTTP redirects so API credentials cannot leave the fixed host."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        raise ProviderError("Claude API redirects are not permitted.")
+
+
 def _default_post(
     url: str,
     headers: Mapping[str, str],
@@ -106,7 +113,11 @@ def _default_post(
         headers=dict(headers),
         method="POST",
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirectHandler(),
+        urllib.request.HTTPSHandler(context=context),
+    )
     try:
         with opener.open(request, timeout=timeout_seconds) as response:
             payload = response.read(_MAX_RESPONSE_BYTES + 1)
@@ -200,7 +211,7 @@ class ClaudeMessagesClient:
         return self._call(system, user_prompt)
 
     def generate_copilot(self, request: CopilotProviderRequest) -> str:
-        instructions = copilot_instructions(request.language)
+        instructions = copilot_instructions(request)
         system = (
             "You are a professional local electrical-engineering CAD/BIM copilot. "
             "You MUST answer strictly based on provided context without hallucinations. "

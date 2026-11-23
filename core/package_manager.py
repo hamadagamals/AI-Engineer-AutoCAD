@@ -437,12 +437,22 @@ def _portable_data_templates(project_root: Path) -> dict[str, bytes]:
 def _runtime_defaults(
     project_root: Path, error_type: type[Exception]
 ) -> dict[str, dict[str, Any]]:
-    settings = _decode_json_document(
-        _read_bounded(project_root / "data" / "settings.json", error_type), error_type
-    )
-    mission = _decode_json_document(
-        _read_bounded(project_root / "data" / "mission.json", error_type), error_type
-    )
+    settings_path = project_root / "data" / "settings.json"
+    if settings_path.is_file():
+        settings = _decode_json_document(_read_bounded(settings_path, error_type), error_type)
+    else:
+        settings = {"schema_version": 1, "log_level": "INFO"}
+    mission_path = project_root / "data" / "mission.json"
+    if mission_path.is_file():
+        mission = _decode_json_document(_read_bounded(mission_path, error_type), error_type)
+    else:
+        mission = {
+            "schema_version": 1,
+            "project": "AI-Engineer",
+            "mission": "Safe local agent",
+            "current_milestone": 23,
+            "status": "active",
+        }
     defaults = {
         "agent_state.json": {
             "schema_version": 1,

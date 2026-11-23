@@ -421,8 +421,8 @@ namespace AIEngineer.AutoCAD
 
                 RegexOptions rxOpts = matchCase ? RegexOptions.None : RegexOptions.IgnoreCase;
                 Regex rx = useRegex
-                    ? new Regex(findText, rxOpts)
-                    : new Regex(Regex.Escape(findText), rxOpts);
+                    ? new Regex(findText, rxOpts, TimeSpan.FromSeconds(1.0))
+                    : new Regex(Regex.Escape(findText), rxOpts, TimeSpan.FromSeconds(1.0));
 
                 Dictionary<ObjectId, ModifiedEntitySnapshot> snapById = new Dictionary<ObjectId, ModifiedEntitySnapshot>();
                 List<ObjectId> matchedEntityIds = new List<ObjectId>();

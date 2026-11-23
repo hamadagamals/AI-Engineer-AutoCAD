@@ -846,6 +846,8 @@ namespace AIEngineer.AutoCAD
 
         private static XmlDocument LoadXmlFromEntry(ZipArchiveEntry entry)
         {
+            if (entry.Length > 50L * 1024L * 1024L)
+                throw new InvalidDataException("Spreadsheet XML entry exceeds 50 MB safety limit.");
             XmlDocument doc = new XmlDocument();
             doc.XmlResolver = null;
             using (Stream s = entry.Open())

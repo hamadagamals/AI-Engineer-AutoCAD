@@ -1666,8 +1666,7 @@ namespace AIEngineer.AutoCAD
                     try { cmdActive = Convert.ToInt32(AcadApp.GetSystemVariable("CMDACTIVE"), CultureInfo.InvariantCulture); } catch { }
                     if (cmdActive == 0)
                     {
-                        try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
-                        catch { try { doc.Window.Focus(); } catch { } }
+                        TrySetFocusToDwgView(doc);
                         PromptSelectionOptions pso = new PromptSelectionOptions();
                         pso.MessageForAdding = "\n[AI-Engineer] اختر عينة سهم واحد (الخط الأفقي + الخط المائل + رأس السهم) واضغط Enter: ";
                         PromptSelectionResult psr = doc.Editor.GetSelection(pso);

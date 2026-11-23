@@ -23,6 +23,27 @@ namespace AIEngineer.AutoCAD
         private const int MaxUndoStepsPerDocument = 30;
         private const int BulkLayerSafetyThreshold = 100;
 
+        private static void TrySetFocusToDwgView(Document doc)
+        {
+            try
+            {
+                Type utilsType = typeof(Autodesk.AutoCAD.ApplicationServices.Application).Assembly.GetType("Autodesk.AutoCAD.Internal.Utils", false);
+                if (utilsType != null)
+                {
+                    MethodInfo focusMethod = utilsType.GetMethod(
+                        "SetFocusToDwgView",
+                        BindingFlags.Static | BindingFlags.Public);
+                    if (focusMethod != null)
+                    {
+                        focusMethod.Invoke(null, null);
+                        return;
+                    }
+                }
+            }
+            catch { }
+            try { if (doc != null) doc.Window.Focus(); } catch { }
+        }
+
         private sealed class SavedColorState
         {
             public ColorMethod Method;
@@ -81,37 +102,54 @@ namespace AIEngineer.AutoCAD
         }
 
         private static readonly object _undoLock = new object();
-        private static readonly Dictionary<long, List<CadUndoEntry>> _undoStacks = new Dictionary<long, List<CadUndoEntry>>();
+        private static readonly ConditionalWeakTable<Database, List<CadUndoEntry>> _undoStacks = new ConditionalWeakTable<Database, List<CadUndoEntry>>();
+        private static bool _docDestroyedHooked = false;
         private static int _undoSeq = 0;
 
-        private static long GetDocUndoKey(Document doc)
+        private static void EnsureDocDestroyedHook()
         {
-            if (doc == null || doc.Database == null) return 0;
+            if (_docDestroyedHooked) return;
             try
             {
-                long ptr = doc.Database.UnmanagedObject.ToInt64();
-                if (ptr != 0) return ptr;
+                DocumentCollection dm = Application.DocumentManager;
+                if (dm != null)
+                {
+                    dm.DocumentToBeDestroyed += OnDocumentToBeDestroyed;
+                    _docDestroyedHooked = true;
+                }
             }
             catch { }
-            return RuntimeHelpers.GetHashCode(doc.Database);
+        }
+
+        private static void OnDocumentToBeDestroyed(object sender, DocumentCollectionEventArgs e)
+        {
+            try
+            {
+                if (e == null || e.Document == null || e.Document.Database == null) return;
+                lock (_undoLock)
+                {
+                    _undoStacks.Remove(e.Document.Database);
+                }
+            }
+            catch { }
         }
 
         private static void PushUndoEntry(Document doc, CadUndoEntry entry)
         {
-            if (doc == null || entry == null) return;
+            if (doc == null || doc.Database == null || entry == null) return;
             if (entry.CreatedIds.Count == 0 && entry.ErasedIds.Count == 0 &&
                 entry.ModifiedSnapshots.Count == 0 && entry.BlockRecordRenames.Count == 0 &&
                 entry.CreatedBlockRecordIds.Count == 0)
                 return;
-            long key = GetDocUndoKey(doc);
-            if (key == 0) return;
+            Database db = doc.Database;
             lock (_undoLock)
             {
+                EnsureDocDestroyedHook();
                 List<CadUndoEntry> stack;
-                if (!_undoStacks.TryGetValue(key, out stack))
+                if (!_undoStacks.TryGetValue(db, out stack))
                 {
                     stack = new List<CadUndoEntry>();
-                    _undoStacks[key] = stack;
+                    _undoStacks.Add(db, stack);
                 }
                 entry.ActionId = "undo_" + (++_undoSeq).ToString(CultureInfo.InvariantCulture);
                 entry.TimestampUtc = DateTime.UtcNow;
@@ -123,12 +161,11 @@ namespace AIEngineer.AutoCAD
 
         internal static int GetUndoHistoryCount(Document doc)
         {
-            long key = GetDocUndoKey(doc);
-            if (key == 0) return 0;
+            if (doc == null || doc.Database == null) return 0;
             lock (_undoLock)
             {
                 List<CadUndoEntry> stack;
-                return _undoStacks.TryGetValue(key, out stack) ? stack.Count : 0;
+                return _undoStacks.TryGetValue(doc.Database, out stack) ? stack.Count : 0;
             }
         }
 
@@ -294,6 +331,8 @@ namespace AIEngineer.AutoCAD
                         return LightingDesignEngine(doc, args);
                     case "export_dialux_stf":
                         return ExportDialuxStf(doc, args);
+                    case "calculate_lv_electrical":
+                        return CalculateLvElectrical(doc, args);
                     case "manage_layers":
                         return ManageLayers(doc, args);
                     case "measure_and_compare":
@@ -363,7 +402,7 @@ namespace AIEngineer.AutoCAD
                 "convert_matching_shapes_to_block", "annotate_block_coordinates", "convert_arrows_to_leaders", "export_to_excel", "import_excel_table",
                 "extract_load_schedule", "quantity_takeoff", "find_blocks_along_path", "manage_attributes", "text_tools",
                 "advanced_geometry_ops", "drawing_qa_cleanup", "layout_and_plot_tools", "manage_block_library",
-                "lighting_design_engine", "export_dialux_stf",
+                "lighting_design_engine", "export_dialux_stf", "calculate_lv_electrical",
                 "manage_layers", "measure_and_compare", "duplicate_drawing", "zoom_view", "execute_template",
                 "approve_or_rollback_preview", "get_plugin_diagnostics"
             };
@@ -2882,13 +2921,13 @@ namespace AIEngineer.AutoCAD
         private static Dictionary<string, object> UndoLastAction(Document doc, Dictionary<string, object> args)
         {
             string action = (GetStr(args, "action") ?? "undo").Trim().ToLowerInvariant();
-            long key = GetDocUndoKey(doc);
+            Database undoDb = doc != null ? doc.Database : null;
 
             List<CadUndoEntry> snapshotList = new List<CadUndoEntry>();
             lock (_undoLock)
             {
                 List<CadUndoEntry> stack;
-                if (key != 0 && _undoStacks.TryGetValue(key, out stack))
+                if (undoDb != null && _undoStacks.TryGetValue(undoDb, out stack))
                     snapshotList.AddRange(stack);
             }
 
@@ -3091,7 +3130,7 @@ namespace AIEngineer.AutoCAD
             lock (_undoLock)
             {
                 List<CadUndoEntry> stack;
-                if (key != 0 && _undoStacks.TryGetValue(key, out stack))
+                if (undoDb != null && _undoStacks.TryGetValue(undoDb, out stack))
                 {
                     int removeN = Math.Min(countToUndo, stack.Count);
                     if (removeN > 0) stack.RemoveRange(stack.Count - removeN, removeN);
@@ -8069,8 +8108,7 @@ namespace AIEngineer.AutoCAD
             }
             catch { }
 
-            try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
-            catch { try { doc.Window.Focus(); } catch { } }
+            TrySetFocusToDwgView(doc);
 
             PromptEntityOptions peo = new PromptEntityOptions(
                 "\n[AI-Engineer] Click the reference Leader arrow whose position inside the block should be applied to all matching blocks: ");
@@ -8459,8 +8497,7 @@ namespace AIEngineer.AutoCAD
                 tr.Commit();
             }
 
-            try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
-            catch { try { doc.Window.Focus(); } catch { } }
+            TrySetFocusToDwgView(doc);
 
             if (resolvedId.IsNull)
             {
@@ -8525,8 +8562,7 @@ namespace AIEngineer.AutoCAD
                     try { ZoomToExtents3d(doc, sampleExt.Value, 2.2); } catch { }
                 }
 
-                try { Autodesk.AutoCAD.Internal.Utils.SetFocusToDwgView(); }
-                catch { try { doc.Window.Focus(); } catch { } }
+                TrySetFocusToDwgView(doc);
 
                 while (pickedLocalPoints.Count < 32)
                 {
@@ -11581,7 +11617,7 @@ namespace AIEngineer.AutoCAD
 				string text2 = GetStr(args, "file_path");
 				if (string.IsNullOrWhiteSpace(text2))
 				{
-					string text3 = "D:\\program\\apartment_150sqm";
+					string text3 = DrawingExecutionCommands.ResolveOutputDirectory(doc, "output");
 					Directory.CreateDirectory(text3);
 					string text4 = Path.GetFileNameWithoutExtension(doc.Name ?? "drawing");
 					if (string.IsNullOrWhiteSpace(text4))
@@ -11617,7 +11653,7 @@ namespace AIEngineer.AutoCAD
 					}
 					using (Database database2 = database.Wblock(objectIdCollection, Point3d.Origin))
 					{
-						database2.SaveAs(text2, DwgVersion.AC1032);
+						database2.SaveAs(text2, DwgVersion.Current);
 					}
 				}
 				Dictionary<string, object> dictionary = new Dictionary<string, object>();

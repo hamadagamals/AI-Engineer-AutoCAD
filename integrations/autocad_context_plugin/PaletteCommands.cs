@@ -19,9 +19,44 @@ using Autodesk.AutoCAD.Windows;
 
 namespace AIEngineer.AutoCAD
 {
+    internal static class BridgeHttpClientFactory
+    {
+        private static readonly object _sync = new object();
+        private static readonly Dictionary<string, HttpClient> _clients = new Dictionary<string, HttpClient>();
+
+        public static HttpClient GetSharedClient(int timeoutSeconds)
+        {
+            int port = 8765;
+            int parsed;
+            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
+            if (!String.IsNullOrWhiteSpace(configured) &&
+                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
+                parsed >= 1024 && parsed <= 65535)
+                port = parsed;
+
+            int safeTimeout = timeoutSeconds > 0 ? timeoutSeconds : 15;
+            string key = port.ToString(CultureInfo.InvariantCulture) + ":" + safeTimeout.ToString(CultureInfo.InvariantCulture);
+            lock (_sync)
+            {
+                HttpClient existing;
+                if (_clients.TryGetValue(key, out existing))
+                    return existing;
+
+                HttpClientHandler handler = new HttpClientHandler();
+                handler.UseProxy = false;
+                HttpClient client = new HttpClient(handler);
+                client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
+                client.Timeout = TimeSpan.FromSeconds(safeTimeout);
+                _clients[key] = client;
+                return client;
+            }
+        }
+    }
+
     public sealed class PaletteCommands
     {
         private static PaletteSet _palette;
+        private static PaletteSet _legacyPalette;
 
         [CommandMethod("AIENGPALETTE", CommandFlags.Session)]
         public void ShowPalette()
@@ -35,17 +70,34 @@ namespace AIEngineer.AutoCAD
                     PaletteSetStyles.ShowPropertiesMenu;
                 _palette.DockEnabled = DockSides.Left | DockSides.Right;
                 _palette.MinimumSize = new Size(340, 480);
-                _palette.Add("Copilot", new CopilotPaletteControl());
-                _palette.Add("Project Agent", new ProjectAgentPaletteControl());
-                _palette.Add("Drafting Preview", new DraftingPreviewPaletteControl());
-                _palette.Add("Quantity Takeoff", new QuantityTakeoffPaletteControl());
-                _palette.Add("LV Calculations", new LowVoltageCalculationPaletteControl());
-                _palette.Add("Panels / SLD", new PanelSldPaletteControl());
-                _palette.Add("Code Compliance", new CompliancePaletteControl());
-                _palette.Add("Product Discovery", new ManufacturerDiscoveryPaletteControl());
-                _palette.Add("Manufacturers", new ManufacturerReviewPaletteControl());
+                // Clean single-tab Direct AI workspace (zero legacy side-tab clutter).
+                _palette.Add("AI-Engineer", new CopilotPaletteControl());
             }
             _palette.Visible = true;
+        }
+
+        [CommandMethod("AIENGLEGACY", CommandFlags.Session)]
+        public void ShowLegacyBridgePalette()
+        {
+            if (_legacyPalette == null)
+            {
+                _legacyPalette = new PaletteSet(
+                    "AI-Engineer Legacy Bridge", "AIENGLEGACY", new Guid("9e2f8c74-5a4d-4d6f-9c12-4c7d6e9b2a11"));
+                _legacyPalette.Style = PaletteSetStyles.ShowAutoHideButton |
+                    PaletteSetStyles.ShowCloseButton |
+                    PaletteSetStyles.ShowPropertiesMenu;
+                _legacyPalette.DockEnabled = DockSides.Left | DockSides.Right;
+                _legacyPalette.MinimumSize = new Size(340, 480);
+                _legacyPalette.Add("Project Agent", new ProjectAgentPaletteControl());
+                _legacyPalette.Add("Drafting Preview", new DraftingPreviewPaletteControl());
+                _legacyPalette.Add("Quantity Takeoff", new QuantityTakeoffPaletteControl());
+                _legacyPalette.Add("LV Calculations", new LowVoltageCalculationPaletteControl());
+                _legacyPalette.Add("Panels / SLD", new PanelSldPaletteControl());
+                _legacyPalette.Add("Code Compliance", new CompliancePaletteControl());
+                _legacyPalette.Add("Product Discovery", new ManufacturerDiscoveryPaletteControl());
+                _legacyPalette.Add("Manufacturers", new ManufacturerReviewPaletteControl());
+            }
+            _legacyPalette.Visible = true;
         }
     }
 
@@ -86,19 +138,7 @@ namespace AIEngineer.AutoCAD
 
         private static HttpClient CreateClient()
         {
-            int port = 8765;
-            int parsed;
-            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
-            if (!String.IsNullOrWhiteSpace(configured) &&
-                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
-                parsed >= 1024 && parsed <= 65535)
-                port = parsed;
-            HttpClientHandler handler = new HttpClientHandler();
-            handler.UseProxy = false;
-            HttpClient client = new HttpClient(handler);
-            client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
-            client.Timeout = TimeSpan.FromSeconds(120);
-            return client;
+            return BridgeHttpClientFactory.GetSharedClient(120);
         }
 
         private void BuildLayout()
@@ -617,6 +657,13 @@ namespace AIEngineer.AutoCAD
         private readonly Label _coordSortLabel = new Label();
         private readonly ComboBox _coordSortCombo = new ComboBox();
         private readonly FlowLayoutPanel _sortRow = new FlowLayoutPanel();
+        private readonly FlowLayoutPanel _quickBar = new FlowLayoutPanel();
+        private readonly Button _qLighting = new Button();
+        private readonly Button _qTakeoff = new Button();
+        private readonly Button _qLvCalc = new Button();
+        private readonly Button _qLegend = new Button();
+        private readonly Button _qLoads = new Button();
+        private readonly Button _qQa = new Button();
         private readonly Label _context = new Label();
         private readonly Label _uncertainty = new Label();
         private readonly TextBox _transcript = new TextBox();
@@ -671,19 +718,7 @@ namespace AIEngineer.AutoCAD
 
         private static HttpClient CreateClient()
         {
-            int port = 8765;
-            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
-            int parsed;
-            if (!String.IsNullOrWhiteSpace(configured) &&
-                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
-                parsed >= 1024 && parsed <= 65535)
-                port = parsed;
-            HttpClientHandler handler = new HttpClientHandler();
-            handler.UseProxy = false;
-            HttpClient client = new HttpClient(handler);
-            client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
-            client.Timeout = TimeSpan.FromSeconds(75);
-            return client;
+            return BridgeHttpClientFactory.GetSharedClient(75);
         }
 
         private void BuildLayout()
@@ -694,7 +729,7 @@ namespace AIEngineer.AutoCAD
             layout.Dock = DockStyle.Fill;
             layout.ColumnCount = 1;
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            layout.RowCount = 10;
+            layout.RowCount = 11;
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -702,7 +737,8 @@ namespace AIEngineer.AutoCAD
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
@@ -902,6 +938,59 @@ namespace AIEngineer.AutoCAD
             actionButtons.Controls.Add(_rollbackDrawing);
             actionButtons.Controls.Add(_cancel);
 
+            _quickBar.Dock = DockStyle.Fill;
+            _quickBar.AutoSize = true;
+            _quickBar.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _quickBar.WrapContents = true;
+            _quickBar.Margin = new Padding(0, 3, 0, 2);
+            Button[] quickButtons = new Button[] { _qLighting, _qTakeoff, _qLvCalc, _qLegend, _qLoads, _qQa };
+            foreach (Button qb in quickButtons)
+            {
+                qb.AutoSize = true;
+                qb.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                qb.Margin = new Padding(2);
+                qb.Padding = new Padding(5, 2, 5, 2);
+                qb.FlatStyle = FlatStyle.Flat;
+                qb.Cursor = Cursors.Hand;
+                _quickBar.Controls.Add(qb);
+            }
+            _qLighting.Click += delegate
+            {
+                InsertEditablePrompt(
+                    "وزّع الإنارة في الغرف حسب الكود المصري (ECP) واحسب اللكس وصدّر الجدول لإكسيل",
+                    "Distribute lighting in closed rooms per ECP standard, calculate Lux, and export schedule to Excel");
+            };
+            _qTakeoff.Click += delegate
+            {
+                InsertEditablePrompt(
+                    "احسب حصر الكميات (أطوال المسارات حسب الطبقة ومساحات الغرف وأعداد البلوكات) مع هالك 10% وصدّر لإكسيل",
+                    "Run full BOQ quantity takeoff (cable lengths by layer, room areas, block counts) with 10% waste and export to Excel");
+            };
+            _qLvCalc.Click += delegate
+            {
+                InsertEditablePrompt(
+                    "احسب الكابل والقاطع وهبوط الجهد وقصر الدائرة لحمل 3 فاز 25 ك.وات طول 45 متر نحاس XLPE عند 40 درجة وارسم الجدول وصدّر لإكسيل",
+                    "Calculate LV cable size, breaker rating, voltage drop, PE, and short-circuit for 3-phase 25 kW load, 45m Cu/XLPE at 40C, draw table and export to Excel");
+            };
+            _qLegend.Click += delegate
+            {
+                InsertEditablePrompt(
+                    "اعمل جدول مفاتيح البلوكات (Legend) خارج حدود الرسم مع صورة كل بلوك والوصف والعدد",
+                    "Draw a formatted Block Legend outside the drawing bounds with thumbnails, descriptions, and counts");
+            };
+            _qLoads.Click += delegate
+            {
+                InsertEditablePrompt(
+                    "استخرج جدول الأحمال الكهربائية من بلوكات اللوحة مع تتبع مسارات التغذية وصدّره لإكسيل",
+                    "Extract the electrical panel load schedule from circuit blocks with feeder lengths and export to Excel");
+            };
+            _qQa.Click += delegate
+            {
+                InsertEditablePrompt(
+                    "افحص اللوحة واحذف البلوكات المكررة والخطوط المتراكبة ونظّف الرسم بالكامل",
+                    "Run QA/QC cleanup: audit duplicate blocks, overkill overlapping lines, and purge unused definitions");
+            };
+
             layout.SizeChanged += delegate
             {
                 int clientW = Math.Max(160, layout.ClientSize.Width);
@@ -911,6 +1000,7 @@ namespace AIEngineer.AutoCAD
                 topRow.MaximumSize = rowMaxSz;
                 modelRow.MaximumSize = rowMaxSz;
                 _sortRow.MaximumSize = rowMaxSz;
+                _quickBar.MaximumSize = rowMaxSz;
                 contextButtons.MaximumSize = rowMaxSz;
                 actionButtons.MaximumSize = rowMaxSz;
                 int singleComboW = Math.Min(215, Math.Max(168, wrapW - 4));
@@ -935,10 +1025,12 @@ namespace AIEngineer.AutoCAD
             layout.Controls.Add(_uncertainty, 0, 4);
             layout.Controls.Add(contextButtons, 0, 5);
             layout.Controls.Add(_transcript, 0, 6);
-            layout.Controls.Add(_message, 0, 7);
-            layout.Controls.Add(actionButtons, 0, 8);
-            layout.Controls.Add(_status, 0, 9);
+            layout.Controls.Add(_quickBar, 0, 7);
+            layout.Controls.Add(_message, 0, 8);
+            layout.Controls.Add(actionButtons, 0, 9);
+            layout.Controls.Add(_status, 0, 10);
             Controls.Add(layout);
+            ApplyModernDarkTheme();
 
             _refresh.Click += delegate { RefreshContext(); };
             _start.Click += async delegate { await StartSession(); };
@@ -1104,6 +1196,79 @@ namespace AIEngineer.AutoCAD
             _modelCombo.Text = _directConfig.GetModel(SelectedProvider);
         }
 
+        private void InsertEditablePrompt(string arabicPrompt, string englishPrompt)
+        {
+            string prompt = IsArabic ? arabicPrompt : englishPrompt;
+            _message.Text = prompt;
+            _message.Focus();
+            _message.SelectionStart = _message.TextLength;
+            _message.SelectionLength = 0;
+            SetStatus(IsArabic ? "تم تعبئة الأمر — يمكنك التعديل عليه ثم الضغط على Enter أو «اسأل AI»." : "Prompt inserted — edit if needed and press Enter or Ask AI.");
+        }
+
+        private void ApplyModernDarkTheme()
+        {
+            Color bgMain = Color.FromArgb(34, 37, 42);
+            Color bgSurface = Color.FromArgb(43, 48, 56);
+            Color bgInput = Color.FromArgb(26, 29, 33);
+            Color fgMain = Color.FromArgb(230, 237, 243);
+            Color fgMuted = Color.FromArgb(155, 166, 178);
+            Color borderCol = Color.FromArgb(62, 70, 82);
+            Color accentBlue = Color.FromArgb(37, 99, 235);
+            Color chipBg = Color.FromArgb(47, 54, 65);
+
+            BackColor = bgMain;
+            ForeColor = fgMain;
+            try { Font = new Font("Segoe UI", 9F, FontStyle.Regular); } catch { }
+
+            ComboBox[] combos = new ComboBox[] { _language, _providerCombo, _modelCombo, _coordSortCombo };
+            foreach (ComboBox cb in combos)
+            {
+                cb.BackColor = bgSurface;
+                cb.ForeColor = fgMain;
+                cb.FlatStyle = FlatStyle.Flat;
+            }
+
+            _transcript.BackColor = bgInput;
+            _transcript.ForeColor = fgMain;
+            _transcript.BorderStyle = BorderStyle.FixedSingle;
+            _message.BackColor = bgInput;
+            _message.ForeColor = fgMain;
+            _message.BorderStyle = BorderStyle.FixedSingle;
+
+            _context.ForeColor = fgMuted;
+            _coordSortLabel.ForeColor = fgMuted;
+            _status.ForeColor = fgMuted;
+            _includeDrawingContext.ForeColor = fgMain;
+            _voiceAutoSend.ForeColor = fgMain;
+            _voiceSpeakReply.ForeColor = fgMain;
+
+            Button[] stdBtns = new Button[] { _apiSettings, _refresh, _start, _cancel, _voiceMic };
+            foreach (Button b in stdBtns)
+            {
+                b.BackColor = bgSurface;
+                b.ForeColor = fgMain;
+                b.FlatStyle = FlatStyle.Flat;
+                b.FlatAppearance.BorderColor = borderCol;
+                b.Cursor = Cursors.Hand;
+            }
+
+            _send.BackColor = accentBlue;
+            _send.ForeColor = Color.White;
+            _send.FlatStyle = FlatStyle.Flat;
+            _send.FlatAppearance.BorderColor = Color.FromArgb(59, 130, 246);
+            _send.Cursor = Cursors.Hand;
+
+            Button[] chips = new Button[] { _qLighting, _qTakeoff, _qLvCalc, _qLegend, _qLoads, _qQa };
+            foreach (Button qb in chips)
+            {
+                qb.BackColor = chipBg;
+                qb.ForeColor = fgMain;
+                qb.FlatStyle = FlatStyle.Flat;
+                qb.FlatAppearance.BorderColor = borderCol;
+            }
+        }
+
         private bool IsArabic { get { return _language.SelectedIndex == 0; } }
 
         private void ApplyLanguage()
@@ -1112,6 +1277,13 @@ namespace AIEngineer.AutoCAD
             if (RightToLeft != rtl) RightToLeft = rtl;
             PopulateSortOrderCombo();
             _sortRow.Visible = IsDirectMode;
+            _quickBar.Visible = IsDirectMode;
+            _qLighting.Text = IsArabic ? "💡 إنارة" : "💡 Lighting";
+            _qTakeoff.Text = IsArabic ? "📐 حصر كميات" : "📐 BOQ";
+            _qLvCalc.Text = IsArabic ? "⚡ كابل/قاطع" : "⚡ LV Calc";
+            _qLegend.Text = IsArabic ? "📋 ليجند" : "📋 Legend";
+            _qLoads.Text = IsArabic ? "📊 أحمال" : "📊 Loads";
+            _qQa.Text = IsArabic ? "🧹 تنظيف QA" : "🧹 QA";
             _refresh.Text = IsArabic ? "تحديث السياق" : "Refresh context";
             _send.Text = IsArabic ? "اسأل AI" : "Ask AI";
             _voiceAutoSend.Text = IsArabic ? "إرسال تلقائي" : "Auto-send";
@@ -1119,8 +1291,12 @@ namespace AIEngineer.AutoCAD
             UpdateVoiceMicVisuals();
             _commitDrawing.Text = IsArabic ? "✅ اعتماد الرسم (تمام)" : "✅ Commit (تمام)";
             _rollbackDrawing.Text = IsArabic ? "❌ تراجع" : "❌ Rollback";
-            _commitDrawing.BackColor = Color.FromArgb(220, 245, 220);
-            _rollbackDrawing.BackColor = Color.FromArgb(255, 228, 225);
+            _commitDrawing.BackColor = Color.FromArgb(22, 101, 52);
+            _commitDrawing.ForeColor = Color.White;
+            _commitDrawing.FlatAppearance.BorderColor = Color.FromArgb(34, 197, 94);
+            _rollbackDrawing.BackColor = Color.FromArgb(153, 27, 27);
+            _rollbackDrawing.ForeColor = Color.White;
+            _rollbackDrawing.FlatAppearance.BorderColor = Color.FromArgb(239, 68, 68);
             _commitDrawing.FlatStyle = FlatStyle.Flat;
             _rollbackDrawing.FlatStyle = FlatStyle.Flat;
             _commitDrawing.AutoSize = true;
@@ -1173,7 +1349,7 @@ namespace AIEngineer.AutoCAD
                     _context.Text = IsArabic ? "اتصال مباشر بـ AI (" + SelectedProvider + ")" : "Direct AI mode (" + SelectedProvider + ")";
                 }
 
-                _uncertainty.ForeColor = hasKey ? Color.DarkGreen : Color.DarkOrange;
+                _uncertainty.ForeColor = hasKey ? Color.FromArgb(74, 222, 128) : Color.FromArgb(251, 191, 36);
                 _uncertainty.Text = hasKey
                     ? (IsArabic ? "مفتاح API جاهز — كامل صلاحيات الرسم والتعديل والفحص مفعلة بدون وسيط." : "API key ready — full direct CAD read/write/measure tools enabled.")
                     : (IsArabic ? "تنبيه: مفتاح API غير مضبوط لـ " + SelectedProvider + ". اضغط [🔑 API] للإدخال." : "Warning: API key missing for " + SelectedProvider + ". Click [🔑 API].");
@@ -2057,7 +2233,8 @@ namespace AIEngineer.AutoCAD
             if (_voiceTranscribing)
             {
                 _voiceMic.Text = IsArabic ? "⏳ تحويل الصوت..." : "⏳ Transcribing...";
-                _voiceMic.BackColor = Color.FromArgb(255, 243, 205);
+                _voiceMic.BackColor = Color.FromArgb(146, 64, 14);
+                _voiceMic.ForeColor = Color.White;
                 _voiceMic.FlatStyle = FlatStyle.Flat;
                 return;
             }
@@ -2066,13 +2243,15 @@ namespace AIEngineer.AutoCAD
                 int sec = _voiceRecorder.ElapsedSeconds;
                 _voiceMic.Text = (IsArabic ? "⏹ إيقاف (" : "⏹ Stop (") +
                                  sec.ToString(CultureInfo.InvariantCulture) + "s)";
-                _voiceMic.BackColor = Color.FromArgb(255, 214, 214);
+                _voiceMic.BackColor = Color.FromArgb(185, 28, 28);
+                _voiceMic.ForeColor = Color.White;
                 _voiceMic.FlatStyle = FlatStyle.Flat;
                 return;
             }
             _voiceMic.Text = IsArabic ? "🎤 صوت" : "🎤 Voice";
-            _voiceMic.BackColor = SystemColors.Control;
-            _voiceMic.FlatStyle = FlatStyle.Standard;
+            _voiceMic.BackColor = Color.FromArgb(43, 48, 56);
+            _voiceMic.ForeColor = Color.FromArgb(230, 237, 243);
+            _voiceMic.FlatStyle = FlatStyle.Flat;
         }
 
         private async Task ToggleVoiceRecordingAsync()
@@ -2343,19 +2522,7 @@ namespace AIEngineer.AutoCAD
 
         private static HttpClient CreateClient()
         {
-            int port = 8765;
-            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
-            int parsed;
-            if (!String.IsNullOrWhiteSpace(configured) &&
-                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
-                parsed >= 1024 && parsed <= 65535)
-                port = parsed;
-            HttpClientHandler handler = new HttpClientHandler();
-            handler.UseProxy = false;
-            HttpClient client = new HttpClient(handler);
-            client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
-            client.Timeout = TimeSpan.FromSeconds(15);
-            return client;
+            return BridgeHttpClientFactory.GetSharedClient(15);
         }
 
         private void BuildLayout()
@@ -3002,19 +3169,7 @@ namespace AIEngineer.AutoCAD
 
         private static HttpClient CreateClient()
         {
-            int port = 8765;
-            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
-            int parsed;
-            if (!String.IsNullOrWhiteSpace(configured) &&
-                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
-                parsed >= 1024 && parsed <= 65535)
-                port = parsed;
-            HttpClientHandler handler = new HttpClientHandler();
-            handler.UseProxy = false;
-            HttpClient client = new HttpClient(handler);
-            client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
-            client.Timeout = TimeSpan.FromSeconds(15);
-            return client;
+            return BridgeHttpClientFactory.GetSharedClient(15);
         }
 
         private void BuildLayout()
@@ -3435,19 +3590,7 @@ namespace AIEngineer.AutoCAD
 
         private static HttpClient CreateClient()
         {
-            int port = 8765;
-            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
-            int parsed;
-            if (!String.IsNullOrWhiteSpace(configured) &&
-                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
-                parsed >= 1024 && parsed <= 65535)
-                port = parsed;
-            HttpClientHandler handler = new HttpClientHandler();
-            handler.UseProxy = false;
-            HttpClient client = new HttpClient(handler);
-            client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
-            client.Timeout = TimeSpan.FromSeconds(15);
-            return client;
+            return BridgeHttpClientFactory.GetSharedClient(15);
         }
 
         private void BuildLayout()
@@ -3729,19 +3872,8 @@ namespace AIEngineer.AutoCAD
 
         private static HttpClient CreateClient()
         {
-            int port = 8765;
-            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
-            int parsed;
-            if (!String.IsNullOrWhiteSpace(configured) &&
-                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
-                parsed >= 1024 && parsed <= 65535) port = parsed;
-            HttpClientHandler handler = new HttpClientHandler();
-            handler.UseProxy = false;
-            HttpClient client = new HttpClient(handler);
-            client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
             // Quality web search can consume the server's bounded 180-second window.
-            client.Timeout = TimeSpan.FromSeconds(210);
-            return client;
+            return BridgeHttpClientFactory.GetSharedClient(210);
         }
 
         private void BuildLayout()
@@ -4150,19 +4282,7 @@ namespace AIEngineer.AutoCAD
 
         private static HttpClient CreateClient()
         {
-            int port = 8765;
-            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
-            int parsed;
-            if (!String.IsNullOrWhiteSpace(configured) &&
-                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
-                parsed >= 1024 && parsed <= 65535)
-                port = parsed;
-            HttpClientHandler handler = new HttpClientHandler();
-            handler.UseProxy = false;
-            HttpClient client = new HttpClient(handler);
-            client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
-            client.Timeout = TimeSpan.FromSeconds(15);
-            return client;
+            return BridgeHttpClientFactory.GetSharedClient(15);
         }
 
         private void BuildLayout()
@@ -4447,19 +4567,7 @@ namespace AIEngineer.AutoCAD
 
         private static HttpClient CreateClient()
         {
-            int port = 8765;
-            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
-            int parsed;
-            if (!String.IsNullOrWhiteSpace(configured) &&
-                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
-                parsed >= 1024 && parsed <= 65535)
-                port = parsed;
-            HttpClientHandler handler = new HttpClientHandler();
-            handler.UseProxy = false;
-            HttpClient client = new HttpClient(handler);
-            client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
-            client.Timeout = TimeSpan.FromSeconds(15);
-            return client;
+            return BridgeHttpClientFactory.GetSharedClient(15);
         }
 
         private void BuildLayout()
@@ -4886,19 +4994,7 @@ namespace AIEngineer.AutoCAD
 
         private static HttpClient CreateClient()
         {
-            int port = 8765;
-            string configured = Environment.GetEnvironmentVariable("AI_ENGINEER_API_PORT");
-            int parsed;
-            if (!String.IsNullOrWhiteSpace(configured) &&
-                Int32.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out parsed) &&
-                parsed >= 1024 && parsed <= 65535)
-                port = parsed;
-            HttpClientHandler handler = new HttpClientHandler();
-            handler.UseProxy = false;
-            HttpClient client = new HttpClient(handler);
-            client.BaseAddress = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
-            client.Timeout = TimeSpan.FromSeconds(15);
-            return client;
+            return BridgeHttpClientFactory.GetSharedClient(15);
         }
 
         private void BuildLayout()

@@ -7,6 +7,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -50,9 +51,53 @@ namespace AIEngineer.AutoCAD
             }
         }
 
+        private const string DpapiPrefix = "dpapi:";
+        private static readonly byte[] DpapiEntropy = Encoding.UTF8.GetBytes("AI-Engineer.AutoCAD.DirectAiConfig.v1");
+
+        private static string ProtectSecret(string plain)
+        {
+            string trimmed = (plain ?? "").Trim();
+            if (string.IsNullOrEmpty(trimmed)) return "";
+            try
+            {
+                byte[] plainBytes = Encoding.UTF8.GetBytes(trimmed);
+                byte[] encBytes = ProtectedData.Protect(plainBytes, DpapiEntropy, DataProtectionScope.CurrentUser);
+                return DpapiPrefix + Convert.ToBase64String(encBytes);
+            }
+            catch
+            {
+                // If DPAPI is unavailable in a non-interactive environment, do not crash;
+                // callers still have env-var fallback.
+                return "";
+            }
+        }
+
+        private static string UnprotectSecret(string stored, out bool wasLegacyPlaintext)
+        {
+            wasLegacyPlaintext = false;
+            string trimmed = (stored ?? "").Trim();
+            if (string.IsNullOrEmpty(trimmed)) return "";
+            if (trimmed.StartsWith(DpapiPrefix, StringComparison.Ordinal))
+            {
+                try
+                {
+                    byte[] encBytes = Convert.FromBase64String(trimmed.Substring(DpapiPrefix.Length));
+                    byte[] plainBytes = ProtectedData.Unprotect(encBytes, DpapiEntropy, DataProtectionScope.CurrentUser);
+                    return Encoding.UTF8.GetString(plainBytes).Trim();
+                }
+                catch
+                {
+                    return "";
+                }
+            }
+            wasLegacyPlaintext = true;
+            return trimmed;
+        }
+
         public static DirectAiConfig Load()
         {
             DirectAiConfig cfg = new DirectAiConfig();
+            bool needsEncryptionMigration = false;
             try
             {
                 string path = ConfigFilePath;
@@ -63,22 +108,31 @@ namespace AIEngineer.AutoCAD
                     Dictionary<string, object> d = ser.DeserializeObject(raw) as Dictionary<string, object>;
                     if (d != null)
                     {
+                        bool legacyGemini;
+                        bool legacyClaude;
+                        bool legacyOpenAI;
                         cfg.Provider = GetStr(d, "provider", cfg.Provider);
-                        cfg.GeminiApiKey = GetStr(d, "gemini_api_key", "");
+                        cfg.GeminiApiKey = UnprotectSecret(GetStr(d, "gemini_api_key", ""), out legacyGemini);
                         cfg.GeminiModel = GetStr(d, "gemini_model", cfg.GeminiModel);
-                        cfg.ClaudeApiKey = GetStr(d, "claude_api_key", "");
+                        cfg.ClaudeApiKey = UnprotectSecret(GetStr(d, "claude_api_key", ""), out legacyClaude);
                         cfg.ClaudeModel = GetStr(d, "claude_model", cfg.ClaudeModel);
-                        cfg.OpenAIApiKey = GetStr(d, "openai_api_key", "");
+                        cfg.OpenAIApiKey = UnprotectSecret(GetStr(d, "openai_api_key", ""), out legacyOpenAI);
                         cfg.OpenAIModel = GetStr(d, "openai_model", cfg.OpenAIModel);
                         cfg.OpenAIBaseUrl = GetStr(d, "openai_base_url", cfg.OpenAIBaseUrl);
                         cfg.OpenAIApiMode = GetStr(d, "openai_api_mode", cfg.OpenAIApiMode);
                         cfg.PreferredCoordSortOrder = NormalizeSortOrderPref(GetStr(d, "preferred_coord_sort_order", cfg.PreferredCoordSortOrder));
                         cfg.VoiceAutoSend = GetBoolCfg(d, "voice_auto_send", cfg.VoiceAutoSend);
                         cfg.VoiceSpeakReplies = GetBoolCfg(d, "voice_speak_replies", cfg.VoiceSpeakReplies);
+                        needsEncryptionMigration = legacyGemini || legacyClaude || legacyOpenAI;
                     }
                 }
             }
             catch { }
+
+            if (needsEncryptionMigration)
+            {
+                try { cfg.Save(); } catch { }
+            }
 
             if (string.IsNullOrWhiteSpace(cfg.GeminiApiKey))
                 cfg.GeminiApiKey = ReadEnv("GEMINI_API_KEY");
@@ -111,13 +165,35 @@ namespace AIEngineer.AutoCAD
             string dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
+            Dictionary<string, object> existingDisk = null;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    JavaScriptSerializer existingSer = new JavaScriptSerializer();
+                    existingDisk = existingSer.DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>;
+                }
+                catch { }
+            }
+
             Dictionary<string, object> d = new Dictionary<string, object>();
             d["provider"] = Provider ?? ProviderGemini;
-            d["gemini_api_key"] = (GeminiApiKey ?? "").Trim();
+            string encGem = ProtectSecret(GeminiApiKey);
+            if (string.IsNullOrEmpty(encGem) && !string.IsNullOrWhiteSpace(GeminiApiKey) && existingDisk != null && existingDisk.ContainsKey("gemini_api_key"))
+                encGem = Convert.ToString(existingDisk["gemini_api_key"], CultureInfo.InvariantCulture) ?? "";
+            d["gemini_api_key"] = encGem;
             d["gemini_model"] = (GeminiModel ?? "gemini-3.5-flash-lite").Trim();
-            d["claude_api_key"] = (ClaudeApiKey ?? "").Trim();
+
+            string encClaude = ProtectSecret(ClaudeApiKey);
+            if (string.IsNullOrEmpty(encClaude) && !string.IsNullOrWhiteSpace(ClaudeApiKey) && existingDisk != null && existingDisk.ContainsKey("claude_api_key"))
+                encClaude = Convert.ToString(existingDisk["claude_api_key"], CultureInfo.InvariantCulture) ?? "";
+            d["claude_api_key"] = encClaude;
             d["claude_model"] = (ClaudeModel ?? "claude-sonnet-4-20250514").Trim();
-            d["openai_api_key"] = (OpenAIApiKey ?? "").Trim();
+
+            string encOpenAi = ProtectSecret(OpenAIApiKey);
+            if (string.IsNullOrEmpty(encOpenAi) && !string.IsNullOrWhiteSpace(OpenAIApiKey) && existingDisk != null && existingDisk.ContainsKey("openai_api_key"))
+                encOpenAi = Convert.ToString(existingDisk["openai_api_key"], CultureInfo.InvariantCulture) ?? "";
+            d["openai_api_key"] = encOpenAi;
             d["openai_model"] = (OpenAIModel ?? "gpt-5.3-codex").Trim();
             d["openai_base_url"] = (OpenAIBaseUrl ?? "https://api.openai.com/v1").Trim().TrimEnd('/');
             d["openai_api_mode"] = (OpenAIApiMode ?? "responses").Trim();
@@ -126,7 +202,20 @@ namespace AIEngineer.AutoCAD
             d["voice_speak_replies"] = VoiceSpeakReplies;
 
             JavaScriptSerializer ser = new JavaScriptSerializer();
-            File.WriteAllText(path, ser.Serialize(d), Encoding.UTF8);
+            string payload = ser.Serialize(d);
+            string tmpPath = path + ".tmp";
+            File.WriteAllText(tmpPath, payload, new UTF8Encoding(false));
+            if (File.Exists(path))
+            {
+                try
+                {
+                    File.Replace(tmpPath, path, null);
+                    return;
+                }
+                catch { }
+            }
+            File.Copy(tmpPath, path, true);
+            try { File.Delete(tmpPath); } catch { }
         }
 
         public static string NormalizeSortOrderPref(string raw)
@@ -331,8 +420,8 @@ namespace AIEngineer.AutoCAD
             _info.MaximumSize = new Size(490, 0);
             _info.ForeColor = Color.DimGray;
             _info.Text = isArabic
-                ? "تُحفظ الإعدادات محليًا في: " + DirectAiConfig.ConfigFilePath + "\nوتُقرأ تلقائيًا من متغيرات البيئة (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY) إن لم تُكتب هنا."
-                : "Saved locally in: " + DirectAiConfig.ConfigFilePath + "\nFalls back to Windows env vars automatically when empty.";
+                ? "تُحفظ المفاتيح محليًا بشكل مشفّر (Windows DPAPI) في: " + DirectAiConfig.ConfigFilePath + "\nوتُقرأ تلقائيًا من متغيرات البيئة (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY) إن لم تُكتب هنا."
+                : "API keys are stored locally encrypted (Windows DPAPI) in: " + DirectAiConfig.ConfigFilePath + "\nFalls back to Windows env vars automatically when empty.";
             grid.SetColumnSpan(_info, 2);
             grid.Controls.Add(_info, 0, 9);
 
@@ -428,20 +517,21 @@ namespace AIEngineer.AutoCAD
         private const int MaxToolIterations = 14;
         private readonly List<DirectTurnRecord> _history = new List<DirectTurnRecord>();
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer();
-        private readonly HttpClient _http;
+        private static readonly HttpClient _http = CreateSharedHttpClient();
 
-        static DirectCadAgentSession()
+        private static HttpClient CreateSharedHttpClient()
         {
             try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
             try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)12288; } catch { } // TLS 1.3 when supported
             try { ServicePointManager.Expect100Continue = false; } catch { }
+            HttpClient client = new HttpClient();
+            client.Timeout = TimeSpan.FromSeconds(120);
+            return client;
         }
 
         public DirectCadAgentSession()
         {
             _json.MaxJsonLength = 16 * 1024 * 1024;
-            _http = new HttpClient();
-            _http.Timeout = TimeSpan.FromSeconds(120);
         }
 
         public void ClearHistory()
@@ -628,13 +718,20 @@ namespace AIEngineer.AutoCAD
         private static void MarshalUi(Control uiControl, Action action)
         {
             if (action == null) return;
-            if (uiControl != null && !uiControl.IsDisposed && uiControl.IsHandleCreated && uiControl.InvokeRequired)
+            if (uiControl != null && !uiControl.IsDisposed && uiControl.IsHandleCreated)
             {
-                uiControl.Invoke(new MethodInvoker(action));
+                if (uiControl.InvokeRequired)
+                    uiControl.Invoke(new MethodInvoker(action));
+                else
+                    action();
+            }
+            else if (System.Threading.Thread.CurrentThread.GetApartmentState() == System.Threading.ApartmentState.STA)
+            {
+                action();
             }
             else
             {
-                action();
+                throw new InvalidOperationException("AutoCAD palette UI handle is unavailable for main-thread CAD execution.");
             }
         }
 
@@ -691,8 +788,6 @@ namespace AIEngineer.AutoCAD
                    n == "duplicate_drawing" ||
                    n == "execute_template" ||
                    n == "approve_or_rollback_preview" ||
-                   n == "select_entities" ||
-                   n == "zoom_view" ||
                    n == "quantity_takeoff" ||
                    n == "extract_load_schedule" ||
                    n == "manage_attributes" ||
@@ -704,7 +799,8 @@ namespace AIEngineer.AutoCAD
                    n == "export_to_excel" ||
                    n == "import_excel_table" ||
                    n == "lighting_design_engine" ||
-                   n == "export_dialux_stf";
+                   n == "export_dialux_stf" ||
+                   n == "calculate_lv_electrical";
         }
 
         private static bool ContainsFakeToolLog(string reply)
@@ -1862,54 +1958,56 @@ namespace AIEngineer.AutoCAD
                         }
                         req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
 
-                        HttpResponseMessage resp = _http.SendAsync(req).GetAwaiter().GetResult();
-                        string text = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                        int code = (int)resp.StatusCode;
-                        if (!resp.IsSuccessStatusCode)
+                        using (HttpResponseMessage resp = _http.SendAsync(req).GetAwaiter().GetResult())
                         {
-                            string snippet = text ?? "";
-                            try
+                            string text = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                            int code = (int)resp.StatusCode;
+                            if (!resp.IsSuccessStatusCode)
                             {
-                                Dictionary<string, object> errDoc = _json.DeserializeObject(text) as Dictionary<string, object>;
-                                Dictionary<string, object> errObj = AsDict(GetObj(errDoc, "error"));
-                                string errMsg = GetStr(errObj, "message", "");
-                                if (!string.IsNullOrWhiteSpace(errMsg)) snippet = errMsg;
-                            }
-                            catch { }
-                            if (snippet.Length > 700) snippet = snippet.Substring(0, 700);
-
-                            bool isDailyQuota = (code == 429) && (snippet.IndexOf("per day", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                                                snippet.IndexOf("free_tier_requests", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                                                snippet.IndexOf("Please retry in", StringComparison.OrdinalIgnoreCase) >= 0 && snippet.IndexOf("h", StringComparison.OrdinalIgnoreCase) >= 0);
-                            bool transient = !isDailyQuota && (code == 429 || code == 500 || code == 502 || code == 503 || code == 504);
-
-                            if (transient && attempt < 2)
-                            {
-                                if (onProgress != null)
+                                string snippet = text ?? "";
+                                try
                                 {
-                                    int tryNo = attempt + 2;
-                                    MarshalUi(uiControl, delegate {
-                                        onProgress(isArabic
-                                            ? "ضغط مؤقت على الخادم (HTTP " + code + ") - محاولة " + tryNo + "..."
-                                            : "Temporary server busy (HTTP " + code + ") - retry " + tryNo + "...");
-                                    });
+                                    Dictionary<string, object> errDoc = _json.DeserializeObject(text) as Dictionary<string, object>;
+                                    Dictionary<string, object> errObj = AsDict(GetObj(errDoc, "error"));
+                                    string errMsg = GetStr(errObj, "message", "");
+                                    if (!string.IsNullOrWhiteSpace(errMsg)) snippet = errMsg;
                                 }
-                                System.Threading.Thread.Sleep(delaysMs[attempt]);
-                                continue;
+                                catch { }
+                                if (snippet.Length > 700) snippet = snippet.Substring(0, 700);
+
+                                bool isDailyQuota = (code == 429) && (snippet.IndexOf("per day", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                                    snippet.IndexOf("free_tier_requests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                                    snippet.IndexOf("Please retry in", StringComparison.OrdinalIgnoreCase) >= 0 && snippet.IndexOf("h", StringComparison.OrdinalIgnoreCase) >= 0);
+                                bool transient = !isDailyQuota && (code == 429 || code == 500 || code == 502 || code == 503 || code == 504);
+
+                                if (transient && attempt < 2)
+                                {
+                                    if (onProgress != null)
+                                    {
+                                        int tryNo = attempt + 2;
+                                        MarshalUi(uiControl, delegate {
+                                            onProgress(isArabic
+                                                ? "ضغط مؤقت على الخادم (HTTP " + code + ") - محاولة " + tryNo + "..."
+                                                : "Temporary server busy (HTTP " + code + ") - retry " + tryNo + "...");
+                                        });
+                                    }
+                                    System.Threading.Thread.Sleep(delaysMs[attempt]);
+                                    continue;
+                                }
+
+                                throw new ApiCallException(
+                                    code,
+                                    "API HTTP " + code + " (" + resp.ReasonPhrase + "): " + snippet,
+                                    snippet,
+                                    transient,
+                                    isDailyQuota);
                             }
 
-                            throw new ApiCallException(
-                                code,
-                                "API HTTP " + code + " (" + resp.ReasonPhrase + "): " + snippet,
-                                snippet,
-                                transient,
-                                isDailyQuota);
+                            Dictionary<string, object> parsed = _json.DeserializeObject(text) as Dictionary<string, object>;
+                            if (parsed == null)
+                                throw new ApiCallException(code, "API returned non-object JSON.", text, false, false);
+                            return parsed;
                         }
-
-                        Dictionary<string, object> parsed = _json.DeserializeObject(text) as Dictionary<string, object>;
-                        if (parsed == null)
-                            throw new ApiCallException(code, "API returned non-object JSON.", text, false, false);
-                        return parsed;
                     }
                 }
                 catch (ApiCallException)
@@ -1960,6 +2058,7 @@ namespace AIEngineer.AutoCAD
                 "- Excel <-> AutoCAD Interop: `export_to_excel` (export AutoCAD tables, coordinate schedules, panel load schedules, BOQ, block legends, or selected tables to `.xlsx`/`.csv`), `import_excel_table` (import `.xlsx`/`.xlsm`/`.csv` spreadsheets into AutoCAD with crisp TrueType Arial Unicode formatting or native AutoCAD Table)\n" +
                 "- MEP Load Schedules & Quantity Takeoff: `extract_load_schedule` (extract electrical circuit/panel load schedules from blocks + neighbor texts `63A`/`100A`/`15KW`/`4x16mm2` + sample connected feeder path lengths -> AutoCAD & Excel), `quantity_takeoff` (linear cable/pipe lengths by layer, closed room/polygon areas with optional centroid labels, block counts, vertical/waste allowances -> BOQ table & Excel)\n" +
                 "- Lighting Design & DIALux Bridge: `lighting_design_engine` (automated room-by-room lighting calculation & symmetric grid placement using Egyptian Code ECP / EN 12464-1 / CIBSE, real .ies/.ldt photometric file parser, point-by-point Avg/Min Lux & Uniformity U0, 3-phase wiring & CAD/Excel/STF output), `export_dialux_stf` (export AutoCAD rooms + luminaire positions in meters to DIALux .stf + optional clean DWG)\n" +
+                "- Deterministic LV Electrical Calculations (IEC 60364 / ECP): `calculate_lv_electrical` (ALWAYS call this tool — NEVER do mental math — whenever the engineer asks for cable sizing, circuit breaker In/Icu, derating Ca/Cg, voltage drop V/%, protective earth PE, or short-circuit Isc / adiabatic check for a single circuit or batch `circuits[]`, with optional AutoCAD table `_AI_LV_CALC_TABLE` and Excel `.xlsx` export)\n" +
                 "- Attributes, Text, Geometry, QA/Cleanup, Block Library & Layouts/PDF: `manage_attributes` (extract/update/sync block attributes via Excel), `text_tools` (batch find/replace, directional auto-numbering, text style/height standardize), `advanced_geometry_ops` (align, distribute, rectangular/polar array, offset, revision_cloud, explode), `drawing_qa_cleanup` (duplicate block detector, overkill duplicate lines, purge unused, standardize ByLayer, DWG revision compare with clouds + Excel diff, FILEDIA/PICKFIRST guard), `layout_and_plot_tools` (list/create scaled Layouts + Viewports + Title Block, batch plot PDF via DWG To PDF.pc3), `manage_block_library` (persistent Wblock save/list/insert company blocks across drawings)\n" +
                 "- Modify & Manage: `modify_entities`, `undo_last_action`, `copy_entities`, `delete_entities`, `manage_layers`, `duplicate_drawing`, `zoom_view`, `approve_or_rollback_preview`\n" +
                 "- Measure & Compare: `measure_and_compare` (distances, center-to-center vs clear edge-to-edge gap, overlap detection, entity group totals/areas/lengths/extents comparison)\n\n" +
@@ -2791,6 +2890,74 @@ namespace AIEngineer.AutoCAD
                     { "mounting_height_m", Prop("number", "Luminaire mounting height in meters (defaults to room_height_m).") },
                     { "maintenance_factor", Prop("number", "Maintenance factor MF (default 0.80).") },
                     { "export_clean_dwg", Prop("boolean", "Also save a separate DWG background copy alongside the .stf file without altering the active document.") }
+                })));
+
+            tools.Add(Tool("calculate_lv_electrical",
+                "Deterministic Low-Voltage electrical engineering calculator (IEC 60364 / Egyptian Code ECP): computes design current Ib, standard circuit breaker In (MCB/MCCB/ACB) & Icu, ambient/grouping derating (Ca*Cg), copper/aluminum XLPE/PVC cable cross-section (with automatic parallel runs if needed), exact AC voltage drop (V & %, auto-upsizing if exceeding limit), protective earth PE size, and optional 3-phase short-circuit Isc + adiabatic thermal withstand check. Supports single circuit OR batch `circuits` array, optional AutoCAD table drawing (_AI_LV_CALC_TABLE), and Excel (.xlsx) export.",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "name", Prop("string", "Circuit or feeder name (e.g. 'DB-1', 'AC-01', 'L1').") },
+                    { "load_type", Prop("string", "Load category: 'power' (default, 5% VD limit), 'lighting' (3% VD limit), 'socket', 'motor' (1.25x safety), or 'feeder'.") },
+                    { "phases", Prop("integer", "1 for single-phase (default 220V) or 3 for three-phase (default 380V).") },
+                    { "voltage_v", Prop("number", "Nominal voltage in Volts (220/230 for 1P, 380/400 for 3P).") },
+                    { "load_kw", Prop("number", "Active load in kW (provide one of load_kw, load_kva, load_hp, or load_amps).") },
+                    { "load_kva", Prop("number", "Apparent load in kVA.") },
+                    { "load_hp", Prop("number", "Motor power in Horsepower (HP).") },
+                    { "load_amps", Prop("number", "Direct load current in Amperes.") },
+                    { "power_factor", Prop("number", "Power factor cos(phi), 0.4..1.0 (default 0.85 power / 0.90 lighting).") },
+                    { "efficiency", Prop("number", "Efficiency 0.4..1.0 (default 1.0, or 0.88 for HP motors).") },
+                    { "demand_factor", Prop("number", "Demand factor (default 1.0).") },
+                    { "safety_factor", Prop("number", "Breaker safety multiplier (default 1.0, or 1.25 for motors/continuous).") },
+                    { "breaker_a", Prop("number", "Optional explicit breaker rating In in Amps (otherwise auto-selected).") },
+                    { "length_m", Prop("number", "One-way cable route length in meters (default 25).") },
+                    { "material", Prop("string", "Conductor material: 'Cu' (default) or 'Al'.") },
+                    { "insulation", Prop("string", "Cable insulation: 'XLPE' (90C, default) or 'PVC' (70C).") },
+                    { "install_method", Prop("string", "Installation method: 'tray' (default), 'conduit', 'buried', or 'free_air'.") },
+                    { "ambient_temp_c", Prop("number", "Ambient temperature in Celsius (default 40C for Egypt/MENA).") },
+                    { "grouped_circuits", Prop("integer", "Number of grouped touching circuits for Cg derating (default 1).") },
+                    { "derating_factor", Prop("number", "Optional explicit combined derating factor overriding Ca*Cg.") },
+                    { "max_vd_percent", Prop("number", "Maximum permitted voltage drop % (default 3% lighting, 5% power).") },
+                    { "source_isc_ka", Prop("number", "Optional upstream 3-phase short-circuit current at panel/source in kA.") },
+                    { "transformer_kva", Prop("number", "Optional supply transformer rating in kVA (used to compute source Isc if source_isc_ka is omitted).") },
+                    { "transformer_uk_percent", Prop("number", "Optional transformer impedance uk% (default 6.0%).") },
+                    { "fault_time_sec", Prop("number", "Protective device fault clearing time in seconds for adiabatic check (default 0.1s).") },
+                    { "circuits", new Dictionary<string, object>
+                        {
+                            { "type", "array" },
+                            { "description", "Optional array of circuit objects (each with name, load_kw/load_kva/load_hp/load_amps, length_m, etc.) to calculate a full panel/feeder schedule in one call." },
+                            { "items", ObjSchema(new Dictionary<string, object>
+                                {
+                                    { "name", Prop("string", "Circuit or feeder name.") },
+                                    { "load_type", Prop("string", "Load category: power, lighting, socket, motor, or feeder.") },
+                                    { "phases", Prop("integer", "1 or 3.") },
+                                    { "voltage_v", Prop("number", "Nominal voltage in Volts.") },
+                                    { "load_kw", Prop("number", "Active load in kW.") },
+                                    { "load_kva", Prop("number", "Apparent load in kVA.") },
+                                    { "load_hp", Prop("number", "Motor power in HP.") },
+                                    { "load_amps", Prop("number", "Direct load current in Amperes.") },
+                                    { "power_factor", Prop("number", "Power factor cos(phi).") },
+                                    { "efficiency", Prop("number", "Efficiency.") },
+                                    { "demand_factor", Prop("number", "Demand factor.") },
+                                    { "safety_factor", Prop("number", "Breaker safety multiplier.") },
+                                    { "breaker_a", Prop("number", "Optional explicit breaker rating In in Amps.") },
+                                    { "length_m", Prop("number", "One-way cable route length in meters.") },
+                                    { "material", Prop("string", "Conductor material: Cu or Al.") },
+                                    { "insulation", Prop("string", "Cable insulation: XLPE or PVC.") },
+                                    { "install_method", Prop("string", "Installation method: tray, conduit, buried, or free_air.") },
+                                    { "ambient_temp_c", Prop("number", "Ambient temperature in Celsius.") },
+                                    { "grouped_circuits", Prop("integer", "Number of grouped touching circuits.") },
+                                    { "derating_factor", Prop("number", "Optional explicit combined derating factor.") },
+                                    { "max_vd_percent", Prop("number", "Maximum permitted voltage drop %.") }
+                                })
+                            }
+                        }
+                    },
+                    { "draw_table", Prop("boolean", "Draw formatted Arabic/English calculation table on _AI_LV_CALC_TABLE in AutoCAD (default false).") },
+                    { "table_position", Prop("string", "Table placement when draw_table=true: 'outside_right' (default), 'outside_left', 'outside_top', 'outside_bottom'.") },
+                    { "export_excel", Prop("boolean", "Export formatted RTL Excel (.xlsx) calculation sheet (default false).") },
+                    { "excel_path", Prop("string", "Optional destination .xlsx path.") },
+                    { "replace_existing", Prop("boolean", "Replace previous _AI_LV_CALC_TABLE table (default true).") },
+                    { "zoom", Prop("boolean", "Zoom onto drawn calculation table (default true).") }
                 })));
 
             return tools;

@@ -213,24 +213,31 @@ namespace AIEngineer.AutoCAD
                     if (lm > 10) p.TotalLumens = lm;
                     if (wt > 0.5) p.Watts = wt;
 
-                    int idx = 42;
-                    if (idx + mc + ng < rawLines.Length)
+                    int tokIdx = 42;
+                    List<string> numTokens = new List<string>();
+                    for (int li = 42; li < rawLines.Length; li++)
+                    {
+                        string[] parts = (rawLines[li] ?? "").Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                        for (int pi = 0; pi < parts.Length; pi++) numTokens.Add(parts[pi]);
+                    }
+                    if (numTokens.Count >= mc + ng && tokIdx > 0)
                     {
                         double[] phis = new double[Math.Max(1, mc)];
-                        for (int i = 0; i < mc && idx < rawLines.Length; i++, idx++)
-                            double.TryParse(rawLines[idx].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out phis[i]);
+                        int ti = 0;
+                        for (int i = 0; i < mc && ti < numTokens.Count; i++, ti++)
+                            double.TryParse(numTokens[ti], NumberStyles.Any, CultureInfo.InvariantCulture, out phis[i]);
                         double[] thetas = new double[Math.Max(1, ng)];
-                        for (int i = 0; i < ng && idx < rawLines.Length; i++, idx++)
-                            double.TryParse(rawLines[idx].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out thetas[i]);
+                        for (int i = 0; i < ng && ti < numTokens.Count; i++, ti++)
+                            double.TryParse(numTokens[ti], NumberStyles.Any, CultureInfo.InvariantCulture, out thetas[i]);
 
                         double[,] cd = new double[mc, ng];
                         double scaleKlm = p.TotalLumens / 1000.0;
                         for (int phi = 0; phi < mc; phi++)
                         {
-                            for (int th = 0; th < ng && idx < rawLines.Length; th++, idx++)
+                            for (int th = 0; th < ng && ti < numTokens.Count; th++, ti++)
                             {
                                 double val = 0;
-                                double.TryParse(rawLines[idx].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out val);
+                                double.TryParse(numTokens[ti], NumberStyles.Any, CultureInfo.InvariantCulture, out val);
                                 cd[phi, th] = val * scaleKlm;
                             }
                         }
@@ -558,6 +565,12 @@ namespace AIEngineer.AutoCAD
             return rooms;
         }
 
+        private static string SanitizeStfValue(string val, string fallback)
+        {
+            string s = (val ?? "").Replace("\r", " ").Replace("\n", " ").Replace("[", "(").Replace("]", ")").Replace("=", "-").Trim();
+            return string.IsNullOrEmpty(s) ? fallback : s;
+        }
+
         private static string WriteDialuxStfFile(
             string stfPath,
             string projectName,
@@ -572,74 +585,75 @@ namespace AIEngineer.AutoCAD
             double mf)
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("[VERSION]");
-            sb.AppendLine("STFF=1.0.5");
-            sb.AppendLine("Progname=AIEngineer.AutoCAD");
-            sb.AppendLine("Progvers=2.0");
-            sb.AppendLine();
+            sb.Append("[VERSION]\r\n");
+            sb.Append("STFF=1.0.5\r\n");
+            sb.Append("Progname=AIEngineer.AutoCAD\r\n");
+            sb.Append("Progvers=2.0\r\n\r\n");
 
-            sb.AppendLine("[PROJECT]");
-            sb.AppendLine("Name=" + (string.IsNullOrWhiteSpace(projectName) ? "AutoCAD_Lighting_Project" : projectName));
-            sb.AppendLine("Date=" + DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
-            sb.AppendLine("Operator=AI-Engineer");
-            sb.AppendLine("NrRooms=" + rooms.Count.ToString(CultureInfo.InvariantCulture));
+            sb.Append("[PROJECT]\r\n");
+            sb.Append("Name=" + SanitizeStfValue(projectName, "AutoCAD_Lighting_Project") + "\r\n");
+            sb.Append("Date=" + DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "\r\n");
+            sb.Append("Operator=AI-Engineer\r\n");
+            sb.Append("NrRooms=" + rooms.Count.ToString(CultureInfo.InvariantCulture) + "\r\n");
             for (int r = 0; r < rooms.Count; r++)
-                sb.AppendLine("Room" + (r + 1).ToString(CultureInfo.InvariantCulture) + "=ROOM." + rooms[r].Id);
-            sb.AppendLine();
+                sb.Append("Room" + (r + 1).ToString(CultureInfo.InvariantCulture) + "=ROOM.R" + (r + 1).ToString(CultureInfo.InvariantCulture) + "\r\n");
+            sb.Append("\r\n");
 
-            string lumKey = "L1";
-            sb.AppendLine("[" + lumKey + "]");
-            sb.AppendLine("Manufacturer=" + (profile.Manufacturer ?? "Generic"));
-            sb.AppendLine("Name=" + (profile.CatalogName ?? "LED_PANEL_60x60"));
-            sb.AppendLine("OrderNr=" + (profile.CatalogName ?? "LED-36W"));
+            string lumSection = "LUMINAIRE.L1";
+            sb.Append("[" + lumSection + "]\r\n");
+            sb.Append("Manufacturer=" + SanitizeStfValue(profile.Manufacturer, "Generic") + "\r\n");
+            sb.Append("OrderNr=" + SanitizeStfValue(profile.CatalogName, "LED-36W") + "\r\n");
+            sb.Append("Name=" + SanitizeStfValue(profile.CatalogName, "LED_PANEL_60x60") + "\r\n");
             if (!string.IsNullOrWhiteSpace(profile.SourceFile))
-                sb.AppendLine("Photometry=" + profile.SourceFile);
-            sb.AppendLine("Flux=" + profile.TotalLumens.ToString("0.#", CultureInfo.InvariantCulture));
-            sb.AppendLine("Load=" + profile.Watts.ToString("0.#", CultureInfo.InvariantCulture));
-            sb.AppendLine("Shape=1");
-            sb.AppendLine("Size=" + profile.LengthM.ToString("0.000", CultureInfo.InvariantCulture) + " " +
+                sb.Append("Photometry=" + SanitizeStfValue(Path.GetFileName(profile.SourceFile), "") + "\r\n");
+            sb.Append("Box=" + profile.LengthM.ToString("0.000", CultureInfo.InvariantCulture) + " " +
                           profile.WidthM.ToString("0.000", CultureInfo.InvariantCulture) + " " +
-                          profile.HeightM.ToString("0.000", CultureInfo.InvariantCulture));
-            sb.AppendLine();
+                          profile.HeightM.ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+            sb.Append("Shape=1\r\n");
+            sb.Append("Load=" + profile.Watts.ToString("0.##", CultureInfo.InvariantCulture) + "\r\n");
+            sb.Append("Flux=" + profile.TotalLumens.ToString("0.##", CultureInfo.InvariantCulture) + "\r\n\r\n");
 
             for (int r = 0; r < rooms.Count; r++)
             {
                 RoomPolygonInfo rm = rooms[r];
                 List<double[]> lums = (luminairesPerRoomM != null && r < luminairesPerRoomM.Count) ? luminairesPerRoomM[r] : new List<double[]>();
 
-                sb.AppendLine("[ROOM." + rm.Id + "]");
-                sb.AppendLine("Name=" + rm.Name);
-                sb.AppendLine("Height=" + roomHeightM.ToString("0.000", CultureInfo.InvariantCulture));
-                sb.AppendLine("WorkingPlane=" + workplaneM.ToString("0.000", CultureInfo.InvariantCulture));
-                sb.AppendLine("RefCeiling=" + reflCeil.ToString("0.00", CultureInfo.InvariantCulture));
-                sb.AppendLine("RefWalls=" + reflWalls.ToString("0.00", CultureInfo.InvariantCulture));
-                sb.AppendLine("RefFloor=" + reflFloor.ToString("0.00", CultureInfo.InvariantCulture));
-                sb.AppendLine("MaintenanceFactor=" + mf.ToString("0.00", CultureInfo.InvariantCulture));
-                sb.AppendLine("NrPoints=" + rm.VerticesM.Count.ToString(CultureInfo.InvariantCulture));
+                sb.Append("[ROOM.R" + (r + 1).ToString(CultureInfo.InvariantCulture) + "]\r\n");
+                sb.Append("Name=" + SanitizeStfValue(rm.Name, "Room_" + (r + 1).ToString(CultureInfo.InvariantCulture)) + "\r\n");
+                sb.Append("Height=" + roomHeightM.ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("WorkingPlane=" + workplaneM.ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("MF=" + mf.ToString("0.00", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("R_Ceiling=" + reflCeil.ToString("0.00", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("R_Floor=" + reflFloor.ToString("0.00", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("NrPoints=" + rm.VerticesM.Count.ToString(CultureInfo.InvariantCulture) + "\r\n");
                 for (int v = 0; v < rm.VerticesM.Count; v++)
                 {
-                    sb.AppendLine("Point" + (v + 1).ToString(CultureInfo.InvariantCulture) + "=" +
-                                  rm.VerticesM[v].X.ToString("0.000", CultureInfo.InvariantCulture) + " " +
-                                  rm.VerticesM[v].Y.ToString("0.000", CultureInfo.InvariantCulture));
+                    sb.Append("Point" + (v + 1).ToString(CultureInfo.InvariantCulture) + "=" +
+                              rm.VerticesM[v].X.ToString("0.000", CultureInfo.InvariantCulture) + " " +
+                              rm.VerticesM[v].Y.ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                    sb.Append("R_Wall" + (v + 1).ToString(CultureInfo.InvariantCulture) + "=" +
+                              reflWalls.ToString("0.00", CultureInfo.InvariantCulture) + "\r\n");
                 }
-                sb.AppendLine("NrStructs=0");
-                sb.AppendLine("NrLuminaires=" + lums.Count.ToString(CultureInfo.InvariantCulture));
+                sb.Append("NrStruct=0\r\n");
+                sb.Append("NrLums=" + lums.Count.ToString(CultureInfo.InvariantCulture) + "\r\n");
                 for (int k = 0; k < lums.Count; k++)
                 {
                     double[] lp = lums[k];
                     string pfx = "Lum" + (k + 1).ToString(CultureInfo.InvariantCulture);
-                    sb.AppendLine(pfx + "=" + lumKey);
-                    sb.AppendLine(pfx + ".Pos=" + lp[0].ToString("0.000", CultureInfo.InvariantCulture) + " " +
-                                  lp[1].ToString("0.000", CultureInfo.InvariantCulture) + " " +
-                                  lp[2].ToString("0.000", CultureInfo.InvariantCulture));
-                    sb.AppendLine(pfx + ".Rot=0.000 0.000 " + lp[3].ToString("0.000", CultureInfo.InvariantCulture));
+                    sb.Append(pfx + "=" + lumSection + "\r\n");
+                    sb.Append(pfx + ".Pos=" + lp[0].ToString("0.000", CultureInfo.InvariantCulture) + " " +
+                              lp[1].ToString("0.000", CultureInfo.InvariantCulture) + " " +
+                              lp[2].ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                    sb.Append(pfx + ".Rot=0.000 0.000 " + lp[3].ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
                 }
-                sb.AppendLine();
+                sb.Append("\r\n");
             }
 
-            Directory.CreateDirectory(Path.GetDirectoryName(stfPath));
-            File.WriteAllText(stfPath, sb.ToString(), new UTF8Encoding(false));
-            return stfPath;
+            string fullStf = Path.GetFullPath(stfPath);
+            string dir = Path.GetDirectoryName(fullStf);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(fullStf, sb.ToString(), new UTF8Encoding(false));
+            return fullStf;
         }
 
         private static Dictionary<string, object> LightingDesignEngine(Document doc, Dictionary<string, object> args)
@@ -817,7 +831,7 @@ namespace AIEngineer.AutoCAD
 
                         for (int gy = 0; gy < evalNy; gy++)
                         {
-                            double y = rm.MinYm + (lenM > 0 ? ((rm.MaxYm - rm.MinYm) * (gy + 0.5) / evalNy) : 0);
+                            double y = rm.MinYm + (widM > 0 ? ((rm.MaxYm - rm.MinYm) * (gy + 0.5) / evalNy) : 0);
                             for (int gx = 0; gx < evalNx; gx++)
                             {
                                 double x = rm.MinXm + (rm.MaxXm - rm.MinXm) * (gx + 0.5) / evalNx;

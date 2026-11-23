@@ -20,6 +20,146 @@ namespace AIEngineer.AutoCAD
         public const string ReviewLayerName = "_AI_PREVIEW_REVIEW";
         private static ObjectId _lastInsertedBlockRefId = ObjectId.Null;
 
+        private static string ResolveRepoRoot()
+        {
+            string envRoot = Environment.GetEnvironmentVariable("AI_ENGINEER_ROOT");
+            if (!string.IsNullOrWhiteSpace(envRoot) && Directory.Exists(envRoot))
+                return Path.GetFullPath(envRoot.Trim());
+
+            try
+            {
+                string asmDir = Path.GetDirectoryName(typeof(DrawingExecutionCommands).Assembly.Location);
+                if (!string.IsNullOrEmpty(asmDir))
+                {
+                    // Check settings.json written by build.ps1 alongside the DLL
+                    string settingsPath = Path.Combine(asmDir, "settings.json");
+                    if (File.Exists(settingsPath))
+                    {
+                        try
+                        {
+                            System.Web.Script.Serialization.JavaScriptSerializer ser =
+                                new System.Web.Script.Serialization.JavaScriptSerializer();
+                            Dictionary<string, object> cfg = ser.DeserializeObject(File.ReadAllText(settingsPath, Encoding.UTF8)) as Dictionary<string, object>;
+                            if (cfg != null && cfg.ContainsKey("workspace_root") && cfg["workspace_root"] != null)
+                            {
+                                string ws = cfg["workspace_root"].ToString().Trim();
+                                if (!string.IsNullOrEmpty(ws) && Directory.Exists(ws))
+                                {
+                                    if (File.Exists(Path.Combine(Path.Combine(ws, "integrations"), "cad_geometry_engine.py")))
+                                        return Path.GetFullPath(ws);
+                                    DirectoryInfo wsParent = Directory.GetParent(ws);
+                                    if (wsParent != null && File.Exists(Path.Combine(Path.Combine(wsParent.FullName, "integrations"), "cad_geometry_engine.py")))
+                                        return wsParent.FullName;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    DirectoryInfo cur = new DirectoryInfo(asmDir);
+                    for (int depth = 0; cur != null && depth < 8; depth++)
+                    {
+                        if (File.Exists(Path.Combine(Path.Combine(cur.FullName, "integrations"), "cad_geometry_engine.py")))
+                            return cur.FullName;
+                        cur = cur.Parent;
+                    }
+                }
+            }
+            catch { }
+
+            return Environment.CurrentDirectory;
+        }
+
+        private static string ResolvePythonExecutable(string repoRoot)
+        {
+            string envPy = Environment.GetEnvironmentVariable("AI_ENGINEER_PYTHON");
+            if (!string.IsNullOrWhiteSpace(envPy) && File.Exists(envPy.Trim()))
+                return envPy.Trim();
+
+            if (!string.IsNullOrWhiteSpace(repoRoot))
+            {
+                string[] venvCandidates = new string[]
+                {
+                    Path.Combine(Path.Combine(Path.Combine(repoRoot, ".venv"), "Scripts"), "python.exe"),
+                    Path.Combine(Path.Combine(Path.Combine(repoRoot, "venv"), "Scripts"), "python.exe")
+                };
+                for (int i = 0; i < venvCandidates.Length; i++)
+                {
+                    if (File.Exists(venvCandidates[i])) return venvCandidates[i];
+                }
+            }
+
+            string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+            string[] dirs = pathEnv.Split(new char[] { Path.PathSeparator }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                try
+                {
+                    string candidate = Path.Combine(dirs[i].Trim(), "python.exe");
+                    if (File.Exists(candidate)) return candidate;
+                }
+                catch { }
+            }
+            return "";
+        }
+
+        internal static string ResolveOutputDirectory(Document doc, string subFolder)
+        {
+            return ResolveOutputDirectory(doc, ResolveRepoRoot(), subFolder);
+        }
+
+        private static string ResolveOutputDirectory(Document doc, string repoRoot, string subFolder)
+        {
+            if (doc != null && !string.IsNullOrWhiteSpace(doc.Name))
+            {
+                try
+                {
+                    if (Path.IsPathRooted(doc.Name))
+                    {
+                        string docDir = Path.GetDirectoryName(doc.Name);
+                        if (!string.IsNullOrEmpty(docDir) && Directory.Exists(docDir))
+                            return Path.Combine(docDir, subFolder);
+                    }
+                }
+                catch { }
+            }
+            if (!string.IsNullOrWhiteSpace(repoRoot) && Directory.Exists(repoRoot))
+                return Path.Combine(Path.Combine(repoRoot, "workspace"), subFolder);
+
+            string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            return Path.Combine(Path.Combine(localApp, "AI-Engineer"), subFolder);
+        }
+
+        private static void RunPythonScriptWithTimeout(string pyExe, string arguments, string workingDir, int timeoutMs)
+        {
+            System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(pyExe, arguments);
+            if (!string.IsNullOrWhiteSpace(workingDir) && Directory.Exists(workingDir))
+                psi.WorkingDirectory = workingDir;
+            psi.EnvironmentVariables["PYTHONUTF8"] = "1";
+            psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+            psi.CreateNoWindow = true;
+            psi.UseShellExecute = false;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = Encoding.UTF8;
+            psi.StandardErrorEncoding = Encoding.UTF8;
+            using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi))
+            {
+                if (p == null) return;
+                System.Threading.Tasks.Task<string> outTask = p.StandardOutput.ReadToEndAsync();
+                System.Threading.Tasks.Task<string> errTask = p.StandardError.ReadToEndAsync();
+                if (!p.WaitForExit(timeoutMs))
+                {
+                    try { p.Kill(); } catch { }
+                    throw new TimeoutException("Python script timed out after " + timeoutMs.ToString(CultureInfo.InvariantCulture) + " ms.");
+                }
+                string errText = errTask.Wait(2000) ? errTask.Result : "";
+                outTask.Wait(1000);
+                if (p.ExitCode != 0)
+                    throw new InvalidOperationException("Python script exited with code " + p.ExitCode.ToString(CultureInfo.InvariantCulture) + (string.IsNullOrWhiteSpace(errText) ? "" : (": " + errText.Trim())));
+            }
+        }
+
         [CommandMethod("AIENGDRAWHOUSE", CommandFlags.Session)]
         [CommandMethod("AIENGDRAW150", CommandFlags.Session)]
         public void DrawHouseCommand()
@@ -82,25 +222,27 @@ namespace AIEngineer.AutoCAD
             if (doc == null) { errorMessage = "لا يوجد مستند أوتوكاد نشط."; return false; }
             try
             {
-                string dxfPath = @"D:\program\apartment_150sqm\house-150sqm-electrical-plan.dxf";
+                string repoRoot = ResolveRepoRoot();
+                string outDir = ResolveOutputDirectory(doc, repoRoot, "apartment_150sqm");
+                Directory.CreateDirectory(outDir);
+                string dxfPath = Path.Combine(outDir, "house-150sqm-electrical-plan.dxf");
                 if (!File.Exists(dxfPath))
                 {
-                    string pyExe = @"D:\program\AI-Engineer-r50\New folder\.venv\Scripts\python.exe";
-                    string script = @"D:\program\AI-Engineer-r50\New folder\integrations\build_house_150sqm_electrical.py";
-                    if (File.Exists(pyExe) && File.Exists(script))
+                    string pyExe = ResolvePythonExecutable(repoRoot);
+                    string script = Path.Combine(Path.Combine(repoRoot, "integrations"), "build_house_150sqm_electrical.py");
+                    if (!string.IsNullOrEmpty(pyExe) && File.Exists(pyExe) && File.Exists(script))
                     {
-                        System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(
-                            pyExe, "\"" + script + "\" --output-dir \"D:\\program\\apartment_150sqm\"");
-                        psi.CreateNoWindow = true;
-                        psi.UseShellExecute = false;
-                        System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi);
-                        p.WaitForExit(10000);
+                        RunPythonScriptWithTimeout(
+                            pyExe,
+                            "\"" + script + "\" --output-dir \"" + outDir + "\"",
+                            repoRoot,
+                            10000);
                     }
                 }
 
                 if (!File.Exists(dxfPath))
                 {
-                    errorMessage = "ملف DXF الكهربائي غير موجود.";
+                    errorMessage = "ملف DXF الكهربائي غير موجود في المسار: " + dxfPath;
                     return false;
                 }
 
@@ -124,21 +266,30 @@ namespace AIEngineer.AutoCAD
             isClarification = false;
             errorMessage = null;
             if (doc == null) { errorMessage = "لا يوجد مستند أوتوكاد نشط."; return false; }
+            string promptFile = null;
             try
             {
-                string pyExe = @"D:\program\AI-Engineer-r50\New folder\.venv\Scripts\python.exe";
-                string script = @"D:\program\AI-Engineer-r50\New folder\integrations\cad_geometry_engine.py";
-                if (!File.Exists(pyExe) || !File.Exists(script))
+                string repoRoot = ResolveRepoRoot();
+                string pyExe = ResolvePythonExecutable(repoRoot);
+                string script = Path.Combine(Path.Combine(repoRoot, "integrations"), "cad_geometry_engine.py");
+                if (string.IsNullOrEmpty(pyExe) || !File.Exists(pyExe) || !File.Exists(script))
                 {
-                    errorMessage = "محرك بايثون الهندسي غير موجود.";
+                    errorMessage = "محرك بايثون الهندسي غير موجود. تأكد من تعيين AI_ENGINEER_ROOT أو تثبيت .venv.";
                     return false;
                 }
 
+                string outDir = ResolveOutputDirectory(doc, repoRoot, "apartment_150sqm");
+                Directory.CreateDirectory(outDir);
+
+                promptFile = Path.Combine(Path.GetTempPath(), "ai_eng_prompt_" + Guid.NewGuid().ToString("N") + ".txt");
+                File.WriteAllText(promptFile, userPrompt ?? "", Encoding.UTF8);
+
                 System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo();
                 psi.FileName = pyExe;
-                psi.WorkingDirectory = @"D:\program\AI-Engineer-r50\New folder";
-                psi.Arguments = string.Format("\"{0}\" --prompt \"{1}\" --output-dir \"D:\\program\\apartment_150sqm\"",
-                    script, userPrompt.Replace("\"", "\\\""));
+                psi.WorkingDirectory = repoRoot;
+                psi.Arguments = string.Format(
+                    "\"{0}\" --prompt-file \"{1}\" --output-dir \"{2}\"",
+                    script, promptFile, outDir);
                 psi.EnvironmentVariables["PYTHONUTF8"] = "1";
                 psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
                 psi.CreateNoWindow = true;
@@ -154,7 +305,10 @@ namespace AIEngineer.AutoCAD
                 {
                     System.Threading.Tasks.Task<string> errTask = p.StandardError.ReadToEndAsync();
                     outputJson = p.StandardOutput.ReadToEnd();
-                    p.WaitForExit(30000);
+                    if (!p.WaitForExit(30000))
+                    {
+                        try { p.Kill(); } catch { }
+                    }
                     errorOutput = errTask.Wait(2000) ? errTask.Result : "";
                 }
 
@@ -206,6 +360,13 @@ namespace AIEngineer.AutoCAD
             {
                 errorMessage = ex.Message;
                 return false;
+            }
+            finally
+            {
+                if (!string.IsNullOrEmpty(promptFile))
+                {
+                    try { if (File.Exists(promptFile)) File.Delete(promptFile); } catch { }
+                }
             }
         }
 
@@ -407,7 +568,7 @@ namespace AIEngineer.AutoCAD
                 bool wantsFileCopy = lower.Contains("ملف") || lower.Contains("dwg") || lower.Contains("حفظ") || lower.Contains("على الهارد");
                 if (wantsFileCopy)
                 {
-                    string outDir = @"D:\program\apartment_150sqm";
+                    string outDir = ResolveOutputDirectory(doc, ResolveRepoRoot(), "AI-Engineer-Copies");
                     Directory.CreateDirectory(outDir);
                     string baseName = Path.GetFileNameWithoutExtension(doc.Name ?? "drawing");
                     if (string.IsNullOrWhiteSpace(baseName)) baseName = "drawing";
@@ -541,19 +702,21 @@ namespace AIEngineer.AutoCAD
             if (doc == null) { errorMessage = "لا يوجد مستند أوتوكاد نشط."; return false; }
             try
             {
-                string dxfPath = @"D:\program\apartment_150sqm\house-150sqm-egyptian-code-concept-review.dxf";
+                string repoRoot = ResolveRepoRoot();
+                string outDir = ResolveOutputDirectory(doc, repoRoot, "apartment_150sqm");
+                Directory.CreateDirectory(outDir);
+                string dxfPath = Path.Combine(outDir, "house-150sqm-egyptian-code-concept-review.dxf");
                 if (!File.Exists(dxfPath))
                 {
-                    string pyExe = @"D:\program\AI-Engineer-r50\New folder\.venv\Scripts\python.exe";
-                    string script = @"D:\program\AI-Engineer-r50\New folder\integrations\build_house_150sqm_preview.py";
-                    if (File.Exists(pyExe) && File.Exists(script))
+                    string pyExe = ResolvePythonExecutable(repoRoot);
+                    string script = Path.Combine(Path.Combine(repoRoot, "integrations"), "build_house_150sqm_preview.py");
+                    if (!string.IsNullOrEmpty(pyExe) && File.Exists(pyExe) && File.Exists(script))
                     {
-                        System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(
-                            pyExe, "\"" + script + "\" --output-dir \"D:\\program\\apartment_150sqm\"");
-                        psi.CreateNoWindow = true;
-                        psi.UseShellExecute = false;
-                        System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi);
-                        p.WaitForExit(10000);
+                        RunPythonScriptWithTimeout(
+                            pyExe,
+                            "\"" + script + "\" --output-dir \"" + outDir + "\"",
+                            repoRoot,
+                            10000);
                     }
                 }
 
