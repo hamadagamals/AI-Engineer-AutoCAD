@@ -1488,6 +1488,14 @@ namespace AIEngineer.AutoCAD
             double? customGap = GetNullableDouble(args, "gap");
             bool zoom = GetBool(args, "zoom", true);
             string zoomMode = (GetStr(args, "zoom_mode") ?? "legend").Trim().ToLowerInvariant();
+            bool includeElectricalCols = GetBool(args, "include_electrical_columns", false);
+            Dictionary<string, object> rowLoadMap = (args != null && args.ContainsKey("row_load_by_block"))
+                ? (args["row_load_by_block"] as Dictionary<string, object>)
+                : null;
+            string totalLoadLabel = GetStr(args, "total_load_label") ?? "";
+            string maxVdLabel = GetStr(args, "max_vd_label") ?? "";
+            string rowVdLabel = GetStr(args, "row_vd_label") ?? "";
+            bool vdPass = GetBool(args, "vd_pass", true);
 
             Database db = doc.Database;
             int erasedCount = 0;
@@ -1780,14 +1788,25 @@ namespace AIEngineer.AutoCAD
                     double titleH = rowH * 1.20;
                     double headerH = rowH * 1.08;
                     double footerH = rowH * 0.95;
-                    double[] colW = new double[]
-                    {
-                        rowH * 1.15, // م
-                        rowH * 2.55, // شكل البلوك
-                        rowH * 3.85, // اسم البلوك
-                        rowH * 6.45, // الوصف الهندسي
-                        rowH * 1.50  // الكمية
-                    };
+                    double[] colW = includeElectricalCols
+                        ? new double[]
+                        {
+                            rowH * 1.15, // م
+                            rowH * 2.55, // شكل البلوك
+                            rowH * 3.85, // اسم البلوك
+                            rowH * 5.80, // الوصف الهندسي
+                            rowH * 1.45, // الكمية
+                            rowH * 3.40, // الحمل الكلي
+                            rowH * 3.20  // أقصى هبوط جهد VD%
+                        }
+                        : new double[]
+                        {
+                            rowH * 1.15, // م
+                            rowH * 2.55, // شكل البلوك
+                            rowH * 3.85, // اسم البلوك
+                            rowH * 6.45, // الوصف الهندسي
+                            rowH * 1.50  // الكمية
+                        };
                     double tableW = 0.0;
                     for (int i = 0; i < colW.Length; i++) tableW += colW[i];
                     double tableH = titleH + headerH + (entries.Count * rowH) + footerH;
@@ -1906,10 +1925,10 @@ namespace AIEngineer.AutoCAD
                         addGridLine(x0, ry, x0 + tableW, ry, 8);
                     }
 
-                    // Inner vertical dividers (start from yTitleBot down to yDataBot; col 4 divider continues through footer)
+                    // Inner vertical dividers (start from yTitleBot down to yDataBot; cols >= 4 continue through footer)
                     for (int c = 1; c < colW.Length; c++)
                     {
-                        double vBot = (c == colW.Length - 1) ? yBottom : yDataBot;
+                        double vBot = (c >= 4) ? yBottom : yDataBot;
                         addGridLine(colX[c], yTitleBot, colX[c], vBot, 8);
                     }
 
@@ -1921,7 +1940,9 @@ namespace AIEngineer.AutoCAD
                         AttachmentPoint.MiddleCenter, 2, safeLegendLayer);
                     createdHandles.Add(titleMt.Handle.ToString());
 
-                    string[] headers = new string[] { "م", "شكل البلوك", "اسم البلوك", "الوصف الهندسي", "الكمية" };
+                    string[] headers = includeElectricalCols
+                        ? new string[] { "م", "شكل البلوك", "اسم البلوك", "الوصف الهندسي", "الكمية", "الحمل الكلي", "أقصى هبوط جهد VD%" }
+                        : new string[] { "م", "شكل البلوك", "اسم البلوك", "الوصف الهندسي", "الكمية" };
                     for (int c = 0; c < headers.Length; c++)
                     {
                         MText hMt = CreateLegendCellMText(
@@ -2030,6 +2051,38 @@ namespace AIEngineer.AutoCAD
                             AttachmentPoint.MiddleCenter, 3, safeLegendLayer);
                         createdHandles.Add(qtyMt.Handle.ToString());
 
+                        string rLoadTxt = "—";
+                        string rVdTxt = "—";
+                        if (includeElectricalCols)
+                        {
+                            if (rowLoadMap != null)
+                            {
+                                foreach (KeyValuePair<string, object> rkv in rowLoadMap)
+                                {
+                                    if (string.Equals(rkv.Key, entry.Name, StringComparison.OrdinalIgnoreCase) && rkv.Value != null)
+                                    {
+                                        rLoadTxt = Convert.ToString(rkv.Value, CultureInfo.InvariantCulture);
+                                        break;
+                                    }
+                                }
+                            }
+                            rVdTxt = (entries.Count == 1 && !string.IsNullOrEmpty(rowVdLabel)) ? rowVdLabel : "ضمن اللينية";
+
+                            MText loadMt = CreateLegendCellMText(
+                                ms, tr, unicodeStyleId, rLoadTxt,
+                                colX[5] + colW[5] / 2.0, rCy,
+                                colW[5] * 0.90, rowH * 0.80, rowH * 0.21, rowH,
+                                AttachmentPoint.MiddleCenter, 2, safeLegendLayer);
+                            createdHandles.Add(loadMt.Handle.ToString());
+
+                            MText vdMt = CreateLegendCellMText(
+                                ms, tr, unicodeStyleId, rVdTxt,
+                                colX[6] + colW[6] / 2.0, rCy,
+                                colW[6] * 0.90, rowH * 0.80, rowH * 0.21, rowH,
+                                AttachmentPoint.MiddleCenter, vdPass ? (short)3 : (short)1, safeLegendLayer);
+                            createdHandles.Add(vdMt.Handle.ToString());
+                        }
+
                         Dictionary<string, object> rowSummary = new Dictionary<string, object>
                         {
                             { "index", r + 1 },
@@ -2038,6 +2091,11 @@ namespace AIEngineer.AutoCAD
                             { "quantity", qty },
                             { "symbol_drawn", symInserted }
                         };
+                        if (includeElectricalCols)
+                        {
+                            rowSummary["load"] = rLoadTxt;
+                            rowSummary["max_vd"] = rVdTxt;
+                        }
                         if (entry.DominantColor != null)
                             rowSummary["color_index"] = (int)entry.DominantColor.ColorIndex;
                         rowSummaries.Add(rowSummary);
@@ -2064,6 +2122,23 @@ namespace AIEngineer.AutoCAD
                         colW[4] * 0.86, footerH * 0.76, footerH * 0.30, rowH,
                         AttachmentPoint.MiddleCenter, 3, safeLegendLayer);
                     createdHandles.Add(footQty.Handle.ToString());
+
+                    if (includeElectricalCols)
+                    {
+                        MText footLoad = CreateLegendCellMText(
+                            ms, tr, unicodeStyleId, totalLoadLabel,
+                            colX[5] + colW[5] / 2.0, fCy,
+                            colW[5] * 0.92, footerH * 0.78, footerH * 0.22, rowH,
+                            AttachmentPoint.MiddleCenter, 2, safeLegendLayer);
+                        createdHandles.Add(footLoad.Handle.ToString());
+
+                        MText footVd = CreateLegendCellMText(
+                            ms, tr, unicodeStyleId, maxVdLabel,
+                            colX[6] + colW[6] / 2.0, fCy,
+                            colW[6] * 0.92, footerH * 0.78, footerH * 0.20, rowH,
+                            AttachmentPoint.MiddleCenter, vdPass ? (short)3 : (short)1, safeLegendLayer);
+                        createdHandles.Add(footVd.Handle.ToString());
+                    }
 
                     db.UpdateExt(true);
                     tr.Commit();
@@ -2113,6 +2188,7 @@ namespace AIEngineer.AutoCAD
                 { "layer", safeLegendLayer },
                 { "switched_to_model", switchedToModel },
                 { "unicode_font", "Arial (_AI_UNICODE)" },
+                { "has_electrical_columns", includeElectricalCols },
                 { "rows", rowSummaries }
             };
 
@@ -2120,20 +2196,30 @@ namespace AIEngineer.AutoCAD
             {
                 Title = title,
                 SheetName = "Block_Legend",
-                Headers = new List<string> { "م", "اسم البلوك", "الوصف الهندسي", "الكمية" },
-                FooterRow = new List<string> { "", "الإجمالي الكلي للبلوكات (Total)", "", totalBlocksRepresented.ToString(CultureInfo.InvariantCulture) }
+                Headers = includeElectricalCols
+                    ? new List<string> { "م", "اسم البلوك", "الوصف الهندسي", "الكمية", "الحمل الكلي", "أقصى هبوط جهد VD%" }
+                    : new List<string> { "م", "اسم البلوك", "الوصف الهندسي", "الكمية" },
+                FooterRow = includeElectricalCols
+                    ? new List<string> { "", "الإجمالي الكلي للبلوكات (Total)", "", totalBlocksRepresented.ToString(CultureInfo.InvariantCulture), totalLoadLabel, maxVdLabel }
+                    : new List<string> { "", "الإجمالي الكلي للبلوكات (Total)", "", totalBlocksRepresented.ToString(CultureInfo.InvariantCulture) }
             };
             for (int r = 0; r < rowSummaries.Count; r++)
             {
                 Dictionary<string, object> rs = rowSummaries[r] as Dictionary<string, object>;
                 if (rs == null) continue;
-                legendSheet.Rows.Add(new List<string>
+                List<string> xlRow = new List<string>
                 {
                     Convert.ToString(rs["index"], CultureInfo.InvariantCulture),
                     Convert.ToString(rs["block_name"], CultureInfo.InvariantCulture),
                     Convert.ToString(rs["description"], CultureInfo.InvariantCulture),
                     Convert.ToString(rs["quantity"], CultureInfo.InvariantCulture)
-                });
+                };
+                if (includeElectricalCols)
+                {
+                    xlRow.Add(rs.ContainsKey("load") && rs["load"] != null ? Convert.ToString(rs["load"], CultureInfo.InvariantCulture) : "—");
+                    xlRow.Add(rs.ContainsKey("max_vd") && rs["max_vd"] != null ? Convert.ToString(rs["max_vd"], CultureInfo.InvariantCulture) : "—");
+                }
+                legendSheet.Rows.Add(xlRow);
             }
             lock (s_lastCoordLock)
             {

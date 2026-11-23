@@ -249,16 +249,24 @@ namespace AIEngineer.AutoCAD
         private static LvCircuitCalcResult ComputeSingleLvCircuit(Dictionary<string, object> item, Dictionary<string, object> defaults, int fallbackIndex)
         {
             string name = GetStr(item, "name") ?? GetStr(item, "circuit") ?? GetStr(item, "circuit_name") ?? ("C-" + fallbackIndex.ToString(CultureInfo.InvariantCulture));
-            string loadType = (GetStr(item, "load_type") ?? GetStr(defaults, "load_type") ?? "power").Trim().ToLowerInvariant();
+            string rawLoadType = (GetStr(item, "load_type") ?? GetStr(defaults, "load_type") ?? "power").Trim().ToLowerInvariant();
+            string loadType = rawLoadType;
+            if (rawLoadType == "lighting" || rawLoadType == "light" || rawLoadType == "luminaire" ||
+                rawLoadType == "إنارة" || rawLoadType == "انارة" || rawLoadType == "اضاءة" || rawLoadType == "إضاءة")
+                loadType = "lighting";
+            else if (rawLoadType == "socket" || rawLoadType == "sockets" || rawLoadType == "receptacle" ||
+                     rawLoadType == "بريزة" || rawLoadType == "برايز" || rawLoadType == "أفياش" || rawLoadType == "افياش")
+                loadType = "socket";
 
-            int phases = GetInt(item, "phases", GetInt(defaults, "phases", 3));
-            if (phases != 1 && phases != 3) phases = 3;
+            int defaultPhases = (loadType == "lighting" || loadType == "socket") ? 1 : 3;
+            int phases = GetInt(item, "phases", GetInt(defaults, "phases", defaultPhases));
+            if (phases != 1 && phases != 3) phases = defaultPhases;
 
             double defaultV = (phases == 1) ? 220.0 : 380.0;
             double voltageV = GetDouble(item, "voltage_v", GetDouble(defaults, "voltage_v", defaultV));
             if (voltageV <= 10.0) voltageV = defaultV;
 
-            double defaultPf = (loadType == "lighting" || loadType == "إنارة") ? 0.90 : 0.85;
+            double defaultPf = (loadType == "lighting") ? 0.90 : 0.85;
             double pf = GetDouble(item, "power_factor", GetDouble(defaults, "power_factor", defaultPf));
             pf = Math.Max(0.4, Math.Min(1.0, pf));
 
@@ -275,10 +283,14 @@ namespace AIEngineer.AutoCAD
             double? loadKvaOpt = GetNullableDouble(item, "load_kva");
             double? loadHpOpt = GetNullableDouble(item, "load_hp");
             double? loadAmpsOpt = GetNullableDouble(item, "load_amps");
+            double? fixtureCountOpt = GetNullableDouble(item, "fixture_count") ?? GetNullableDouble(defaults, "fixture_count");
+            double? fixtureWattOpt = GetNullableDouble(item, "fixture_watt") ?? GetNullableDouble(defaults, "fixture_watt");
+            double? fixtureVaOpt = GetNullableDouble(item, "fixture_va") ?? GetNullableDouble(defaults, "fixture_va");
 
             double loadKw = 0.0;
             double loadKva = 0.0;
             double ib = 0.0;
+            string fixtureCalcNote = null;
 
             if (loadAmpsOpt.HasValue && loadAmpsOpt.Value > 0)
             {
@@ -314,9 +326,35 @@ namespace AIEngineer.AutoCAD
                     ? (loadKva * 1000.0) / (Math.Sqrt(3.0) * voltageV)
                     : (loadKva * 1000.0) / voltageV;
             }
+            else if (fixtureCountOpt.HasValue && fixtureCountOpt.Value > 0 && fixtureWattOpt.HasValue && fixtureWattOpt.Value > 0)
+            {
+                double rawKw = (fixtureCountOpt.Value * fixtureWattOpt.Value) / 1000.0;
+                loadKw = rawKw * demandFactor;
+                loadKva = loadKw / (pf * eff);
+                ib = (phases == 3)
+                    ? (loadKva * 1000.0) / (Math.Sqrt(3.0) * voltageV)
+                    : (loadKva * 1000.0) / voltageV;
+                fixtureCalcNote = "Fixture load: " + Math.Round(fixtureCountOpt.Value, 2).ToString(CultureInfo.InvariantCulture) +
+                    " x " + Math.Round(fixtureWattOpt.Value, 2).ToString(CultureInfo.InvariantCulture) +
+                    " W = " + Math.Round(rawKw * 1000.0, 1).ToString(CultureInfo.InvariantCulture) +
+                    " W (" + Math.Round(loadKw, 3).ToString(CultureInfo.InvariantCulture) + " kW).";
+            }
+            else if (fixtureCountOpt.HasValue && fixtureCountOpt.Value > 0 && fixtureVaOpt.HasValue && fixtureVaOpt.Value > 0)
+            {
+                double rawKva = (fixtureCountOpt.Value * fixtureVaOpt.Value) / 1000.0;
+                loadKva = rawKva * demandFactor;
+                loadKw = loadKva * pf;
+                ib = (phases == 3)
+                    ? (loadKva * 1000.0) / (Math.Sqrt(3.0) * voltageV)
+                    : (loadKva * 1000.0) / voltageV;
+                fixtureCalcNote = "Fixture load: " + Math.Round(fixtureCountOpt.Value, 2).ToString(CultureInfo.InvariantCulture) +
+                    " x " + Math.Round(fixtureVaOpt.Value, 2).ToString(CultureInfo.InvariantCulture) +
+                    " VA = " + Math.Round(rawKva * 1000.0, 1).ToString(CultureInfo.InvariantCulture) +
+                    " VA (" + Math.Round(loadKva, 3).ToString(CultureInfo.InvariantCulture) + " kVA).";
+            }
             else
             {
-                throw new InvalidOperationException("Circuit '" + name + "' requires one positive load input: load_kw, load_kva, load_hp, or load_amps.");
+                throw new InvalidOperationException("Circuit '" + name + "' requires one positive load input: load_kw, load_kva, load_hp, load_amps, or fixture_count with fixture_watt/fixture_va.");
             }
 
             double lengthM = Math.Max(0.0, GetDouble(item, "length_m", GetDouble(defaults, "length_m", 25.0)));
@@ -492,10 +530,10 @@ namespace AIEngineer.AutoCAD
             res.LoadType = loadType;
             res.Phases = phases;
             res.VoltageV = voltageV;
-            res.LoadKw = Math.Round(loadKw, 2);
-            res.LoadKva = Math.Round(loadKva, 2);
+            res.LoadKw = Math.Round(loadKw, 3);
+            res.LoadKva = Math.Round(loadKva, 3);
             res.PowerFactor = pf;
-            res.LengthM = Math.Round(lengthM, 1);
+            res.LengthM = Math.Round(lengthM, 2);
             res.DesignCurrentA = Math.Round(ib, 2);
             res.RequiredCurrentA = Math.Round(requiredCurrent, 2);
             res.BreakerRatingA = breakerA;
@@ -526,6 +564,8 @@ namespace AIEngineer.AutoCAD
             res.MinAdiabaticCableMm2 = Math.Round(minScMm2, 2);
             res.Status = "PASS";
 
+            if (!string.IsNullOrEmpty(fixtureCalcNote))
+                res.Notes.Add(fixtureCalcNote);
             if (upsizedForVd)
                 res.Notes.Add("Cable upsized to satisfy voltage drop limit (" + maxVdPct.ToString("0.#", CultureInfo.InvariantCulture) + "%).");
             if (upsizedForSc)
@@ -628,14 +668,14 @@ namespace AIEngineer.AutoCAD
                 List<string> row = new List<string>
                 {
                     r.CircuitName,
-                    r.LoadKw.ToString("0.##", CultureInfo.InvariantCulture),
+                    r.LoadKw.ToString("0.###", CultureInfo.InvariantCulture),
                     r.Phases.ToString(CultureInfo.InvariantCulture) + "P / " + r.VoltageV.ToString("0", CultureInfo.InvariantCulture) + "V",
-                    r.DesignCurrentA.ToString("0.0", CultureInfo.InvariantCulture),
+                    r.DesignCurrentA.ToString("0.##", CultureInfo.InvariantCulture),
                     r.BreakerRatingA.ToString("0", CultureInfo.InvariantCulture) + "A " + r.BreakerType + " (" + r.RecommendedIcuKa.ToString("0", CultureInfo.InvariantCulture) + "kA)",
                     r.CombinedDerating.ToString("0.00", CultureInfo.InvariantCulture),
                     r.CableDesignation,
                     r.DeratedAmpacityTotalA.ToString("0.0", CultureInfo.InvariantCulture),
-                    r.LengthM.ToString("0.#", CultureInfo.InvariantCulture),
+                    r.LengthM.ToString("0.##", CultureInfo.InvariantCulture),
                     r.VoltageDropPercent.ToString("0.00", CultureInfo.InvariantCulture) + "% (max " + r.MaxAllowedVdPercent.ToString("0.#", CultureInfo.InvariantCulture) + "%)"
                 };
                 if (hasAnySc)
@@ -645,15 +685,15 @@ namespace AIEngineer.AutoCAD
             }
 
             sheet.FooterRow = hasAnySc
-                ? new List<string> { "الإجمالي (" + results.Count + ")", Math.Round(totalKw, 2).ToString("0.##", CultureInfo.InvariantCulture) + " kW / " + Math.Round(totalKva, 2).ToString("0.##", CultureInfo.InvariantCulture) + " kVA", "", "", "", "", "", "", "", "", "", "PASS" }
-                : new List<string> { "الإجمالي (" + results.Count + ")", Math.Round(totalKw, 2).ToString("0.##", CultureInfo.InvariantCulture) + " kW / " + Math.Round(totalKva, 2).ToString("0.##", CultureInfo.InvariantCulture) + " kVA", "", "", "", "", "", "", "", "", "PASS" };
+                ? new List<string> { "الإجمالي (" + results.Count + ")", Math.Round(totalKw, 3).ToString("0.###", CultureInfo.InvariantCulture) + " kW / " + Math.Round(totalKva, 3).ToString("0.###", CultureInfo.InvariantCulture) + " kVA", "", "", "", "", "", "", "", "", "", "PASS" }
+                : new List<string> { "الإجمالي (" + results.Count + ")", Math.Round(totalKw, 3).ToString("0.###", CultureInfo.InvariantCulture) + " kW / " + Math.Round(totalKva, 3).ToString("0.###", CultureInfo.InvariantCulture) + " kVA", "", "", "", "", "", "", "", "", "PASS" };
 
             Dictionary<string, object> response = new Dictionary<string, object>
             {
                 { "standard", "IEC 60364 / ECP (Deterministic)" },
                 { "circuits_count", results.Count },
-                { "total_load_kw", Math.Round(totalKw, 2) },
-                { "total_load_kva", Math.Round(totalKva, 2) },
+                { "total_load_kw", Math.Round(totalKw, 3) },
+                { "total_load_kva", Math.Round(totalKva, 3) },
                 { "results", resultDicts }
             };
 

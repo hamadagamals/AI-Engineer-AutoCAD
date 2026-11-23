@@ -2085,7 +2085,7 @@ namespace AIEngineer.AutoCAD
                 "- Excel <-> AutoCAD Interop: `export_to_excel` (export AutoCAD tables, coordinate schedules, panel load schedules, BOQ, block legends, or selected tables to `.xlsx`/`.csv`), `import_excel_table` (import `.xlsx`/`.xlsm`/`.csv` spreadsheets into AutoCAD with crisp TrueType Arial Unicode formatting or native AutoCAD Table)\n" +
                 "- MEP Load Schedules & Quantity Takeoff: `extract_load_schedule` (extract electrical circuit/panel load schedules from blocks + neighbor texts `63A`/`100A`/`15KW`/`4x16mm2` + sample connected feeder path lengths -> AutoCAD & Excel), `quantity_takeoff` (linear cable/pipe lengths by layer, closed room/polygon areas with optional centroid labels, block counts, vertical/waste allowances -> BOQ table & Excel)\n" +
                 "- Lighting Design & DIALux Bridge: `lighting_design_engine` (automated room-by-room lighting calculation & symmetric grid placement using Egyptian Code ECP / EN 12464-1 / CIBSE, real .ies/.ldt photometric file parser, point-by-point Avg/Min Lux & Uniformity U0, 3-phase wiring & CAD/Excel/STF output), `export_dialux_stf` (export AutoCAD rooms + luminaire positions in meters to DIALux .stf + optional clean DWG)\n" +
-                "- Deterministic LV Electrical Calculations (IEC 60364 / ECP): `calculate_lv_electrical` (ALWAYS call this tool — NEVER do mental math — whenever the engineer asks for cable sizing, circuit breaker In/Icu, derating Ca/Cg, voltage drop V/%, protective earth PE, or short-circuit Isc / adiabatic check for a single circuit or batch `circuits[]`, with optional AutoCAD table `_AI_LV_CALC_TABLE` and Excel `.xlsx` export)\n" +
+                "- Deterministic LV Electrical Calculations (IEC 60364 / ECP): `calculate_lv_electrical` (ALWAYS call this tool — NEVER do mental math and NEVER guess/invent current or kW! When computing lighting circuits, ALWAYS pass `fixture_count` + `fixture_watt`/`fixture_va` + `load_type: \"lighting\"` + `phases: 1`. If fixture wattage is unknown, ask the engineer or explicitly state that a 40 VA/fixture assumption was used — NEVER fabricate loads like 7A/1.54kVA and NEVER override tool-returned `design_current_ib_a`/`voltage_drop_percent`.)\n" +
                 "- Attributes, Text, Geometry, QA/Cleanup, Block Library & Layouts/PDF: `manage_attributes` (extract/update/sync block attributes via Excel), `text_tools` (batch find/replace, directional auto-numbering, text style/height standardize), `advanced_geometry_ops` (align, distribute, rectangular/polar array, offset, revision_cloud, explode), `drawing_qa_cleanup` (duplicate block detector, overkill duplicate lines, purge unused, standardize ByLayer, DWG revision compare with clouds + Excel diff, FILEDIA/PICKFIRST guard), `layout_and_plot_tools` (list/create scaled Layouts + Viewports + Title Block, batch plot PDF via DWG To PDF.pc3), `manage_block_library` (persistent Wblock save/list/insert company blocks across drawings)\n" +
                 "- Modify & Manage: `modify_entities`, `undo_last_action`, `copy_entities`, `delete_entities`, `manage_layers`, `duplicate_drawing`, `zoom_view`, `approve_or_rollback_preview`\n" +
                 "- Measure & Compare: `measure_and_compare` (distances, center-to-center vs clear edge-to-edge gap, overlap detection, entity group totals/areas/lengths/extents comparison)\n\n" +
@@ -2143,6 +2143,7 @@ namespace AIEngineer.AutoCAD
                 "   - **Pattern E — Engineer asks to select/review a SAVED or NAMED circuit (`ELP-B3.2/1`, 'اعمل سليكت على اللينية دي ومكوناتها بالمخطط للمراجعة'):** Pass `circuit_name: \"<exact tag e.g. ELP-B3.2/1>\", select_blocks: true, select_paths: true, draw_legend: false, zoom_mode: \"selected\"` (even if a schedule table row is currently selected!).\n" +
                 "   - **Pattern F — Engineer adds missing branches/lights OR removes deselected lights from the active circuit:** When they say 'ضيف على اللينية كمان بقيتها / أضف ده', pass `merge_with_saved: true, circuit_name: \"<active circuit if known>\", select_blocks: true, select_paths: true, zoom_mode: \"selected\"`. When they selected ONLY the final kept lights/wires and say 'امسح اللي ألغيت تحديده / اعتمد المحدد فقط', pass `lock_selection_as_circuit: true, circuit_name: \"<active circuit if known>\", select_blocks: true, select_paths: true` so the locked version persists in memory & future `trace_all_circuits`!\n" +
                 "   - **Pattern G — Table Overlap Check:** Whenever tables appear overlapped or engineer asks to separate them, ensure `replace_existing: true` on `draw_block_legend` / `trace_all_circuits` (do NOT draw duplicate unreplaced legends over schedules).\n" +
+                "   - **Pattern H — Circuit Electrical Load & Max Voltage Drop (`include_electrical_calc`):** Whenever the engineer asks to add **Total Circuit Load (القدرة الكاملة للينية)** and **Max Voltage Drop (أقصى هبوط جهد VD%)** onto a circuit's table, pass `include_electrical_calc: true` + actual `fixture_watt` (or `fixture_va`) directly to `find_blocks_along_path`! If you call `calculate_lv_electrical` separately for a lighting circuit, ALWAYS pass `load_type: \"lighting\"`, `phases: 1`, `fixture_count`, and `fixture_watt` (or ask the engineer first if fixture wattage is unknown — NEVER fabricate arbitrary currents like `7A` or `1.54kVA`!).\n" +
                 "6l. CONVERTING DRAWN ARROWS / CALLOUT POLYLINES TO NATIVE `Leader` (`convert_arrows_to_leaders`): Whenever the engineer asks to convert existing drawn arrows/callouts (including horizontal shelf + angled pointer + Solid/Hatch/triangle/chevron arrowhead + optional text) in the drawing to native AutoCAD `Leader` ('حول كل الاسهم المرسومة الي leader', 'انا مختار عينة حول كل اللي مثلها الي leader', 'حول السهم المرسوم مع تعديل الاحداثيات الي راس السهم'):\n" +
                 "   - **NEVER call `select_entities(..., highlight_box: true)`**, **NEVER stop to ask unnecessary questions**, and **NEVER manually loop `draw_entities` + `delete_entities`**!\n" +
                 "   - When the engineer selected a **sample arrow** and asks to convert ALL similar arrows across the drawing (`'مختار عينة'`, `'حول كل الذي مثلها'`, `'الباقي مثله'`), ALWAYS pass `match_similar: true` (do NOT pass `selected_only: true` alone unless they literally want ONLY the single selected arrow converted)! It reads the selected sample's layer/color/parts (`horizontal line + pointer line + arrowhead`), matches EVERY identical arrow assembly across ModelSpace, merges them cleanly into native `Leader`s with `Vertex 0` snapped onto the exact sharp apex of each arrowhead pointing to the block, updates X/Y coordinates inside paired texts (`update_coordinates: true`) to match `Vertex 0`, attaches `AIENG_COORD_LDR` XData, erases the old lines/arrowheads in one Undo step, and cleans `_AI_HIGHLIGHT` boxes!\n" +
@@ -2399,6 +2400,13 @@ namespace AIEngineer.AutoCAD
                     { "pick_if_empty", Prop("boolean", "If true (default) and no curve is currently selected, prompt the engineer directly in AutoCAD to click the Line/Polyline path.") },
                     { "export_excel", Prop("boolean", "Also export the matched blocks schedule to Excel .xlsx (default false).") },
                     { "excel_path", Prop("string", "Optional destination .xlsx path.") },
+                    { "include_electrical_calc", Prop("boolean", "Compute deterministic IEC 60364 circuit Load (kW/kVA) & Max Voltage Drop (VD%) and append them as extra columns to the circuit Block Legend + Excel export (default false).") },
+                    { "fixture_watt", Prop("number", "Actual active wattage per fixture block in Watts (e.g. 40 for 40W lamp) used when include_electrical_calc=true.") },
+                    { "fixture_va", Prop("number", "Apparent VA per fixture block when active wattage is unavailable (default 40 VA if include_electrical_calc=true).") },
+                    { "phases", Prop("integer", "1 (default for lighting/socket, 220V) or 3 (380V).") },
+                    { "voltage_v", Prop("number", "Nominal voltage in Volts (default 220V for 1P, 380V for 3P).") },
+                    { "power_factor", Prop("number", "Power factor cos(phi), 0.4..1.0 (default 0.90 for lighting).") },
+                    { "max_vd_percent", Prop("number", "Maximum permitted voltage drop % (default 3.0% for lighting).") },
                     { "zoom", Prop("boolean", "Zoom viewport after execution (default true).") },
                     { "zoom_mode", Prop("string", "'auto' (default: 'legend' if draw_legend=true else 'selected'), 'selected' (focus on selected blocks/wires), 'legend' (focus on table), or 'both'.") }
                 })));
@@ -3098,13 +3106,16 @@ namespace AIEngineer.AutoCAD
                 ObjSchema(new Dictionary<string, object>
                 {
                     { "name", Prop("string", "Circuit or feeder name (e.g. 'DB-1', 'AC-01', 'L1').") },
-                    { "load_type", Prop("string", "Load category: 'power' (default, 5% VD limit), 'lighting' (3% VD limit), 'socket', 'motor' (1.25x safety), or 'feeder'.") },
-                    { "phases", Prop("integer", "1 for single-phase (default 220V) or 3 for three-phase (default 380V).") },
+                    { "load_type", Prop("string", "Load category: 'power' (default, 3P, 5% VD limit), 'lighting' (1P default 220V, 3% VD limit), 'socket' (1P default 220V, 5% VD limit), 'motor' (3P, 1.25x safety), or 'feeder' (3P).") },
+                    { "phases", Prop("integer", "1 for single-phase (default for 'lighting' & 'socket', 220V) or 3 for three-phase (default for 'power'/'motor'/'feeder', 380V).") },
                     { "voltage_v", Prop("number", "Nominal voltage in Volts (220/230 for 1P, 380/400 for 3P).") },
-                    { "load_kw", Prop("number", "Active load in kW (provide one of load_kw, load_kva, load_hp, or load_amps).") },
+                    { "load_kw", Prop("number", "Active load in kW (provide one of load_kw, load_kva, load_hp, load_amps, or fixture_count + fixture_watt/fixture_va).") },
                     { "load_kva", Prop("number", "Apparent load in kVA.") },
                     { "load_hp", Prop("number", "Motor power in Horsepower (HP).") },
                     { "load_amps", Prop("number", "Direct load current in Amperes.") },
+                    { "fixture_count", Prop("number", "Number of fixtures/luminaires on the circuit (use with fixture_watt or fixture_va for exact deterministic total load).") },
+                    { "fixture_watt", Prop("number", "Actual active power per fixture in Watts (e.g. 40 for 40W lamp).") },
+                    { "fixture_va", Prop("number", "Apparent power per fixture in VA when active Wattage is unknown.") },
                     { "power_factor", Prop("number", "Power factor cos(phi), 0.4..1.0 (default 0.85 power / 0.90 lighting).") },
                     { "efficiency", Prop("number", "Efficiency 0.4..1.0 (default 1.0, or 0.88 for HP motors).") },
                     { "demand_factor", Prop("number", "Demand factor (default 1.0).") },
@@ -3125,17 +3136,20 @@ namespace AIEngineer.AutoCAD
                     { "circuits", new Dictionary<string, object>
                         {
                             { "type", "array" },
-                            { "description", "Optional array of circuit objects (each with name, load_kw/load_kva/load_hp/load_amps, length_m, etc.) to calculate a full panel/feeder schedule in one call." },
+                            { "description", "Optional array of circuit objects (each with name, load_kw/load_kva/load_hp/load_amps or fixture_count + fixture_watt/fixture_va, length_m, etc.) to calculate a full panel/feeder schedule in one call." },
                             { "items", ObjSchema(new Dictionary<string, object>
                                 {
                                     { "name", Prop("string", "Circuit or feeder name.") },
                                     { "load_type", Prop("string", "Load category: power, lighting, socket, motor, or feeder.") },
-                                    { "phases", Prop("integer", "1 or 3.") },
+                                    { "phases", Prop("integer", "1 (default for lighting/socket) or 3 (default for power/motor/feeder).") },
                                     { "voltage_v", Prop("number", "Nominal voltage in Volts.") },
                                     { "load_kw", Prop("number", "Active load in kW.") },
                                     { "load_kva", Prop("number", "Apparent load in kVA.") },
                                     { "load_hp", Prop("number", "Motor power in HP.") },
                                     { "load_amps", Prop("number", "Direct load current in Amperes.") },
+                                    { "fixture_count", Prop("number", "Number of fixtures/luminaires.") },
+                                    { "fixture_watt", Prop("number", "Wattage per fixture (W).") },
+                                    { "fixture_va", Prop("number", "Apparent VA per fixture.") },
                                     { "power_factor", Prop("number", "Power factor cos(phi).") },
                                     { "efficiency", Prop("number", "Efficiency.") },
                                     { "demand_factor", Prop("number", "Demand factor.") },

@@ -490,6 +490,57 @@ namespace AcCoreRegressionHarness
                 AssertTrue(r8Xl.IndexOf("Program Files", StringComparison.OrdinalIgnoreCase) < 0, "Test 8 wrote into Program Files");
                 try { File.Delete(r8Xl); } catch { }
 
+                // 4f. Test 9A: Deterministic fixture lighting LV calculation (defaults 1P 220V PF=0.9)
+                Dictionary<string, object> r9a = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "calculate_lv_electrical",
+                    new Dictionary<string, object>
+                    {
+                        { "name", "ELP-B3.2/6" },
+                        { "load_type", "lighting" },
+                        { "fixture_count", 7 },
+                        { "fixture_watt", 40 },
+                        { "length_m", 85.31 },
+                        { "draw_table", false },
+                        { "export_excel", false },
+                        { "zoom", false }
+                    }
+                });
+                ed.WriteMessage("\nTEST9A=" + jss.Serialize(r9a) + "\n");
+                AssertTrue(GetBoolVal(r9a, "ok"), "Test 9A failed ok");
+                ArrayList r9aRes = r9a["results"] as ArrayList;
+                if (r9aRes == null) { List<object> rl = r9a["results"] as List<object>; r9aRes = rl != null ? new ArrayList(rl) : null; }
+                AssertTrue(r9aRes != null && r9aRes.Count == 1, "Test 9A results missing");
+                Dictionary<string, object> c9 = (Dictionary<string, object>)r9aRes[0];
+                AssertTrue(GetIntVal(c9, "phases") == 1 && Math.Abs(GetDblVal(c9, "voltage_v") - 220.0) < 0.1, "Test 9A expected 1P 220V default for lighting");
+                AssertTrue(GetDblVal(c9, "load_kw") >= 0.279 && GetDblVal(c9, "load_kw") <= 0.281, "Test 9A load_kw mismatch");
+                AssertTrue(GetDblVal(c9, "load_kva") >= 0.310 && GetDblVal(c9, "load_kva") <= 0.312, "Test 9A load_kva mismatch");
+                AssertTrue(GetDblVal(c9, "design_current_ib_a") >= 1.38 && GetDblVal(c9, "design_current_ib_a") <= 1.44, "Test 9A Ib mismatch");
+                AssertTrue(GetDblVal(c9, "voltage_drop_percent") >= 0.80 && GetDblVal(c9, "voltage_drop_percent") <= 2.00, "Test 9A VD% mismatch");
+
+                // 4g. Test 9B: Circuit Block Legend with Integrated Electrical Load & Max VD% Columns + Excel
+                Dictionary<string, object> r9b = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object>
+                    {
+                        { "circuit_name", "LP-B3.2/1" },
+                        { "draw_legend", true },
+                        { "include_electrical_calc", true },
+                        { "fixture_watt", 40 },
+                        { "export_excel", true },
+                        { "excel_path", "test9_circuit_elec.xlsx" },
+                        { "zoom", false }
+                    }
+                });
+                ed.WriteMessage("\nTEST9B=" + jss.Serialize(r9b) + "\n");
+                AssertTrue(GetBoolVal(r9b, "ok") && GetBoolVal(r9b, "legend_drawn") && GetBoolVal(r9b, "legend_has_electrical_columns"), "Test 9B legend electrical columns missing");
+                Dictionary<string, object> ec9 = r9b["electrical_calc"] as Dictionary<string, object>;
+                AssertTrue(ec9 != null && GetIntVal(ec9, "phases") == 1, "Test 9B electrical_calc missing or wrong phases");
+                AssertTrue(GetDblVal(ec9, "load_kw") >= 0.119 && GetDblVal(ec9, "load_kw") <= 0.121, "Test 9B electrical_calc load_kw mismatch");
+                AssertTrue(GetDblVal(ec9, "voltage_drop_percent") > 0.0 && GetDblVal(ec9, "voltage_drop_percent") <= 3.0, "Test 9B VD% out of range");
+                string r9Xl = GetStrVal(r9b, "excel_path");
+                AssertTrue(GetBoolVal(r9b, "excel_exported") && File.Exists(r9Xl), "Test 9B Excel missing");
+                try { File.Delete(r9Xl); } catch { }
+
                 // 5. Test 3: AuditElectricalDrawing (Orphan + Duplicate + Overload + VD>3% + Unit Mismatch)
                 using (Transaction trQa = db.TransactionManager.StartTransaction())
                 {

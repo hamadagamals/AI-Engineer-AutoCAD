@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-23 - Phase 2.2 Deterministic Lighting Load Calculations & Circuit Legend Electrical Columns
+
+- **Deterministic Fixture Load & Smart Default Phase Rules (`integrations/autocad_context_plugin/CadLvCalculationsTools.cs`):**
+  - Updated `ComputeSingleLvCircuit` so `load_type` normalizes English/Arabic aliases (`lighting`/`إنارة`, `socket`/`برايز`/`أفياش`), defaulting single-phase `1P / 220V` automatically for `lighting` and `socket` circuits while keeping `3P / 380V` for `power`/`motor`/`feeder`.
+  - Added deterministic `fixture_count` + `fixture_watt` / `fixture_va` inputs to `ComputeSingleLvCircuit` (with 3-decimal `load_kw`/`load_kva` and 2-decimal `length_m` precision), eliminating LLM mental-math guessing of lighting circuit currents.
+- **Total Load & Max Voltage Drop Columns Directly on Circuit Legend + Excel (`integrations/autocad_context_plugin/CadToolExecutor.cs`, `CadMepAndTakeoffTools.cs`):**
+  - Extended `DrawBlockLegend` with optional `include_electrical_columns`, rendering 7-column bilingual tables (`الحمل الكلي` and `أقصى هبوط جهد VD%`) and exporting matching columns to `_AI_BLOCK_LEGEND` Excel workbooks while keeping 5-column legends unchanged when disabled.
+  - Wired `include_electrical_calc`, `fixture_watt`, `fixture_va`, `phases`, `voltage_v`, `power_factor`, and `max_vd_percent` inside `FinalizeCircuitPathOutput` (`find_blocks_along_path`) with transparent `load_assumption_warning` when `40 VA/fixture` default is assumed.
+- **Anti-Hallucination Prompt & Schema Updates (`integrations/autocad_context_plugin/DirectCadAgent.cs`):**
+  - Updated `calculate_lv_electrical` and `find_blocks_along_path` schemas and Rule `6k` (`Pattern H`) strictly forbidding fabricated lighting currents/wattages.
+- **Verification:**
+  - Built `AIEngineer.AutoCAD.Context.dll` (`1,197,568` bytes) and passed AutoCAD 2021 `accoreconsole.exe` regression Tests 1–9 (`AUTOCAD_TOOLS=37|SCHEMA_ERRORS=0`, `TEST9A` `ELP-B3.2/6` `7 x 40W` @ `85.31m` = `1P 220V`, `0.28 kW`, `0.311 kVA`, `1.41 A`, `VD=1.53%`, `PASS`; `TEST9B` `LP-B3.2/1` 7-column `_AI_BLOCK_LEGEND` + `electrical_calc` + Excel export; `BENCHMARK_30C_300F_MS=281`; `ACCORE_REGRESSION_PASS`).
+
 ## 2026-11-23 - Phase 2.1 Field-Feedback Hotfix (Crossing Bridges, Circuit Memory, Table Collision, Export Path & Model Auto-Upgrade)
 
 - **Crossing-Bridge Wire Tracing (`integrations/autocad_context_plugin/CadSpatialIndex.cs`, `CadMepAndTakeoffTools.cs`):**

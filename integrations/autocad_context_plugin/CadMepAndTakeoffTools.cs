@@ -4268,6 +4268,115 @@ namespace AIEngineer.AutoCAD
                 ? ("إجمالي بلوكات اللينيا (" + circuitName + ")")
                 : "إجمالي البلوكات على المسار المحدد";
 
+            double? fixtureWattArg = GetNullableDouble(args, "fixture_watt");
+            double? fixtureVaArg = GetNullableDouble(args, "fixture_va");
+            bool includeElecCalc = GetBool(args, "include_electrical_calc", false) ||
+                (fixtureWattArg.HasValue && fixtureWattArg.Value > 0) ||
+                (fixtureVaArg.HasValue && fixtureVaArg.Value > 0);
+            LvCircuitCalcResult lvRes = null;
+            Dictionary<string, object> electricalCalcDict = null;
+            bool loadAssumed = false;
+            Dictionary<string, object> rowLoadByBlock = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            string totalLoadLabel = "";
+            string maxVdLabel = "";
+            string rowVdLabel = "";
+            bool vdPass = true;
+            if (includeElecCalc && matchedItems.Count > 0)
+            {
+                Dictionary<string, object> lvItem = new Dictionary<string, object>
+                {
+                    { "name", !string.IsNullOrEmpty(circuitName) ? circuitName : "CIRCUIT" },
+                    { "load_type", GetStr(args, "load_type") ?? "lighting" },
+                    { "length_m", lenMeters },
+                    { "fixture_count", (double)matchedItems.Count }
+                };
+                if (args != null && args.ContainsKey("phases"))
+                    lvItem["phases"] = GetInt(args, "phases", 1);
+                else if (string.Equals(GetStr(lvItem, "load_type"), "lighting", StringComparison.OrdinalIgnoreCase))
+                    lvItem["phases"] = 1;
+                if (args != null && args.ContainsKey("voltage_v"))
+                    lvItem["voltage_v"] = GetDouble(args, "voltage_v", 220.0);
+                if (args != null && args.ContainsKey("power_factor"))
+                    lvItem["power_factor"] = GetDouble(args, "power_factor", 0.90);
+                if (args != null && args.ContainsKey("max_vd_percent"))
+                    lvItem["max_vd_percent"] = GetDouble(args, "max_vd_percent", 3.0);
+                string matArg = GetStr(args, "material");
+                if (!string.IsNullOrEmpty(matArg)) lvItem["material"] = matArg;
+                string insArg = GetStr(args, "insulation");
+                if (!string.IsNullOrEmpty(insArg)) lvItem["insulation"] = insArg;
+                string methArg = GetStr(args, "install_method");
+                if (!string.IsNullOrEmpty(methArg)) lvItem["install_method"] = methArg;
+                double? ambArg = GetNullableDouble(args, "ambient_temp_c");
+                if (ambArg.HasValue) lvItem["ambient_temp_c"] = ambArg.Value;
+
+                if (fixtureWattArg.HasValue && fixtureWattArg.Value > 0)
+                    lvItem["fixture_watt"] = fixtureWattArg.Value;
+                else if (fixtureVaArg.HasValue && fixtureVaArg.Value > 0)
+                    lvItem["fixture_va"] = fixtureVaArg.Value;
+                else
+                {
+                    lvItem["fixture_va"] = 40.0;
+                    loadAssumed = true;
+                }
+
+                Dictionary<string, object> lvDefaults = new Dictionary<string, object>();
+                lvRes = ComputeSingleLvCircuit(lvItem, lvDefaults, 1);
+
+                foreach (KeyValuePair<string, int> kv in countsByBlock)
+                {
+                    if (fixtureWattArg.HasValue && fixtureWattArg.Value > 0)
+                    {
+                        double w = kv.Value * fixtureWattArg.Value;
+                        rowLoadByBlock[kv.Key] = Math.Round(w, 0).ToString(CultureInfo.InvariantCulture) + " W (" +
+                            Math.Round(w / 1000.0, 3).ToString("0.###", CultureInfo.InvariantCulture) + " kW)";
+                    }
+                    else
+                    {
+                        double vaPerUnit = (fixtureVaArg.HasValue && fixtureVaArg.Value > 0) ? fixtureVaArg.Value : 40.0;
+                        double va = kv.Value * vaPerUnit;
+                        rowLoadByBlock[kv.Key] = Math.Round(va, 0).ToString(CultureInfo.InvariantCulture) + " VA (" +
+                            Math.Round(va / 1000.0, 3).ToString("0.###", CultureInfo.InvariantCulture) + " kVA)";
+                    }
+                }
+
+                totalLoadLabel = lvRes.LoadKw.ToString("0.###", CultureInfo.InvariantCulture) + " kW / " +
+                    lvRes.LoadKva.ToString("0.###", CultureInfo.InvariantCulture) + " kVA";
+                maxVdLabel = lvRes.VoltageDropPercent.ToString("0.##", CultureInfo.InvariantCulture) + "% (<=" +
+                    lvRes.MaxAllowedVdPercent.ToString("0.#", CultureInfo.InvariantCulture) + "%) | " +
+                    lvRes.CableSizeMm2.ToString("0.#", CultureInfo.InvariantCulture) + "mm2 / " +
+                    lvRes.BreakerRatingA.ToString("0.#", CultureInfo.InvariantCulture) + "A";
+                rowVdLabel = lvRes.VoltageDropPercent.ToString("0.##", CultureInfo.InvariantCulture) + "% (" +
+                    lvRes.CableSizeMm2.ToString("0.#", CultureInfo.InvariantCulture) + "mm2)";
+                vdPass = lvRes.VoltageDropPercent <= lvRes.MaxAllowedVdPercent + 1e-6;
+
+                electricalCalcDict = new Dictionary<string, object>
+                {
+                    { "circuit_name", lvRes.CircuitName },
+                    { "load_type", lvRes.LoadType },
+                    { "phases", lvRes.Phases },
+                    { "voltage_v", lvRes.VoltageV },
+                    { "power_factor", lvRes.PowerFactor },
+                    { "length_m", lvRes.LengthM },
+                    { "fixture_count", matchedItems.Count },
+                    { "load_kw", lvRes.LoadKw },
+                    { "load_kva", lvRes.LoadKva },
+                    { "design_current_ib_a", lvRes.DesignCurrentA },
+                    { "breaker_in_a", lvRes.BreakerRatingA },
+                    { "cable_designation", lvRes.CableDesignation },
+                    { "cable_size_mm2", lvRes.CableSizeMm2 },
+                    { "voltage_drop_v", lvRes.VoltageDropV },
+                    { "voltage_drop_percent", lvRes.VoltageDropPercent },
+                    { "max_vd_percent", lvRes.MaxAllowedVdPercent },
+                    { "vd_pass", vdPass },
+                    { "load_assumed", loadAssumed }
+                };
+                if (loadAssumed)
+                {
+                    electricalCalcDict["load_assumption_warning"] =
+                        "لم يتم تحديد قدرة الكشاف، لذا تم افتراض 40 VA لكل كشاف. أعد الحساب بتمرير fixture_watt الفعلي لتأكيد القيم الدقيقة.";
+                }
+            }
+
             Dictionary<string, object> legendResult = null;
             Extents3d? legendExt = null;
             if (drawLegend && matchedHandles.Count > 0)
@@ -4285,6 +4394,15 @@ namespace AIEngineer.AutoCAD
                     { "export_excel", GetBool(args, "export_excel", false) },
                     { "zoom", false }
                 };
+                if (lvRes != null)
+                {
+                    legendArgs["include_electrical_columns"] = true;
+                    legendArgs["row_load_by_block"] = rowLoadByBlock;
+                    legendArgs["total_load_label"] = totalLoadLabel;
+                    legendArgs["max_vd_label"] = maxVdLabel;
+                    legendArgs["row_vd_label"] = rowVdLabel;
+                    legendArgs["vd_pass"] = vdPass;
+                }
                 if (args.ContainsKey("descriptions")) legendArgs["descriptions"] = args["descriptions"];
                 if (args.ContainsKey("clear_layers")) legendArgs["clear_layers"] = args["clear_layers"];
                 if (args.ContainsKey("clear_handles")) legendArgs["clear_handles"] = args["clear_handles"];
@@ -4483,8 +4601,15 @@ namespace AIEngineer.AutoCAD
                 if (legendResult.ContainsKey("legend_bounds")) res["legend_bounds"] = legendResult["legend_bounds"];
                 if (legendResult.ContainsKey("rows")) res["legend_rows"] = legendResult["rows"];
                 if (legendResult.ContainsKey("layer")) res["legend_layer"] = legendResult["layer"];
+                if (legendResult.ContainsKey("has_electrical_columns")) res["legend_has_electrical_columns"] = legendResult["has_electrical_columns"];
                 if (legendResult.ContainsKey("excel_exported")) res["excel_exported"] = legendResult["excel_exported"];
                 if (legendResult.ContainsKey("excel_path")) res["excel_path"] = legendResult["excel_path"];
+            }
+            if (electricalCalcDict != null)
+            {
+                res["electrical_calc"] = electricalCalcDict;
+                if (loadAssumed && electricalCalcDict.ContainsKey("load_assumption_warning"))
+                    res["load_assumption_warning"] = electricalCalcDict["load_assumption_warning"];
             }
             if (matchedItems.Count == 0)
                 res["note"] = "لم يتقاطع الخط المحدد مع أي بلوكات مطابقة في المخطط (تم الحفاظ على اختيار الخط الأصلي).";
