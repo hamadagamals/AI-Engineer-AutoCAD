@@ -90,7 +90,9 @@ $assembly = Join-Path $resolvedOutput "AIEngineer.AutoCAD.Context.dll"
     (Join-Path $pluginRoot "DrawingExecutionCommands.cs") `
     (Join-Path $pluginRoot "ExcelTableInterop.cs") `
     (Join-Path $pluginRoot "CadToolExecutor.cs") `
+    (Join-Path $pluginRoot "CadSpatialIndex.cs") `
     (Join-Path $pluginRoot "CadMepAndTakeoffTools.cs") `
+    (Join-Path $pluginRoot "CadPanelAndQaTools.cs") `
     (Join-Path $pluginRoot "CadTextAndAttributesTools.cs") `
     (Join-Path $pluginRoot "CadGeometryQaAndLayoutTools.cs") `
     (Join-Path $pluginRoot "CadLightingAndDialuxTools.cs") `

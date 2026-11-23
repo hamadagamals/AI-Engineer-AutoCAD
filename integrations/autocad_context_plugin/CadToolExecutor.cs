@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
@@ -102,7 +102,7 @@ namespace AIEngineer.AutoCAD
         }
 
         private static readonly object _undoLock = new object();
-        private static readonly ConditionalWeakTable<Database, List<CadUndoEntry>> _undoStacks = new ConditionalWeakTable<Database, List<CadUndoEntry>>();
+        private static readonly Dictionary<IntPtr, List<CadUndoEntry>> _undoStacks = new Dictionary<IntPtr, List<CadUndoEntry>>();
         private static bool _docDestroyedHooked = false;
         private static int _undoSeq = 0;
 
@@ -126,9 +126,11 @@ namespace AIEngineer.AutoCAD
             try
             {
                 if (e == null || e.Document == null || e.Document.Database == null) return;
+                IntPtr key = e.Document.Database.UnmanagedObject;
+                if (key == IntPtr.Zero) return;
                 lock (_undoLock)
                 {
-                    _undoStacks.Remove(e.Document.Database);
+                    _undoStacks.Remove(key);
                 }
             }
             catch { }
@@ -141,15 +143,16 @@ namespace AIEngineer.AutoCAD
                 entry.ModifiedSnapshots.Count == 0 && entry.BlockRecordRenames.Count == 0 &&
                 entry.CreatedBlockRecordIds.Count == 0)
                 return;
-            Database db = doc.Database;
+            IntPtr dbPtr = doc.Database.UnmanagedObject;
+            if (dbPtr == IntPtr.Zero) return;
             lock (_undoLock)
             {
                 EnsureDocDestroyedHook();
                 List<CadUndoEntry> stack;
-                if (!_undoStacks.TryGetValue(db, out stack))
+                if (!_undoStacks.TryGetValue(dbPtr, out stack))
                 {
                     stack = new List<CadUndoEntry>();
-                    _undoStacks.Add(db, stack);
+                    _undoStacks.Add(dbPtr, stack);
                 }
                 entry.ActionId = "undo_" + (++_undoSeq).ToString(CultureInfo.InvariantCulture);
                 entry.TimestampUtc = DateTime.UtcNow;
@@ -162,10 +165,12 @@ namespace AIEngineer.AutoCAD
         internal static int GetUndoHistoryCount(Document doc)
         {
             if (doc == null || doc.Database == null) return 0;
+            IntPtr dbPtr = doc.Database.UnmanagedObject;
+            if (dbPtr == IntPtr.Zero) return 0;
             lock (_undoLock)
             {
                 List<CadUndoEntry> stack;
-                return _undoStacks.TryGetValue(doc.Database, out stack) ? stack.Count : 0;
+                return _undoStacks.TryGetValue(dbPtr, out stack) ? stack.Count : 0;
             }
         }
 
@@ -317,6 +322,10 @@ namespace AIEngineer.AutoCAD
                         return FindBlocksAlongPath(doc, args);
                     case "trace_all_circuits":
                         return TraceAllCircuits(doc, args);
+                    case "generate_panel_schedule_and_sld":
+                        return GeneratePanelScheduleAndSld(doc, args);
+                    case "audit_electrical_drawing":
+                        return AuditElectricalDrawing(doc, args);
                     case "manage_attributes":
                         return ManageAttributes(doc, args);
                     case "text_tools":
@@ -441,6 +450,10 @@ namespace AIEngineer.AutoCAD
                    string.Equals(layerName, "_AI_PANEL_SCHEDULE", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_BOQ_TABLE", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_LIGHTING_TABLE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_CIRCUIT_SCHEDULE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_LV_CALC_TABLE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_SLD", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_ELECTRICAL_QA", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_HIGHLIGHT", StringComparison.OrdinalIgnoreCase);
         }
 
@@ -2924,12 +2937,13 @@ namespace AIEngineer.AutoCAD
         {
             string action = (GetStr(args, "action") ?? "undo").Trim().ToLowerInvariant();
             Database undoDb = doc != null ? doc.Database : null;
+            IntPtr undoDbPtr = undoDb != null ? undoDb.UnmanagedObject : IntPtr.Zero;
 
             List<CadUndoEntry> snapshotList = new List<CadUndoEntry>();
             lock (_undoLock)
             {
                 List<CadUndoEntry> stack;
-                if (undoDb != null && _undoStacks.TryGetValue(undoDb, out stack))
+                if (undoDbPtr != IntPtr.Zero && _undoStacks.TryGetValue(undoDbPtr, out stack))
                     snapshotList.AddRange(stack);
             }
 
@@ -3132,7 +3146,7 @@ namespace AIEngineer.AutoCAD
             lock (_undoLock)
             {
                 List<CadUndoEntry> stack;
-                if (undoDb != null && _undoStacks.TryGetValue(undoDb, out stack))
+                if (undoDbPtr != IntPtr.Zero && _undoStacks.TryGetValue(undoDbPtr, out stack))
                 {
                     int removeN = Math.Min(countToUndo, stack.Count);
                     if (removeN > 0) stack.RemoveRange(stack.Count - removeN, removeN);

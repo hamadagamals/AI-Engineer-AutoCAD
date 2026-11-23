@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-23 - Phase 2 Consulting Panel/SLD Generator, Electrical QA Auditor, Spatial Grid & AutoCAD Regression Suite
+
+- **2D Spatial Grid & Block Geometry Cache (`integrations/autocad_context_plugin/CadSpatialIndex.cs`, `CadMepAndTakeoffTools.cs`):**
+  - Added uniform spatial hash index `SpatialGrid2D<T>` (with cell deduplication stamps and oversized-bounds handling) and single-pass `DrawingBlockGeometryCache` (`FixtureGrid`, `TerminatorGrid`, `TextTagGrid`).
+  - Upgraded `ExpandConnectedPathCurves` and refactored batch circuit discovery into `ScanAllCircuitsInternal` / `TraceSingleCircuitComponentCached`, reducing circuit tracing and block matching from $O(N^2)$ ModelSpace scans to $O(N)$ spatial lookups (`46 ms` for 30 circuits / 300 fixtures in live AutoCAD 2021).
+- **Panel Schedule + Vector SLD Generator & Consulting Electrical QA Auditor (`integrations/autocad_context_plugin/CadPanelAndQaTools.cs`, `CadToolExecutor.cs`, `DirectCadAgent.cs`):**
+  - Added `generate_panel_schedule_and_sld`: groups circuits by panel, computes IEC 60364 / ECP branch and main incomer sizing via `ComputeSingleLvCircuit`, balances 1-phase circuits across `R/Y/B` by LPT (`Imbalance %`), adds spare ways, renders bilingual tables on `_AI_PANEL_SCHEDULE` and crisp vector busbar/breaker/feeder SLDs on `_AI_SLD`, exports RTL Excel `.xlsx`, and pushes unified Undo entries.
+  - Added `audit_electrical_drawing`: detects disconnected `ORPHAN_FIXTURE`, `OVERLOADED_CIRCUIT`, `DUPLICATE_CIRCUIT_NAME`, `VOLTAGE_DROP_EXCEEDED` (with IEC cable upsizing recommendation), `UNNAMED_CIRCUIT`, and `UNIT_SCALE_MISMATCH`, computing `health_score` (0..100), severity-colored markers & report tables on `_AI_ELECTRICAL_QA`, and optional Excel `.xlsx` reports.
+  - Fixed session Undo persistence in `CadToolExecutor.cs` by keying `_undoStacks` on `Database.UnmanagedObject` (`IntPtr`) instead of managed wrapper identity so `undo_last_action` works consistently across AutoCAD RCW wrapper lifetimes and `accoreconsole.exe`.
+  - Registered both tools (`AUTOCAD_TOOLS=37`, `SCHEMA_ERRORS=0`), intent routing in `SelectRelevantToolSpecs`, concise prompts (`6m`, `6n`), and compiled via `integrations/autocad_context_plugin/build.ps1`.
+- **Automated AutoCAD Regression Harness (`tests/autocad_accore_harness/AcCoreRegressionVerifier.cs`, `scripts/run_autocad_accore_tests.ps1`, `tests/test_autocad_accore_suite.py`):**
+  - Verified live inside AutoCAD 2021 `accoreconsole.exe`: schema/router/JIT validation (`16` methods), Meter-in-Inches circuit tracing (`6.15m`, strict `learn_sample`), Panel Schedule + SLD + LPT R/Y/B balance (`R=160, Y=120, B=80`) + Undo (`206` entities reverted), seeded Electrical QA defect detection (`FAIL`, score `33`), and 30-circuit / 300-fixture spatial benchmark (`46 ms`, `ACCORE_REGRESSION_PASS`).
+
 ## 2026-11-23 - Phase 1 Precision Circuit Tracing, Intent Tool Routing & Gemini 3.5 Flash Upgrade
 
 - **Circuit Tracing Accuracy & Scale Inference (`integrations/autocad_context_plugin/CadMepAndTakeoffTools.cs`):**

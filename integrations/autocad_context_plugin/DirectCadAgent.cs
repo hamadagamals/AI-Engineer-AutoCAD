@@ -753,6 +753,12 @@ namespace AIEngineer.AutoCAD
             if (res.ContainsKey("matched_instances")) return toolName + "(match:" + res["matched_instances"] + ",conv:" + (res.ContainsKey("converted_count") ? res["converted_count"] : 0) + ")";
             if (res.ContainsKey("matched_blocks_count") && res.ContainsKey("path_curves_count"))
                 return toolName + "(blocks:" + res["matched_blocks_count"] + ",types:" + (res.ContainsKey("block_types_count") ? res["block_types_count"] : 0) + ",sel:" + (res.ContainsKey("selected_in_autocad") ? res["selected_in_autocad"] : false) + ",legend:" + (res.ContainsKey("legend_drawn") ? res["legend_drawn"] : false) + ")";
+            if (res.ContainsKey("circuits_count") && res.ContainsKey("total_blocks_count") && toolName == "trace_all_circuits")
+                return toolName + "(circuits:" + res["circuits_count"] + ",blocks:" + res["total_blocks_count"] + ",table:" + (res.ContainsKey("table_drawn") ? res["table_drawn"] : false) + ")";
+            if (res.ContainsKey("panels_count") && res.ContainsKey("sld_drawn"))
+                return toolName + "(panels:" + res["panels_count"] + ",circuits:" + (res.ContainsKey("circuits_count") ? res["circuits_count"] : 0) + ",sched:" + (res.ContainsKey("panel_schedule_drawn") ? res["panel_schedule_drawn"] : false) + ",sld:" + res["sld_drawn"] + ")";
+            if (res.ContainsKey("overall_status") && res.ContainsKey("health_score"))
+                return toolName + "(status:" + res["overall_status"] + ",score:" + res["health_score"] + ",issues:" + (res.ContainsKey("total_issues") ? res["total_issues"] : 0) + ")";
             if (res.ContainsKey("leader_handles") && res.ContainsKey("converted_count"))
                 return toolName + "(conv:" + res["converted_count"] + ",coords:" + (res.ContainsKey("coordinates_updated_count") ? res["coordinates_updated_count"] : 0) + ",sample:" + (res.ContainsKey("matched_from_sample") ? res["matched_from_sample"] : false) + ",hl_del:" + (res.ContainsKey("highlight_boxes_removed") ? res["highlight_boxes_removed"] : 0) + ")";
             if (res.ContainsKey("legend_bounds")) return toolName + "(rows:" + (res.ContainsKey("row_count") ? res["row_count"] : "ok") + ")";
@@ -777,6 +783,8 @@ namespace AIEngineer.AutoCAD
                    n == "draw_block_legend" ||
                    n == "find_blocks_along_path" ||
                    n == "trace_all_circuits" ||
+                   n == "generate_panel_schedule_and_sld" ||
+                   n == "audit_electrical_drawing" ||
                    n == "annotate_block_coordinates" ||
                    n == "convert_arrows_to_leaders" ||
                    n == "modify_entities" ||
@@ -2118,6 +2126,8 @@ namespace AIEngineer.AutoCAD
                 "   - **NEVER call `select_entities(..., highlight_box: true)`**, **NEVER stop to ask unnecessary questions**, and **NEVER manually loop `draw_entities` + `delete_entities`**!\n" +
                 "   - When the engineer selected a **sample arrow** and asks to convert ALL similar arrows across the drawing (`'مختار عينة'`, `'حول كل الذي مثلها'`, `'الباقي مثله'`), ALWAYS pass `match_similar: true` (do NOT pass `selected_only: true` alone unless they literally want ONLY the single selected arrow converted)! It reads the selected sample's layer/color/parts (`horizontal line + pointer line + arrowhead`), matches EVERY identical arrow assembly across ModelSpace, merges them cleanly into native `Leader`s with `Vertex 0` snapped onto the exact sharp apex of each arrowhead pointing to the block, updates X/Y coordinates inside paired texts (`update_coordinates: true`) to match `Vertex 0`, attaches `AIENG_COORD_LDR` XData, erases the old lines/arrowheads in one Undo step, and cleans `_AI_HIGHLIGHT` boxes!\n" +
                 "   - Also note: if the engineer explicitly asks to convert all drawn arrows without selecting a sample, call `convert_arrows_to_leaders(update_coordinates: true)` directly (and never pass `selected_only: true` when no arrow is selected).\n" +
+                "6m. PANEL SCHEDULES, 3-PHASE BALANCING & SINGLE LINE DIAGRAMS (`generate_panel_schedule_and_sld`): Whenever the engineer asks to generate a **Panel Schedule** with automatic **R/Y/B 3-phase balancing**, main incomer/cable sizing (IEC 60364 / ECP), or draw a vector **Single Line Diagram (SLD)** (`جدول أحمال اللوحة`, `توزيع الفازات R Y B`, `المخطط الأحادي`, `SLD`), ALWAYS call `generate_panel_schedule_and_sld(draw_panel_schedule: true, draw_sld: true, export_excel: <if requested>)`! It traces all drawing circuits automatically (or reads an explicit `circuits[]` list), balances 1P circuits across R/Y/B by LPT for minimum imbalance %, adds spares, sizes branch/main breakers and cables via `calculate_lv_electrical` logic, draws `_AI_PANEL_SCHEDULE` + `_AI_SLD`, and supports Excel `.xlsx` export and full Undo.\n" +
+                "6n. CONSULTING ELECTRICAL QA AUDITOR (`audit_electrical_drawing`): Whenever the engineer asks to audit/inspect the electrical drawing for engineering errors (`فحص فني كهربائي`, `كشف الأخطاء`, `كشافات غير موصلة`, `اسماء لينيات مكررة`, `أحمال زائدة`, `تجاوز هبوط الجهد`, `QA audit`), ALWAYS call `audit_electrical_drawing(draw_markers: true, draw_report_table: true, export_excel: <if requested>)`! Never invent defects — report exact `overall_status`, `health_score`, `orphan_fixtures_count`, `overloaded_circuits_count`, `duplicate_names_count`, `vd_violations_count`, `unnamed_circuits_count`, `unit_scale_mismatch`, and item details strictly from the tool output.\n" +
                 "7. SAFE COPYING OUTSIDE LARGE DRAWINGS & FRAMING: Whenever asked to copy elements outside the drawing ('نسخة خارج المخطط') or put ONE frame/box around them ('مربع واحد'), use `copy_entities` with `entity_type: \"BlockReference\"` (or handles/filters), `auto_offset_outside: \"right\"`, `draw_frame: true` + concise `frame_label` if they want one bounding box around all copies, and `select_copied: true` / `zoom: true`.\n" +
                 "8. GEOMETRY PRECISION & SELF-VERIFICATION: When placing shapes side-by-side at a clear distance, inspect the exact `bounds` returned by `draw_entities` and call `measure_and_compare` (mode='distance'); if ANY coordinate or gap differs from what the engineer requested, IMMEDIATELY correct it using `modify_entities` BEFORE giving your final answer!\n" +
                 "9. STRICT TRUTH & NO HALLUCINATION: NEVER claim you extracted coordinates/schedules/BOQ, calculated/distributed lighting, exported `.stf`/Excel/PDF files, cleaned/purged/compared drawings, added arrows/tables/clouds, deleted, aligned, arrayed, separated, selected, renamed, converted into a block, or drew anything unless the corresponding tool (`lighting_design_engine`, `export_dialux_stf`, `extract_load_schedule`, `quantity_takeoff`, `manage_attributes`, `text_tools`, `advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`, `export_to_excel`, `import_excel_table`, `annotate_block_coordinates`, `draw_block_legend`, `draw_entities`, `delete_entities`, `copy_entities`, `modify_entities`, `create_block`, `convert_matching_shapes_to_block`, `select_entities`, `zoom_view`) ACTUALLY ran and returned `ok: true` in this turn! NEVER copy or write bracketed logs like `[Executed tools in AutoCAD: ...]` in your reply!\n" +
@@ -2179,7 +2189,27 @@ namespace AIEngineer.AutoCAD
                 matchedDomain = true;
                 AddToolNames(allowed,
                     "calculate_lv_electrical", "extract_load_schedule", "trace_all_circuits",
-                    "export_to_excel", "approve_or_rollback_preview");
+                    "generate_panel_schedule_and_sld", "export_to_excel", "approve_or_rollback_preview");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "لوحة", "لوحات", "احادي", "أحادي", "توزيع", "فازات", "فاز", "اتزان", "مخطط احادي", "مخطط أحادي",
+                "panel", "sld", "single line", "riser", "balance", "phase", "spare"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "generate_panel_schedule_and_sld", "calculate_lv_electrical", "extract_load_schedule",
+                    "trace_all_circuits", "export_to_excel", "approve_or_rollback_preview");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "فحص", "تدقيق", "مراجعة", "اخطاء", "أخطاء", "غير موصل", "مفصول", "مكرر", "تكرار", "حمل زائد", "هبوط الجهد",
+                "qa", "audit", "check", "orphan", "overload", "duplicate", "voltage drop"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "audit_electrical_drawing", "trace_all_circuits", "find_blocks_along_path",
+                    "calculate_lv_electrical", "export_to_excel", "approve_or_rollback_preview");
             }
 
             if (ContainsAnyKeyword(low,
@@ -3104,6 +3134,80 @@ namespace AIEngineer.AutoCAD
                     { "excel_path", Prop("string", "Optional destination .xlsx path.") },
                     { "replace_existing", Prop("boolean", "Replace previous _AI_LV_CALC_TABLE table (default true).") },
                     { "zoom", Prop("boolean", "Zoom onto drawn calculation table (default true).") }
+                })));
+
+            tools.Add(Tool("generate_panel_schedule_and_sld",
+                "Generate an IEC 60364 / ECP balanced 3-phase (R/Y/B) Electrical Panel Schedule table (_AI_PANEL_SCHEDULE), crisp vector Single Line Diagram (_AI_SLD), main incomer breaker + feeder sizing, spare ways, and optional RTL Excel (.xlsx) workbook directly from the drawing's circuits (via Spatial-Grid batch tracing) or explicit circuits array.",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "panel_name", Prop("string", "Optional Panel name filter (e.g. 'LP-B3.2'; omit or 'ALL' to generate all detected panels).") },
+                    { "layer_filter", Prop("string", "Optional wire layer filter when auto-tracing drawing circuits.") },
+                    { "color_filter", Prop("string", "Optional wire color key filter (e.g. 'ACI:6').") },
+                    { "use_selected", Prop("boolean", "Restrict auto-tracing to currently selected wire layer (default false: scans whole drawing).") },
+                    { "fixture_va", Prop("number", "Nominal VA per fixture block when computing circuit load (default 40.0).") },
+                    { "voltage_ln_v", Prop("number", "Phase-to-Neutral nominal voltage in Volts (default 220.0).") },
+                    { "voltage_ll_v", Prop("number", "Line-to-Line nominal voltage in Volts (default 380.0).") },
+                    { "power_factor", Prop("number", "Power factor cos(phi) (default 0.90).") },
+                    { "demand_factor", Prop("number", "Overall panel demand factor applied to connected kVA for main feeder sizing (default 0.85).") },
+                    { "spare_percent", Prop("number", "Percentage of spare breaker ways added per panel (default 20.0).") },
+                    { "feeder_length_m", Prop("number", "Main incoming feeder cable run length in meters (default 30.0).") },
+                    { "max_vd_percent", Prop("number", "Maximum permitted voltage drop % for branch lighting/circuits (default 3.0).") },
+                    { "material", Prop("string", "Conductor material: 'Cu' (default) or 'Al'.") },
+                    { "insulation", Prop("string", "Cable insulation: 'XLPE' (default) or 'PVC'.") },
+                    { "install_method", Prop("string", "Installation method: 'conduit' (default), 'tray', 'buried', or 'free_air'.") },
+                    { "ambient_temp_c", Prop("number", "Ambient temperature in Celsius (default 40.0).") },
+                    { "circuits", new Dictionary<string, object>
+                        {
+                            { "type", "array" },
+                            { "description", "Optional explicit circuits array instead of auto-tracing the drawing." },
+                            { "items", ObjSchema(new Dictionary<string, object>
+                                {
+                                    { "circuit_name", Prop("string", "Circuit identifier (e.g. 'LP-B3.2/1').") },
+                                    { "panel_name", Prop("string", "Parent panel board name (e.g. 'LP-B3.2').") },
+                                    { "load_va", Prop("number", "Connected load in VA.") },
+                                    { "load_kva", Prop("number", "Connected load in kVA.") },
+                                    { "load_kw", Prop("number", "Connected active load in kW.") },
+                                    { "blocks_count", Prop("integer", "Fixture count when estimating VA from fixture_va.") },
+                                    { "length_m", Prop("number", "Circuit route length in meters.") },
+                                    { "phases", Prop("integer", "1 or 3 phases.") },
+                                    { "load_type", Prop("string", "Optional category: lighting, power, socket, or motor.") }
+                                })
+                            }
+                        }
+                    },
+                    { "draw_panel_schedule", Prop("boolean", "Draw formatted Panel Schedule table on _AI_PANEL_SCHEDULE (default true).") },
+                    { "draw_sld", Prop("boolean", "Draw vector Single Line Diagram (busbar, breakers, R/Y/B drops, feeder tags) on _AI_SLD (default true).") },
+                    { "table_position", Prop("string", "'outside_right' (default), 'outside_left', 'outside_top', or 'outside_bottom'.") },
+                    { "table_gap", Prop("number", "Optional spacing gap from main drawing extents.") },
+                    { "title", Prop("string", "Optional custom title banner.") },
+                    { "replace_existing", Prop("boolean", "Erase previous _AI_PANEL_SCHEDULE and _AI_SLD entities before drawing (default true).") },
+                    { "export_excel", Prop("boolean", "Export Panel Schedule to formatted RTL Excel .xlsx workbook (default false).") },
+                    { "excel_path", Prop("string", "Optional destination .xlsx file path.") },
+                    { "zoom", Prop("boolean", "Zoom AutoCAD viewport onto generated schedule/SLD (default true).") }
+                })));
+
+            tools.Add(Tool("audit_electrical_drawing",
+                "Run a deterministic Consulting Electrical QA Audit across the active AutoCAD drawing: detects disconnected/orphan fixtures (ORPHAN_FIXTURE), overloaded circuits (OVERLOADED_CIRCUIT), duplicate circuit names (DUPLICATE_CIRCUIT_NAME), voltage drop exceeding IEC/ECP limit on minimum wire size (VOLTAGE_DROP_EXCEEDED with upsized cable recommendation), unnamed/open-end circuits (UNNAMED_CIRCUIT), and INSUNITS scale mismatches (UNIT_SCALE_MISMATCH). Draws color-coded QA markers and Arabic/English audit table on _AI_ELECTRICAL_QA with full Undo and optional RTL Excel export.",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "layer_filter", Prop("string", "Optional wire layer pattern filter.") },
+                    { "color_filter", Prop("string", "Optional wire color key filter.") },
+                    { "use_selected", Prop("boolean", "Restrict scan to selected wire layer (default false: audits entire drawing).") },
+                    { "fixture_va", Prop("number", "Nominal VA per fixture block (default 40.0).") },
+                    { "max_circuit_va", Prop("number", "Maximum VA allowed per circuit before flagging OVERLOADED_CIRCUIT (default 1800.0).") },
+                    { "max_fixtures_per_circuit", Prop("integer", "Maximum fixtures allowed per circuit before flagging overload (default 18).") },
+                    { "min_cable_mm2", Prop("number", "Assumed branch wire size in mm2 when checking voltage drop limit (default 1.5).") },
+                    { "max_vd_percent", Prop("number", "Maximum permitted branch voltage drop % (default 3.0).") },
+                    { "voltage_ln_v", Prop("number", "Phase-to-Neutral voltage in Volts (default 220.0).") },
+                    { "power_factor", Prop("number", "Assumed branch power factor (default 0.90).") },
+                    { "draw_markers", Prop("boolean", "Draw severity-colored circles and [CODE] callouts at failing locations on _AI_ELECTRICAL_QA (default true).") },
+                    { "draw_report_table", Prop("boolean", "Draw Arabic/English QA Audit Summary table on _AI_ELECTRICAL_QA (default true).") },
+                    { "table_position", Prop("string", "'outside_right' (default), 'outside_left', 'outside_top', or 'outside_bottom'.") },
+                    { "table_gap", Prop("number", "Optional spacing gap from main drawing extents.") },
+                    { "replace_existing", Prop("boolean", "Replace previous _AI_ELECTRICAL_QA markers and table (default true).") },
+                    { "export_excel", Prop("boolean", "Export full QA Audit findings to RTL Excel .xlsx workbook (default false).") },
+                    { "excel_path", Prop("string", "Optional destination .xlsx path.") },
+                    { "zoom", Prop("boolean", "Zoom onto drawn QA Audit table (default true).") }
                 })));
 
             return tools;
