@@ -2139,28 +2139,32 @@ namespace AIEngineer.AutoCAD
             if (db == null || medianFixtureSpan <= 1e-4) return fallback;
 
             UnitsValue iu = db.Insunits;
-            if (iu == UnitsValue.Undefined || iu == UnitsValue.Inches)
+            // Drawings authored in Meters (fixtures 0.08..2.50 units wide) but saved with Undefined/Inches/Feet/Centimeters/Millimeters INSUNITS
+            if (iu != UnitsValue.Meters && medianFixtureSpan >= 0.08 && medianFixtureSpan <= 2.5)
             {
-                if (medianFixtureSpan >= 0.15 && medianFixtureSpan <= 2.5)
-                {
-                    scaleInferred = true;
-                    scaleWarning = "تم اكتشاف أن المخطط مرسوم بوحدة المتر (1 وحدة = 1 متر) رغم ضبط INSUNITS على " +
-                                   iu.ToString() + "؛ تم تصحيح المقياس وحساب الطول الفعلي بالمتر تلقائياً.";
-                    return 1.0;
-                }
-                if (iu == UnitsValue.Undefined && medianFixtureSpan >= 15.0 && medianFixtureSpan <= 250.0)
-                {
-                    scaleInferred = true;
-                    scaleWarning = "تم استنتاج وحدة الرسم (سنتيمتر) تلقائياً لأن INSUNITS غير محدد.";
-                    return 100.0;
-                }
-                if (medianFixtureSpan >= 250.0 && medianFixtureSpan <= 2500.0)
-                {
-                    scaleInferred = true;
-                    scaleWarning = "تم اكتشاف أن المخطط مرسوم بالمليمتر رغم ضبط INSUNITS على " +
-                                   iu.ToString() + "؛ تم تصحيح المقياس تلقائياً.";
-                    return 1000.0;
-                }
+                scaleInferred = true;
+                scaleWarning = "تم اكتشاف أن المخطط مرسوم بوحدة المتر (1 وحدة = 1 متر) رغم ضبط INSUNITS على " +
+                               iu.ToString() + "؛ تم تصحيح المقياس وحساب الطول الفعلي بالمتر تلقائياً.";
+                return 1.0;
+            }
+            // Centimeter-authored drawings (fixtures 15..250 units wide) mistagged as Undefined/Meters/Millimeters (keep real Inches 24..48" safe!)
+            if (iu != UnitsValue.Centimeters && medianFixtureSpan >= 15.0 && medianFixtureSpan <= 250.0 &&
+                (iu == UnitsValue.Undefined || iu == UnitsValue.Meters || iu == UnitsValue.Millimeters))
+            {
+                scaleInferred = true;
+                scaleWarning = "تم اكتشاف أن المخطط مرسوم بوحدة السنتيمتر رغم ضبط INSUNITS على " +
+                               iu.ToString() + "؛ تم تصحيح المقياس وحساب الطول الفعلي بالمتر تلقائياً.";
+                return 100.0;
+            }
+            // Millimeter-authored drawings (fixtures 250..2500 units wide) mistagged as Undefined/Meters/Centimeters/Inches/Feet
+            if (iu != UnitsValue.Millimeters && medianFixtureSpan >= 250.0 && medianFixtureSpan <= 2500.0 &&
+                (iu == UnitsValue.Undefined || iu == UnitsValue.Meters || iu == UnitsValue.Centimeters ||
+                 iu == UnitsValue.Inches || iu == UnitsValue.Feet))
+            {
+                scaleInferred = true;
+                scaleWarning = "تم اكتشاف أن المخطط مرسوم بوحدة المليمتر رغم ضبط INSUNITS على " +
+                               iu.ToString() + "؛ تم تصحيح المقياس وحساب الطول الفعلي بالمتر تلقائياً.";
+                return 1000.0;
             }
             return fallback;
         }
@@ -2537,13 +2541,13 @@ namespace AIEngineer.AutoCAD
                 if (cv != null)
                 {
                     if (visited.Contains(mid)) continue;
-                    if (obstacleSegments != null)
+                    string cLayer = ent.Layer ?? "0";
+                    if (obstacleSegments != null && (!IsArchitecturalLayerName(cLayer) || targetLayers.Contains(cLayer)))
                     {
                         CrossingObstacleSegment obs = TryCreateObstacleSegment(mid, cv, layerColorMap);
                         if (obs != null) obstacleSegments.Add(obs);
                     }
 
-                    string cLayer = ent.Layer ?? "0";
                     if (IsArchitecturalLayerName(cLayer) && !targetLayers.Contains(cLayer)) continue;
 
                     bool candNonNeutral;
@@ -2761,7 +2765,7 @@ namespace AIEngineer.AutoCAD
                             continue;
 
                         Point2d candEndPt;
-                        if (!IsCollinearBreakBridgeMatch(pt, dirs[ei], true, cand, crossingGapMax, crossingLateralTol, 0.65, out candEndPt))
+                        if (!IsCollinearBreakBridgeMatch(pt, dirs[ei], true, cand, crossingGapMax, crossingLateralTol, 0.88, out candEndPt))
                             continue;
 
                         if (!HasCrossingObstacleInGap(pt, candEndPt, cur.Id, cand.Id, cur.EffectiveColorKey, obstacleGrid, obsTol, scratchObs))
@@ -2826,20 +2830,20 @@ namespace AIEngineer.AutoCAD
                 ? Math.Max(1e-3, Math.Min(snapTol, medianFixtureSpan * 0.10))
                 : Math.Max(1e-3, Math.Min(snapTol, 0.06 * unitsPerM));
             double breakGapMax = medianFixtureSpan > 1e-3
-                ? Math.Max(tightSnapTol * 2.0, medianFixtureSpan * 1.15)
-                : Math.Max(1e-3, 0.90 * unitsPerM);
+                ? Math.Min(0.45 * unitsPerM, Math.Max(tightSnapTol * 2.0, medianFixtureSpan * 0.45))
+                : Math.Max(1e-3, 0.45 * unitsPerM);
             double breakLateralTol = medianFixtureSpan > 1e-3
                 ? Math.Max(1e-3, medianFixtureSpan * 0.16)
                 : Math.Max(1e-3, 0.10 * unitsPerM);
             double crossingGapMax = medianFixtureSpan > 1e-3
-                ? Math.Max(breakGapMax * 1.8, Math.Min(3.0 * unitsPerM, medianFixtureSpan * 3.5))
-                : Math.Max(1e-3, 2.5 * unitsPerM);
+                ? Math.Max(breakGapMax * 1.5, Math.Min(1.85 * unitsPerM, medianFixtureSpan * 2.8))
+                : Math.Max(1e-3, 1.65 * unitsPerM);
             double crossingLateralTol = medianFixtureSpan > 1e-3
-                ? Math.Max(breakLateralTol * 2.0, medianFixtureSpan * 0.35)
-                : Math.Max(1e-3, 0.25 * unitsPerM);
+                ? Math.Min(0.22 * unitsPerM, Math.Max(breakLateralTol * 1.4, medianFixtureSpan * 0.22))
+                : Math.Max(1e-3, 0.18 * unitsPerM);
             double obsTol = medianFixtureSpan > 1e-3
-                ? Math.Max(0.25 * unitsPerM, medianFixtureSpan * 0.45)
-                : Math.Max(0.25 * unitsPerM, 0.25);
+                ? Math.Min(0.22 * unitsPerM, Math.Max(0.08 * unitsPerM, medianFixtureSpan * 0.25))
+                : Math.Max(1e-3, 0.18 * unitsPerM);
 
             HashSet<ObjectId> visitedBlocks = new HashSet<ObjectId>();
             int bridgedCount = 0;
@@ -3372,12 +3376,17 @@ namespace AIEngineer.AutoCAD
             }
             selectionHadOnlyBlocks = (selTotalValid > 0 && selBlockCount == selTotalValid);
 
-            SeedCurvesFromSelectedBlocks(tr, msPre, preHidden, visibleOnly, unitsPerM, learnedProfile, selectedBlockIds, pathCurveIds, pathHandles);
+            bool seedScaleInferred;
+            string seedScaleWarn;
+            double seedUnitsPerM = ResolveEffectiveUnitsPerMeter(
+                db, unitsPerM, drawingSpan, medianFixtureSpan, out seedScaleInferred, out seedScaleWarn);
+
+            SeedCurvesFromSelectedBlocks(tr, msPre, preHidden, visibleOnly, seedUnitsPerM, learnedProfile, selectedBlockIds, pathCurveIds, pathHandles);
 
             // Persist sample profile ONLY when engineer explicitly asks to learn a sample circuit
             if (learnSample && pathCurveIds.Count >= 1)
             {
-                CircuitSampleProfile learned = LearnCircuitSampleProfile(db, tr, pathCurveIds, selectedBlockIds, unitsPerM, medianFixtureSpan, drawingSpan);
+                CircuitSampleProfile learned = LearnCircuitSampleProfile(db, tr, pathCurveIds, selectedBlockIds, seedUnitsPerM, medianFixtureSpan, drawingSpan);
                 if (learned != null) learnedProfile = learned;
             }
 
@@ -5173,6 +5182,9 @@ namespace AIEngineer.AutoCAD
 
                     using (Transaction trMerge = db.TransactionManager.StartTransaction())
                     {
+                        BlockTableRecord msMerge = (BlockTableRecord)trMerge.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                        Dictionary<string, bool> hiddenFlags = BuildLayerHiddenMap(db, trMerge);
+
                         if (savedRec != null)
                         {
                             for (int i = 0; i < savedRec.PathHandles.Count; i++)
@@ -5187,27 +5199,62 @@ namespace AIEngineer.AutoCAD
                             }
                         }
 
-                        if (pathCurveIds.Count > 0 && followConnected && selectedBlockIds.Count == 0)
+                        List<ObjectId> newSeedWires = new List<ObjectId>();
+                        List<string> newSeedHandles = new List<string>();
+                        HashSet<ObjectId> seenNewW = new HashSet<ObjectId>();
+                        for (int i = 0; i < pathCurveIds.Count; i++)
                         {
-                            List<ObjectId> extraWires = new List<ObjectId>(pathCurveIds);
-                            List<string> extraHandles = new List<string>(pathHandles);
-                            Dictionary<string, bool> hiddenFlags = BuildLayerHiddenMap(db, trMerge);
+                            ObjectId wid = pathCurveIds[i];
+                            if (!wid.IsNull && !wid.IsErased && !seenW.Contains(wid) && seenNewW.Add(wid))
+                            {
+                                newSeedWires.Add(wid);
+                                newSeedHandles.Add(i < pathHandles.Count ? pathHandles[i] : wid.Handle.ToString());
+                            }
+                        }
+                        if (newSeedWires.Count == 0)
+                        {
+                            for (int i = 0; i < pathCurveIds.Count; i++)
+                            {
+                                ObjectId wid = pathCurveIds[i];
+                                if (!wid.IsNull && !wid.IsErased && seenNewW.Add(wid))
+                                {
+                                    newSeedWires.Add(wid);
+                                    newSeedHandles.Add(i < pathHandles.Count ? pathHandles[i] : wid.Handle.ToString());
+                                }
+                            }
+                        }
+
+                        List<ObjectId> newSelectedBlocks = new List<ObjectId>();
+                        for (int i = 0; i < selectedBlockIds.Count; i++)
+                        {
+                            ObjectId bid = selectedBlockIds[i];
+                            if (!bid.IsNull && !bid.IsErased && !seenB.Contains(bid))
+                                newSelectedBlocks.Add(bid);
+                        }
+                        if (newSeedWires.Count == 0 && newSelectedBlocks.Count > 0)
+                        {
+                            SeedCurvesFromSelectedBlocks(
+                                trMerge, msMerge, hiddenFlags, visibleOnly, effectiveUnitsPerM, learnedProfile,
+                                newSelectedBlocks, newSeedWires, newSeedHandles);
+                        }
+
+                        if (newSeedWires.Count > 0 && followConnected)
+                        {
                             double refSp = (learnedProfile != null && learnedProfile.MedianFixtureSpan > 1e-3) ? learnedProfile.MedianFixtureSpan : medianFixtureSpan;
                             double snapTolM = explicitTolerance.HasValue ? Math.Max(1e-3, explicitTolerance.Value) : (refSp > 1e-3 ? Math.Max(1e-3, refSp * 0.12) : Math.Max(1e-3, 0.05 * effectiveUnitsPerM));
                             List<string> bNames; List<ObjectId> tIds; bool gTrig;
                             ExpandConnectedPathCurves(
-                                db, trMerge, extraWires, extraHandles, hiddenFlags, visibleOnly, snapTolM,
+                                db, trMerge, newSeedWires, newSeedHandles, hiddenFlags, visibleOnly, snapTolM,
                                 bridgeThroughBlocks, connectGaps, strictColor, strictLayer,
                                 effectiveUnitsPerM, refSp, drawingSpan,
                                 includeContainerBlocks, excludeBlocks, blockFilter, learnedProfile,
                                 maxCircuitBlocks, null, out bNames, out tIds, out gTrig);
-                            pathCurveIds = extraWires;
                         }
 
-                        for (int i = 0; i < pathCurveIds.Count; i++)
+                        for (int i = 0; i < newSeedWires.Count; i++)
                         {
-                            if (!pathCurveIds[i].IsNull && !pathCurveIds[i].IsErased && seenW.Add(pathCurveIds[i]))
-                                combinedWires.Add(pathCurveIds[i]);
+                            if (!newSeedWires[i].IsNull && !newSeedWires[i].IsErased && seenW.Add(newSeedWires[i]))
+                                combinedWires.Add(newSeedWires[i]);
                         }
                         for (int i = 0; i < selectedBlockIds.Count; i++)
                         {
@@ -5215,7 +5262,7 @@ namespace AIEngineer.AutoCAD
                                 combinedBlocks.Add(selectedBlockIds[i]);
                         }
 
-                        if (pathCurveIds.Count > 0 && selectedBlockIds.Count == 0)
+                        if (newSeedWires.Count > 0)
                         {
                             List<PathCurveCandidate> newCands = new List<PathCurveCandidate>();
                             HashSet<string> pTypes = new HashSet<string>();
@@ -5223,17 +5270,15 @@ namespace AIEngineer.AutoCAD
                             Extents3d? dummyExt = null;
                             try
                             {
-                                CollectCircuitPathCandidates(trMerge, pathCurveIds, newCands, pTypes, ref dummyLen, ref dummyExt);
+                                CollectCircuitPathCandidates(trMerge, newSeedWires, newCands, pTypes, ref dummyLen, ref dummyExt);
                                 if (newCands.Count > 0)
                                 {
-                                    BlockTableRecord msM = (BlockTableRecord)trMerge.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
-                                    Dictionary<string, bool> hiddenM = BuildLayerHiddenMap(db, trMerge);
                                     List<PathBlockMatchItem> newMatched = new List<PathBlockMatchItem>();
                                     Dictionary<string, int> newCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                                     List<CircuitTerminatorInfo> newTerms = new List<CircuitTerminatorInfo>();
                                     int cSkip;
                                     MatchBlocksAlongCircuitPath(
-                                        trMerge, msM, hiddenM, newCands, new HashSet<ObjectId>(pathCurveIds), new HashSet<ObjectId>(),
+                                        trMerge, msMerge, hiddenFlags, newCands, new HashSet<ObjectId>(newSeedWires), new HashSet<ObjectId>(),
                                         visibleOnly, includeAnonymous, includeSystem, includeContainerBlocks, includeTerminatorBlocks, connectGaps,
                                         layerFilter, blockFilter, excludeBlocks, explicitTolerance,
                                         effectiveUnitsPerM, medianFixtureSpan, drawingSpan, learnedProfile,

@@ -520,23 +520,36 @@ namespace AIEngineer.AutoCAD
             double gDx = b.X - a.X;
             double gDy = b.Y - a.Y;
             double gLen = Math.Sqrt(gDx * gDx + gDy * gDy);
-            double gUx = gLen > 1e-6 ? gDx / gLen : 0.0;
-            double gUy = gLen > 1e-6 ? gDy / gLen : 0.0;
+            if (gLen <= 1e-6) return false;
+            double gUx = gDx / gLen;
+            double gUy = gDy / gLen;
             Point2d mid = new Point2d((a.X + b.X) * 0.5, (a.Y + b.Y) * 0.5);
+            double effTol = Math.Min(tol, gLen * 0.28);
 
             for (int i = 0; i < scratch.Count; i++)
             {
                 CrossingObstacleSegment obs = scratch[i];
                 if (obs.Id == ignoreId1 || obs.Id == ignoreId2) continue;
 
-                bool diffColor = !string.IsNullOrEmpty(circuitColorKey) &&
-                                 !string.Equals(obs.ColorKey, circuitColorKey, StringComparison.OrdinalIgnoreCase);
-                bool transverse = gLen > 1e-6 && obs.HasDir && Math.Abs(obs.DirX * gUx + obs.DirY * gUy) < 0.72;
-                if (!diffColor && !transverse) continue;
+                // Strictly require an actually transverse obstacle (never trigger a bridge on a parallel line!)
+                bool transverse = obs.HasDir && Math.Abs(obs.DirX * gUx + obs.DirY * gUy) < 0.65;
+                if (!transverse) continue;
 
-                if (SegmentsIntersect2D(a, b, obs.StartXY, obs.EndXY))
-                    return true;
-                if (PointToSegmentDist2D(mid, obs.StartXY, obs.EndXY) <= tol)
+                // Strict interior segment intersection (t strictly inside (0.08..0.92) along the bridge gap)
+                double oDx = obs.EndXY.X - obs.StartXY.X;
+                double oDy = obs.EndXY.Y - obs.StartXY.Y;
+                double denom = gDx * oDy - gDy * oDx;
+                if (Math.Abs(denom) > 1e-10)
+                {
+                    double rx = obs.StartXY.X - a.X;
+                    double ry = obs.StartXY.Y - a.Y;
+                    double t = (rx * oDy - ry * oDx) / denom;
+                    double u = (rx * gDy - ry * gDx) / denom;
+                    if (t >= 0.08 && t <= 0.92 && u >= -1e-4 && u <= 1.0 + 1e-4)
+                        return true;
+                }
+
+                if (PointToSegmentDist2D(mid, obs.StartXY, obs.EndXY) <= effTol)
                     return true;
             }
             return false;

@@ -541,6 +541,76 @@ namespace AcCoreRegressionHarness
                 AssertTrue(GetBoolVal(r9b, "excel_exported") && File.Exists(r9Xl), "Test 9B Excel missing");
                 try { File.Delete(r9Xl); } catch { }
 
+                // 4h. Test 10: Millimeters-tagged Meter Drawing Isolation + Parallel Obstacle Reject + Merge With Block+Wire
+                List<ObjectId> t10TempIds = new List<ObjectId>();
+                ObjectId c10ASeedId, c10BSeedId, c10BFixId;
+                UnitsValue savedInsunits = db.Insunits;
+                using (Transaction tr10 = db.TransactionManager.StartTransaction())
+                {
+                    db.Insunits = UnitsValue.Millimeters;
+                    BlockTable bt = (BlockTable)tr10.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    BlockTableRecord ms = (BlockTableRecord)tr10.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                    // Circuit A (LP-MM/1, 3 F1 at y=-22.0, x=2.0, 6.0, 9.0) with 1.0m orthogonal crossing gap [3.30..4.30]
+                    t10TempIds.Add(InsertBlock(ms, tr10, f1Btr, new Point3d(2.0, -22.0, 0), "E-FIXTURES"));
+                    t10TempIds.Add(InsertBlock(ms, tr10, f1Btr, new Point3d(6.0, -22.0, 0), "E-FIXTURES"));
+                    t10TempIds.Add(InsertBlock(ms, tr10, f1Btr, new Point3d(9.0, -22.0, 0), "E-FIXTURES"));
+                    c10ASeedId = AddLine(ms, tr10, new Point3d(2.30, -22.0, 0), new Point3d(3.30, -22.0, 0), "E-LIGHTING", 6);
+                    t10TempIds.Add(c10ASeedId);
+                    t10TempIds.Add(AddLine(ms, tr10, new Point3d(3.80, -23.2, 0), new Point3d(3.80, -20.8, 0), "0", 3)); // Orthogonal green crossing wire
+                    t10TempIds.Add(AddLine(ms, tr10, new Point3d(4.30, -22.0, 0), new Point3d(5.70, -22.0, 0), "E-LIGHTING", 6));
+                    t10TempIds.Add(AddLine(ms, tr10, new Point3d(6.30, -22.0, 0), new Point3d(8.70, -22.0, 0), "E-LIGHTING", 6));
+                    t10TempIds.Add(AddLine(ms, tr10, new Point3d(9.30, -22.0, 0), new Point3d(11.0, -22.0, 0), "E-LIGHTING", 6));
+                    t10TempIds.Add(InsertBlock(ms, tr10, arrowBtr, new Point3d(11.0, -22.0, 0), "E-LIGHTING"));
+                    t10TempIds.Add(AddText(ms, tr10, new Point3d(11.2, -21.85, 0), "LP-MM/1", 0.18, "E-LIGHTING"));
+
+                    // Parallel Green ACI:3 line alongside 2.40m gap [-0.70..1.70] separating Circuit B (must NOT trigger a crossing jump)
+                    t10TempIds.Add(AddLine(ms, tr10, new Point3d(-1.0, -22.15, 0), new Point3d(2.0, -22.15, 0), "0", 3));
+
+                    // Separate Circuit B (2 F1 at x=-6.5, -3.5) with same E-LIGHTING layer & ACI:6 color across 2.40m gap [-0.70..1.70]
+                    t10TempIds.Add(InsertBlock(ms, tr10, f1Btr, new Point3d(-6.5, -22.0, 0), "E-FIXTURES"));
+                    c10BFixId = InsertBlock(ms, tr10, f1Btr, new Point3d(-3.5, -22.0, 0), "E-FIXTURES");
+                    t10TempIds.Add(c10BFixId);
+                    c10BSeedId = AddLine(ms, tr10, new Point3d(-6.20, -22.0, 0), new Point3d(-3.80, -22.0, 0), "E-LIGHTING", 6);
+                    t10TempIds.Add(c10BSeedId);
+                    t10TempIds.Add(AddLine(ms, tr10, new Point3d(-3.20, -22.0, 0), new Point3d(-0.70, -22.0, 0), "E-LIGHTING", 6));
+
+                    tr10.Commit();
+                }
+
+                ed.SetImpliedSelection(new ObjectId[] { c10ASeedId });
+                Dictionary<string, object> r10a = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "pick_if_empty", false }, { "draw_legend", false }, { "include_electrical_calc", true }, { "fixture_watt", 40 }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST10A=" + jss.Serialize(r10a) + "\n");
+                AssertTrue(GetBoolVal(r10a, "ok"), "Test 10A failed ok");
+                AssertTrue(GetBoolVal(r10a, "unit_scale_inferred") && Math.Abs(GetDblVal(r10a, "effective_units_per_m") - 1.0) < 1e-3, "Test 10A Millimeters scale inference failed");
+                AssertTrue(GetStrVal(r10a, "circuit_name") == "LP-MM/1" && GetIntVal(r10a, "matched_blocks_count") == 3, "Test 10A leaked into Circuit B or missed orthogonal bridge");
+                AssertTrue(GetDblVal(r10a, "total_path_length_m") >= 6.0 && GetDblVal(r10a, "total_path_length_m") <= 10.0, "Test 10A meter length mismatch");
+                Dictionary<string, object> ec10a = r10a["electrical_calc"] as Dictionary<string, object>;
+                AssertTrue(ec10a != null && GetDblVal(ec10a, "voltage_drop_percent") >= 0.04, "Test 10A VD% collapsed to 0");
+
+                // Test 10B: Merge new branch while BOTH wire AND fixture block are selected
+                ed.SetImpliedSelection(new ObjectId[] { c10BSeedId, c10BFixId });
+                Dictionary<string, object> r10b = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "circuit_name", "LP-MM/1" }, { "merge_with_saved", true }, { "follow_connected", true }, { "pick_if_empty", false }, { "draw_legend", false }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST10B=" + jss.Serialize(r10b) + "\n");
+                AssertTrue(GetBoolVal(r10b, "ok") && GetBoolVal(r10b, "merged_with_saved") && GetIntVal(r10b, "matched_blocks_count") == 5, "Test 10B merge with wire+block selection failed");
+
+                using (Transaction trDel10 = db.TransactionManager.StartTransaction())
+                {
+                    db.Insunits = savedInsunits;
+                    for (int di = 0; di < t10TempIds.Count; di++)
+                    {
+                        Entity de = trDel10.GetObject(t10TempIds[di], OpenMode.ForWrite, false, true) as Entity;
+                        if (de != null && !de.IsErased) de.Erase(true);
+                    }
+                    trDel10.Commit();
+                }
+
                 // 5. Test 3: AuditElectricalDrawing (Orphan + Duplicate + Overload + VD>3% + Unit Mismatch)
                 using (Transaction trQa = db.TransactionManager.StartTransaction())
                 {

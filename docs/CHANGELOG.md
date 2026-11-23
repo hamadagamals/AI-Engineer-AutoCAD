@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-23 - Phase 2.3 Field-Feedback Hotfix (`INSUNITS=Millimeters` Scale Inference, Strict Crossing Bridges & `merge_with_saved` Branch Tracing)
+
+- **Meter-in-Millimeters Scale Inference (`integrations/autocad_context_plugin/CadMepAndTakeoffTools.cs`):**
+  - Updated `ResolveEffectiveUnitsPerMeter` so drawings authored in Meters (`medianFixtureSpan` `0.08..2.5` units) are automatically detected and corrected to `1.0` units/m even when `INSUNITS` is mistakenly set to `Millimeters`, `Centimeters`, `Inches`, `Feet`, or `Undefined` (similarly covering Centimeters and Millimeters mismatches without false positives on real Inch troffers).
+  - Updated `ScanCircuitSeedEntities` to pass inferred `seedUnitsPerM` into `SeedCurvesFromSelectedBlocks` and `LearnCircuitSampleProfile`.
+- **Anti-Leak Crossing Bridges & Gap Tightening (`integrations/autocad_context_plugin/CadSpatialIndex.cs`, `CadMepAndTakeoffTools.cs`):**
+  - Hardened `HasCrossingObstacleInGap` to require a strictly transverse obstacle (`|dot| < 0.65`) and interior intersection (`0.08 <= t <= 0.92`) with capped midpoint tolerance, preventing parallel architectural/parking lines from bridging distant circuits.
+  - Filtered architectural layers out of `obstacleSegments` in `CollectChainTraceCandidates`, raised Pass 3 collinearity dot threshold to `0.88`, and tightened `breakGapMax` (`0.45m` cap), `crossingGapMax` (`1.85m` cap), `crossingLateralTol` (`0.22m` cap), and `obsTol` (`0.22m` cap) in `ExpandConnectedPathCurvesCore`.
+- **Block+Wire `merge_with_saved` Branch Expansion (`integrations/autocad_context_plugin/CadMepAndTakeoffTools.cs`):**
+  - Updated `merge_with_saved` in `FindBlocksAlongPath` to isolate newly selected wires/blocks relative to `savedRec`, seed touching wires when only new blocks are selected, and run full `ExpandConnectedPathCurves` + `MatchBlocksAlongCircuitPath` on new branches even when fixture blocks are also selected.
+- **Verification:**
+  - Built `AIEngineer.AutoCAD.Context.dll` (`1,198,080` bytes) and passed AutoCAD 2021 `accoreconsole.exe` regression `Tests 1–10` (`AUTOCAD_TOOLS=37|SCHEMA_ERRORS=0`, `TEST10A` Meter-in-Millimeters `LP-MM/1` isolated `3` fixtures / `6.5m` / `VD=0.05%` across `1.0m` crossing bridge without jumping `2.4m` + parallel wire, `TEST10B` wire+block `merge_with_saved` = `5` fixtures / `11.4m`, `BENCHMARK_30C_300F_MS=321`, `ACCORE_REGRESSION_PASS`).
+
 ## 2026-11-23 - Phase 2.2 Deterministic Lighting Load Calculations & Circuit Legend Electrical Columns
 
 - **Deterministic Fixture Load & Smart Default Phase Rules (`integrations/autocad_context_plugin/CadLvCalculationsTools.cs`):**
