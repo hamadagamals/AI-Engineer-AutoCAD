@@ -3769,6 +3769,13 @@ namespace AIEngineer.AutoCAD
             public double LengthMeters;
             public Dictionary<string, int> CountsByBlock = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             public bool UserLocked;
+            public double LoadKw;
+            public double LoadKva;
+            public double DesignCurrentA;
+            public double BreakerRatingA;
+            public string CableDesignation = "";
+            public double VoltageDropPercent;
+            public string LoadSource = "";
         }
 
         private static readonly Dictionary<IntPtr, Dictionary<string, SavedCircuitRecord>> s_savedCircuitsByDb =
@@ -3791,7 +3798,8 @@ namespace AIEngineer.AutoCAD
                 string docPath = (db != null && !string.IsNullOrWhiteSpace(db.Filename))
                     ? db.Filename
                     : (doc != null ? doc.Name : "");
-                if (string.IsNullOrWhiteSpace(docPath) || !Path.IsPathRooted(docPath) || !File.Exists(docPath))
+                if (string.IsNullOrWhiteSpace(docPath) || !Path.IsPathRooted(docPath) || !File.Exists(docPath) ||
+                    !string.Equals(Path.GetExtension(docPath), ".dwg", StringComparison.OrdinalIgnoreCase))
                     return null;
                 string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                 if (string.IsNullOrWhiteSpace(localApp)) return null;
@@ -3850,7 +3858,14 @@ namespace AIEngineer.AutoCAD
                         MatchedBlockHandles = GetStringList(rd, "matched_block_handles"),
                         TerminatorHandles = GetStringList(rd, "terminator_handles"),
                         LengthMeters = GetDouble(rd, "length_m", 0.0),
-                        UserLocked = GetBool(rd, "user_locked", false)
+                        UserLocked = GetBool(rd, "user_locked", false),
+                        LoadKw = GetDouble(rd, "load_kw", 0.0),
+                        LoadKva = GetDouble(rd, "load_kva", 0.0),
+                        DesignCurrentA = GetDouble(rd, "design_current_ib_a", 0.0),
+                        BreakerRatingA = GetDouble(rd, "breaker_in_a", 0.0),
+                        CableDesignation = GetStr(rd, "cable_designation") ?? "",
+                        VoltageDropPercent = GetDouble(rd, "voltage_drop_percent", 0.0),
+                        LoadSource = GetStr(rd, "load_source") ?? ""
                     };
                     Dictionary<string, object> cntObj = rd.ContainsKey("counts_by_block") ? rd["counts_by_block"] as Dictionary<string, object> : null;
                     if (cntObj != null)
@@ -3864,6 +3879,32 @@ namespace AIEngineer.AutoCAD
                 if (!string.IsNullOrWhiteSpace(lastAct)) s_lastActiveCircuitNameByDb[dbPtr] = lastAct;
             }
             catch { }
+        }
+
+        private static Dictionary<string, object> SavedCircuitToDict(SavedCircuitRecord r)
+        {
+            Dictionary<string, object> d = new Dictionary<string, object>
+            {
+                { "circuit_name", r.CircuitName },
+                { "panel_name", r.PanelName },
+                { "termination_type", r.TerminationType },
+                { "wire_layer", r.WireLayer },
+                { "wire_color_key", r.WireColorKey },
+                { "path_handles", r.PathHandles },
+                { "matched_block_handles", r.MatchedBlockHandles },
+                { "terminator_handles", r.TerminatorHandles },
+                { "length_m", r.LengthMeters },
+                { "counts_by_block", r.CountsByBlock },
+                { "user_locked", r.UserLocked }
+            };
+            if (r.LoadKw > 0.0) d["load_kw"] = Math.Round(r.LoadKw, 3);
+            if (r.LoadKva > 0.0) d["load_kva"] = Math.Round(r.LoadKva, 3);
+            if (r.DesignCurrentA > 0.0) d["design_current_ib_a"] = Math.Round(r.DesignCurrentA, 2);
+            if (r.BreakerRatingA > 0.0) d["breaker_in_a"] = r.BreakerRatingA;
+            if (!string.IsNullOrEmpty(r.CableDesignation)) d["cable_designation"] = r.CableDesignation;
+            if (r.VoltageDropPercent > 0.0) d["voltage_drop_percent"] = Math.Round(r.VoltageDropPercent, 2);
+            if (!string.IsNullOrEmpty(r.LoadSource)) d["load_source"] = r.LoadSource;
+            return d;
         }
 
         private static void PersistSidecarLocked(Document doc, Database db)
@@ -3880,21 +3921,7 @@ namespace AIEngineer.AutoCAD
                 Dictionary<string, object> serializedMap = new Dictionary<string, object>();
                 foreach (KeyValuePair<string, SavedCircuitRecord> kv in bucket)
                 {
-                    SavedCircuitRecord r = kv.Value;
-                    serializedMap[kv.Key] = new Dictionary<string, object>
-                    {
-                        { "circuit_name", r.CircuitName },
-                        { "panel_name", r.PanelName },
-                        { "termination_type", r.TerminationType },
-                        { "wire_layer", r.WireLayer },
-                        { "wire_color_key", r.WireColorKey },
-                        { "path_handles", r.PathHandles },
-                        { "matched_block_handles", r.MatchedBlockHandles },
-                        { "terminator_handles", r.TerminatorHandles },
-                        { "length_m", r.LengthMeters },
-                        { "counts_by_block", r.CountsByBlock },
-                        { "user_locked", r.UserLocked }
-                    };
+                    serializedMap[kv.Key] = SavedCircuitToDict(kv.Value);
                 }
                 string lastAct = "";
                 s_lastActiveCircuitNameByDb.TryGetValue(dbPtr, out lastAct);
@@ -3925,7 +3952,14 @@ namespace AIEngineer.AutoCAD
                 TerminatorHandles = new List<string>(src.TerminatorHandles ?? new List<string>()),
                 LengthMeters = src.LengthMeters,
                 CountsByBlock = new Dictionary<string, int>(src.CountsByBlock ?? new Dictionary<string, int>(), StringComparer.OrdinalIgnoreCase),
-                UserLocked = src.UserLocked
+                UserLocked = src.UserLocked,
+                LoadKw = src.LoadKw,
+                LoadKva = src.LoadKva,
+                DesignCurrentA = src.DesignCurrentA,
+                BreakerRatingA = src.BreakerRatingA,
+                CableDesignation = src.CableDesignation ?? "",
+                VoltageDropPercent = src.VoltageDropPercent,
+                LoadSource = src.LoadSource ?? ""
             };
         }
 
@@ -3958,13 +3992,32 @@ namespace AIEngineer.AutoCAD
                     {
                         s_lastActiveCircuitNameByDb[dbPtr] = existing.CircuitName;
                         PersistSidecarLocked(doc, db);
+                        SaveProjectDatabaseToDiskLocked(doc, db);
                     }
                     return;
                 }
                 bucket[normKey] = CloneSavedRecord(rec);
                 if (setLastActive) s_lastActiveCircuitNameByDb[dbPtr] = rec.CircuitName.Trim();
                 PersistSidecarLocked(doc, db);
+                SaveProjectDatabaseToDiskLocked(doc, db);
             }
+        }
+
+        private static List<SavedCircuitRecord> GetAllSavedCircuitRecords(Document doc)
+        {
+            List<SavedCircuitRecord> list = new List<SavedCircuitRecord>();
+            if (doc == null || doc.Database == null || doc.Database.UnmanagedObject == IntPtr.Zero) return list;
+            lock (s_lastCoordLock)
+            {
+                EnsureSidecarLoadedLocked(doc, doc.Database);
+                Dictionary<string, SavedCircuitRecord> bucket;
+                if (!s_savedCircuitsByDb.TryGetValue(doc.Database.UnmanagedObject, out bucket) || bucket == null) return list;
+                foreach (SavedCircuitRecord r in bucket.Values)
+                {
+                    if (r != null) list.Add(CloneSavedRecord(r));
+                }
+            }
+            return list;
         }
 
         private static bool TryGetSavedCircuitRecord(Document doc, string circuitName, out SavedCircuitRecord rec)
@@ -4285,6 +4338,9 @@ namespace AIEngineer.AutoCAD
             LvCircuitCalcResult lvRes = null;
             Dictionary<string, object> electricalCalcDict = null;
             bool loadAssumed = false;
+            string loadSource = "";
+            List<string> missingCatalogBlocks = new List<string>();
+            Dictionary<string, object> specBreakdown = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, object> rowLoadByBlock = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
             string totalLoadLabel = "";
             string maxVdLabel = "";
@@ -4292,21 +4348,35 @@ namespace AIEngineer.AutoCAD
             bool vdPass = true;
             if (includeElecCalc && matchedItems.Count > 0)
             {
+                double circuitPf = Math.Max(0.4, Math.Min(1.0, GetDouble(args, "power_factor", 0.90)));
+                double dbTotalKw, dbTotalKva;
+                ComputeCircuitLoadFromProjectDb(
+                    doc, countsByBlock, fixtureWattArg, fixtureVaArg, 40.0, circuitPf,
+                    out dbTotalKw, out dbTotalKva, out loadAssumed, out loadSource,
+                    out rowLoadByBlock, out missingCatalogBlocks, out specBreakdown);
+
                 Dictionary<string, object> lvItem = new Dictionary<string, object>
                 {
                     { "name", !string.IsNullOrEmpty(circuitName) ? circuitName : "CIRCUIT" },
                     { "load_type", GetStr(args, "load_type") ?? "lighting" },
                     { "length_m", lenMeters },
-                    { "fixture_count", (double)matchedItems.Count }
+                    { "power_factor", circuitPf }
                 };
+                if (dbTotalKw > 1e-6)
+                    lvItem["load_kw"] = dbTotalKw;
+                else
+                {
+                    lvItem["fixture_count"] = (double)matchedItems.Count;
+                    lvItem["fixture_va"] = 40.0;
+                    loadAssumed = true;
+                }
+
                 if (args != null && args.ContainsKey("phases"))
                     lvItem["phases"] = GetInt(args, "phases", 1);
                 else if (string.Equals(GetStr(lvItem, "load_type"), "lighting", StringComparison.OrdinalIgnoreCase))
                     lvItem["phases"] = 1;
                 if (args != null && args.ContainsKey("voltage_v"))
                     lvItem["voltage_v"] = GetDouble(args, "voltage_v", 220.0);
-                if (args != null && args.ContainsKey("power_factor"))
-                    lvItem["power_factor"] = GetDouble(args, "power_factor", 0.90);
                 if (args != null && args.ContainsKey("max_vd_percent"))
                     lvItem["max_vd_percent"] = GetDouble(args, "max_vd_percent", 3.0);
                 string matArg = GetStr(args, "material");
@@ -4318,35 +4388,8 @@ namespace AIEngineer.AutoCAD
                 double? ambArg = GetNullableDouble(args, "ambient_temp_c");
                 if (ambArg.HasValue) lvItem["ambient_temp_c"] = ambArg.Value;
 
-                if (fixtureWattArg.HasValue && fixtureWattArg.Value > 0)
-                    lvItem["fixture_watt"] = fixtureWattArg.Value;
-                else if (fixtureVaArg.HasValue && fixtureVaArg.Value > 0)
-                    lvItem["fixture_va"] = fixtureVaArg.Value;
-                else
-                {
-                    lvItem["fixture_va"] = 40.0;
-                    loadAssumed = true;
-                }
-
                 Dictionary<string, object> lvDefaults = new Dictionary<string, object>();
                 lvRes = ComputeSingleLvCircuit(lvItem, lvDefaults, 1);
-
-                foreach (KeyValuePair<string, int> kv in countsByBlock)
-                {
-                    if (fixtureWattArg.HasValue && fixtureWattArg.Value > 0)
-                    {
-                        double w = kv.Value * fixtureWattArg.Value;
-                        rowLoadByBlock[kv.Key] = Math.Round(w, 0).ToString(CultureInfo.InvariantCulture) + " W (" +
-                            Math.Round(w / 1000.0, 3).ToString("0.###", CultureInfo.InvariantCulture) + " kW)";
-                    }
-                    else
-                    {
-                        double vaPerUnit = (fixtureVaArg.HasValue && fixtureVaArg.Value > 0) ? fixtureVaArg.Value : 40.0;
-                        double va = kv.Value * vaPerUnit;
-                        rowLoadByBlock[kv.Key] = Math.Round(va, 0).ToString(CultureInfo.InvariantCulture) + " VA (" +
-                            Math.Round(va / 1000.0, 3).ToString("0.###", CultureInfo.InvariantCulture) + " kVA)";
-                    }
-                }
 
                 totalLoadLabel = lvRes.LoadKw.ToString("0.###", CultureInfo.InvariantCulture) + " kW / " +
                     lvRes.LoadKva.ToString("0.###", CultureInfo.InvariantCulture) + " kVA";
@@ -4377,12 +4420,17 @@ namespace AIEngineer.AutoCAD
                     { "voltage_drop_percent", lvRes.VoltageDropPercent },
                     { "max_vd_percent", lvRes.MaxAllowedVdPercent },
                     { "vd_pass", vdPass },
-                    { "load_assumed", loadAssumed }
+                    { "load_assumed", loadAssumed },
+                    { "load_source", loadSource },
+                    { "missing_catalog_blocks", missingCatalogBlocks },
+                    { "spec_breakdown", specBreakdown }
                 };
                 if (loadAssumed)
                 {
+                    string missStr = missingCatalogBlocks.Count > 0 ? string.Join(", ", missingCatalogBlocks.ToArray()) : "all blocks";
                     electricalCalcDict["load_assumption_warning"] =
-                        "لم يتم تحديد قدرة الكشاف، لذا تم افتراض 40 VA لكل كشاف. أعد الحساب بتمرير fixture_watt الفعلي لتأكيد القيم الدقيقة.";
+                        "لم تُسجل قدرات البلوكات التالية في قاعدة بيانات الليجند (" + missStr +
+                        ")، لذا تم افتراض 40 VA لها. استدعِ manage_project_legend_db لقراءتها من جدول الليجند أو حفظها.";
                 }
             }
 
@@ -4390,6 +4438,10 @@ namespace AIEngineer.AutoCAD
             Extents3d? legendExt = null;
             if (drawLegend && matchedHandles.Count > 0)
             {
+                string effPanelKey = !string.IsNullOrEmpty(circuitName) ? ExtractPanelNameFallback(circuitName, panelName) : panelName;
+                bool stackByPanelReq = GetBool(args, "stack_by_panel", !string.IsNullOrEmpty(circuitName));
+                bool replaceAllLegendsReq = GetBool(args, "replace_all_legends", false);
+
                 Dictionary<string, object> legendArgs = new Dictionary<string, object>
                 {
                     { "handles", matchedHandles.ToArray() },
@@ -4400,6 +4452,10 @@ namespace AIEngineer.AutoCAD
                     { "include_system_blocks", includeSystem },
                     { "include_anonymous", includeAnonymous },
                     { "replace_existing", GetBool(args, "replace_existing", true) },
+                    { "stack_by_panel", stackByPanelReq },
+                    { "replace_all_legends", replaceAllLegendsReq },
+                    { "panel_table_key", effPanelKey ?? "" },
+                    { "circuit_table_key", circuitName ?? "" },
                     { "export_excel", GetBool(args, "export_excel", false) },
                     { "zoom", false }
                 };
@@ -4572,7 +4628,14 @@ namespace AIEngineer.AutoCAD
                     TerminatorHandles = termHandles,
                     LengthMeters = lenMeters,
                     CountsByBlock = new Dictionary<string, int>(countsByBlock, StringComparer.OrdinalIgnoreCase),
-                    UserLocked = (traceMeta != null && traceMeta.UserLocked)
+                    UserLocked = (traceMeta != null && traceMeta.UserLocked),
+                    LoadKw = lvRes != null ? lvRes.LoadKw : 0.0,
+                    LoadKva = lvRes != null ? lvRes.LoadKva : 0.0,
+                    DesignCurrentA = lvRes != null ? lvRes.DesignCurrentA : 0.0,
+                    BreakerRatingA = lvRes != null ? lvRes.BreakerRatingA : 0.0,
+                    CableDesignation = lvRes != null ? (lvRes.CableDesignation ?? "") : "",
+                    VoltageDropPercent = lvRes != null ? lvRes.VoltageDropPercent : 0.0,
+                    LoadSource = loadSource ?? ""
                 };
                 SaveCircuitRecordToMemory(doc, rec, true, traceMeta != null && (traceMeta.UserLocked || traceMeta.MergedWithSaved));
             }
@@ -4611,6 +4674,9 @@ namespace AIEngineer.AutoCAD
                 if (legendResult.ContainsKey("rows")) res["legend_rows"] = legendResult["rows"];
                 if (legendResult.ContainsKey("layer")) res["legend_layer"] = legendResult["layer"];
                 if (legendResult.ContainsKey("has_electrical_columns")) res["legend_has_electrical_columns"] = legendResult["has_electrical_columns"];
+                if (legendResult.ContainsKey("stacked_by_panel")) res["legend_stacked_by_panel"] = legendResult["stacked_by_panel"];
+                if (legendResult.ContainsKey("replaced_in_place")) res["legend_replaced_in_place"] = legendResult["replaced_in_place"];
+                if (legendResult.ContainsKey("panel_table_key")) res["legend_panel_table_key"] = legendResult["panel_table_key"];
                 if (legendResult.ContainsKey("excel_exported")) res["excel_exported"] = legendResult["excel_exported"];
                 if (legendResult.ContainsKey("excel_path")) res["excel_path"] = legendResult["excel_path"];
             }

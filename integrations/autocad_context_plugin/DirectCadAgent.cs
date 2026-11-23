@@ -782,6 +782,8 @@ namespace AIEngineer.AutoCAD
             if (res.ContainsKey("legend_bounds")) return toolName + "(rows:" + (res.ContainsKey("row_count") ? res["row_count"] : "ok") + ")";
             if (res.ContainsKey("selected_count") && toolName == "select_entities") return toolName + "(sel:" + res["selected_count"] + ")";
             if (res.ContainsKey("definition_entities") && res.ContainsKey("block_name")) return toolName + "(" + res["block_name"] + ",def:" + res["definition_entities"] + ")";
+            if (res.ContainsKey("items_count") && toolName == "manage_project_legend_db")
+                return toolName + "(" + res["action"] + ":" + res["items_count"] + ")";
             if (res.ContainsKey("created_count")) return toolName + "(+" + res["created_count"] + ")";
             if (res.ContainsKey("modified_count")) return toolName + "(mod:" + res["modified_count"] + ")";
             if (res.ContainsKey("copied_count")) return toolName + "(copy:" + res["copied_count"] + ")";
@@ -803,6 +805,7 @@ namespace AIEngineer.AutoCAD
                    n == "trace_all_circuits" ||
                    n == "generate_panel_schedule_and_sld" ||
                    n == "audit_electrical_drawing" ||
+                   n == "manage_project_legend_db" ||
                    n == "annotate_block_coordinates" ||
                    n == "convert_arrows_to_leaders" ||
                    n == "modify_entities" ||
@@ -2150,6 +2153,10 @@ namespace AIEngineer.AutoCAD
                 "   - Also note: if the engineer explicitly asks to convert all drawn arrows without selecting a sample, call `convert_arrows_to_leaders(update_coordinates: true)` directly (and never pass `selected_only: true` when no arrow is selected).\n" +
                 "6m. PANEL SCHEDULES, 3-PHASE BALANCING & SINGLE LINE DIAGRAMS (`generate_panel_schedule_and_sld`): Whenever the engineer asks to generate a **Panel Schedule** with automatic **R/Y/B 3-phase balancing**, main incomer/cable sizing (IEC 60364 / ECP), or draw a vector **Single Line Diagram (SLD)** (`جدول أحمال اللوحة`, `توزيع الفازات R Y B`, `المخطط الأحادي`, `SLD`), ALWAYS call `generate_panel_schedule_and_sld(draw_panel_schedule: true, draw_sld: true, export_excel: <if requested>)`! It traces all drawing circuits automatically (or reads an explicit `circuits[]` list), balances 1P circuits across R/Y/B by LPT for minimum imbalance %, adds spares, sizes branch/main breakers and cables via `calculate_lv_electrical` logic, draws `_AI_PANEL_SCHEDULE` + `_AI_SLD`, and supports Excel `.xlsx` export and full Undo.\n" +
                 "6n. CONSULTING ELECTRICAL QA AUDITOR (`audit_electrical_drawing`): Whenever the engineer asks to audit/inspect the electrical drawing for engineering errors (`فحص فني كهربائي`, `كشف الأخطاء`, `كشافات غير موصلة`, `اسماء لينيات مكررة`, `أحمال زائدة`, `تجاوز هبوط الجهد`, `QA audit`), ALWAYS call `audit_electrical_drawing(draw_markers: true, draw_report_table: true, export_excel: <if requested>)`! Never invent defects — report exact `overall_status`, `health_score`, `orphan_fixtures_count`, `overloaded_circuits_count`, `duplicate_names_count`, `vd_violations_count`, `unnamed_circuits_count`, `unit_scale_mismatch`, and item details strictly from the tool output.\n" +
+                "6o. PROJECT LEGEND SPEC DATABASE, STACKED PER-PANEL CIRCUIT TABLES & PERSISTENT DISK STORAGE (`manage_project_legend_db`): NEVER guess fixture wattages (`36W`/`10W`/`45W`) from thin air or loose `query_entities`! ALWAYS use `manage_project_legend_db` as the authoritative catalog:\n" +
+                "   - First call `manage_project_legend_db(action: 'get_catalog')` or `manage_project_legend_db(action: 'extract_from_drawing')` (or ask the engineer to select the Legend schedule and call `action: 'extract_from_selection'`) to extract every block type's Watt/VA/voltage/emergency spec (automatically resolving 'AS ABOVE' rows).\n" +
+                "   - When the engineer states or corrects a block's spec (e.g. '60x60 = 45W', 'APPE = 22W'), immediately persist it via `manage_project_legend_db(action: 'set_item', block_name: '...', watt: ..., description: '...')` — NEVER pretend you saved an 'internal DB' in chat text without calling the tool!\n" +
+                "   - `project_database.json` and `circuit_memory` persist PERMANENTLY ON DISK across AutoCAD & PC restarts (for saved `.dwg` files) and are readable by external tools; also when tracing circuits with `find_blocks_along_path(include_electrical_calc: true)`, mixed fixtures auto-read exact Wattages from the DB and circuit tables stack cleanly by panel column (`stack_by_panel: true` by default — circuits of the SAME panel stack vertically underneath, and a NEW panel starts a column to the right). To build a full Panel Schedule, Cable/Breaker Sizing, and Total Panel Load from verified saved circuits, call `generate_panel_schedule_and_sld(source: 'saved_memory', ...)`!\n" +
                 "7. SAFE COPYING OUTSIDE LARGE DRAWINGS & FRAMING: Whenever asked to copy elements outside the drawing ('نسخة خارج المخطط') or put ONE frame/box around them ('مربع واحد'), use `copy_entities` with `entity_type: \"BlockReference\"` (or handles/filters), `auto_offset_outside: \"right\"`, `draw_frame: true` + concise `frame_label` if they want one bounding box around all copies, and `select_copied: true` / `zoom: true`.\n" +
                 "8. GEOMETRY PRECISION & SELF-VERIFICATION: When placing shapes side-by-side at a clear distance, inspect the exact `bounds` returned by `draw_entities` and call `measure_and_compare` (mode='distance'); if ANY coordinate or gap differs from what the engineer requested, IMMEDIATELY correct it using `modify_entities` BEFORE giving your final answer!\n" +
                 "9. STRICT TRUTH & NO HALLUCINATION: NEVER claim you extracted coordinates/schedules/BOQ, calculated/distributed lighting, exported `.stf`/Excel/PDF files, cleaned/purged/compared drawings, added arrows/tables/clouds, deleted, aligned, arrayed, separated, selected, renamed, converted into a block, or drew anything unless the corresponding tool (`lighting_design_engine`, `export_dialux_stf`, `extract_load_schedule`, `quantity_takeoff`, `manage_attributes`, `text_tools`, `advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`, `export_to_excel`, `import_excel_table`, `annotate_block_coordinates`, `draw_block_legend`, `draw_entities`, `delete_entities`, `copy_entities`, `modify_entities`, `create_block`, `convert_matching_shapes_to_block`, `select_entities`, `zoom_view`) ACTUALLY ran and returned `ok: true` in this turn! NEVER copy or write bracketed logs like `[Executed tools in AutoCAD: ...]` in your reply!\n" +
@@ -2200,17 +2207,17 @@ namespace AIEngineer.AutoCAD
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "find_blocks_along_path", "trace_all_circuits", "draw_block_legend",
+                    "find_blocks_along_path", "trace_all_circuits", "draw_block_legend", "manage_project_legend_db",
                     "extract_load_schedule", "quantity_takeoff", "export_to_excel", "approve_or_rollback_preview");
             }
 
             if (ContainsAnyKeyword(low,
-                "جهد", "هبوط", "قاطع", "قواطع", "قصر", "امبير", "أمبير", "كيلووات", "كيلو فولت", "مقطع",
-                "iec", "ecp", "breaker", "voltage", "cable", "amp", "kva", "kw", "hp", "isc", "lv", "panel", "لوحة", "لوحات", "احمال", "أحمال"))
+                "جهد", "هبوط", "قاطع", "قواطع", "قصر", "امبير", "أمبير", "كيلووات", "كيلو فولت", "مقطع", "وات", "واط",
+                "iec", "ecp", "breaker", "voltage", "cable", "amp", "kva", "kw", "hp", "isc", "lv", "panel", "لوحة", "لوحات", "احمال", "أحمال", "watt"))
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "calculate_lv_electrical", "extract_load_schedule", "trace_all_circuits",
+                    "calculate_lv_electrical", "extract_load_schedule", "trace_all_circuits", "manage_project_legend_db",
                     "generate_panel_schedule_and_sld", "export_to_excel", "approve_or_rollback_preview");
             }
 
@@ -2221,7 +2228,7 @@ namespace AIEngineer.AutoCAD
                 matchedDomain = true;
                 AddToolNames(allowed,
                     "generate_panel_schedule_and_sld", "calculate_lv_electrical", "extract_load_schedule",
-                    "trace_all_circuits", "export_to_excel", "approve_or_rollback_preview");
+                    "trace_all_circuits", "manage_project_legend_db", "export_to_excel", "approve_or_rollback_preview");
             }
 
             if (ContainsAnyKeyword(low,
@@ -2240,17 +2247,18 @@ namespace AIEngineer.AutoCAD
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "lighting_design_engine", "export_dialux_stf", "find_blocks_along_path",
+                    "lighting_design_engine", "export_dialux_stf", "find_blocks_along_path", "manage_project_legend_db",
                     "trace_all_circuits", "draw_block_legend", "export_to_excel", "approve_or_rollback_preview");
             }
 
             if (ContainsAnyKeyword(low,
                 "بلوك", "بلوكات", "جرد", "حصر", "جدول", "كميات", "مساحة", "اطوال", "أطوال",
-                "legend", "boq", "takeoff", "count", "block", "schedule"))
+                "ليجند", "ليجنت", "داتا بيز", "قاعدة بيانات", "كتالوج", "مواصفات",
+                "legend", "catalog", "database", "boq", "takeoff", "count", "block", "schedule"))
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "draw_block_legend", "quantity_takeoff", "extract_load_schedule",
+                    "draw_block_legend", "manage_project_legend_db", "quantity_takeoff", "extract_load_schedule",
                     "find_blocks_along_path", "trace_all_circuits", "export_to_excel",
                     "create_block", "convert_matching_shapes_to_block");
             }
@@ -2407,6 +2415,8 @@ namespace AIEngineer.AutoCAD
                     { "voltage_v", Prop("number", "Nominal voltage in Volts (default 220V for 1P, 380V for 3P).") },
                     { "power_factor", Prop("number", "Power factor cos(phi), 0.4..1.0 (default 0.90 for lighting).") },
                     { "max_vd_percent", Prop("number", "Maximum permitted voltage drop % (default 3.0% for lighting).") },
+                    { "stack_by_panel", Prop("boolean", "Stack named circuit tables vertically underneath the same Panel column and put each new Panel in a column to the right, updating only that circuit in-place on re-runs (default true when circuit_name is present).") },
+                    { "replace_all_legends", Prop("boolean", "Clear all circuit tables on _AI_BLOCK_LEGEND instead of stacking by panel (default false).") },
                     { "zoom", Prop("boolean", "Zoom viewport after execution (default true).") },
                     { "zoom_mode", Prop("string", "'auto' (default: 'legend' if draw_legend=true else 'selected'), 'selected' (focus on selected blocks/wires), 'legend' (focus on table), or 'both'.") }
                 })));
@@ -3220,6 +3230,7 @@ namespace AIEngineer.AutoCAD
                     { "table_gap", Prop("number", "Optional spacing gap from main drawing extents.") },
                     { "title", Prop("string", "Optional custom title banner.") },
                     { "replace_existing", Prop("boolean", "Erase previous _AI_PANEL_SCHEDULE and _AI_SLD entities before drawing (default true).") },
+                    { "source", Prop("string", "Circuit source mode: 'auto' (default: scans drawing and merges locked circuits), 'saved_memory' (builds directly from saved/verified circuits in project_database without re-tracing whole drawing), or 'drawing'.") },
                     { "export_excel", Prop("boolean", "Export Panel Schedule to formatted RTL Excel .xlsx workbook (default false).") },
                     { "excel_path", Prop("string", "Optional destination .xlsx file path.") },
                     { "zoom", Prop("boolean", "Zoom AutoCAD viewport onto generated schedule/SLD (default true).") }
@@ -3247,6 +3258,45 @@ namespace AIEngineer.AutoCAD
                     { "export_excel", Prop("boolean", "Export full QA Audit findings to RTL Excel .xlsx workbook (default false).") },
                     { "excel_path", Prop("string", "Optional destination .xlsx path.") },
                     { "zoom", Prop("boolean", "Zoom onto drawn QA Audit table (default true).") }
+                })));
+
+            tools.Add(Tool("manage_project_legend_db",
+                "Manage the persistent on-disk Project Legend Specification & Fixture Wattage Database (saved under %LOCALAPPDATA%\\AI-Engineer\\project_db and mirrored beside the DWG as .ai-engineer-project-db.json): extract fixture blocks, descriptions, Watt/VA ratings (including compound '2x18W' and 'AS ABOVE' inheritance) directly from the drawing's Legend or selected Legend entities, inspect/search the catalog, store verified block specs, and import/export via Excel (.xlsx).",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "action", Prop("string", "Action to perform: 'get_catalog' (default), 'extract_from_drawing', 'extract_from_selection', 'set_item', 'set_items', 'export_excel', 'import_excel', or 'clear_catalog'.") },
+                    { "block_name", Prop("string", "Target CAD block name for 'set_item' or filter for 'get_catalog'.") },
+                    { "description", Prop("string", "Engineering description text from legend for 'set_item'.") },
+                    { "watt", Prop("number", "Exact active wattage per fixture block in Watts (W) for 'set_item'.") },
+                    { "va", Prop("number", "Apparent power per fixture block in VA for 'set_item' when Watt is omitted.") },
+                    { "voltage_v", Prop("number", "Nominal voltage in Volts (e.g. 220, 230, 380).") },
+                    { "power_factor", Prop("number", "Optional block power factor cos(phi) (0.4..1.0).") },
+                    { "is_emergency", Prop("boolean", "Whether this block is an emergency/backup fixture.") },
+                    { "category", Prop("string", "Optional load category filter or assignment: 'lighting', 'socket', 'hvac', 'motor', or 'panel'.") },
+                    { "source", Prop("string", "Optional origin tag (defaults to 'user_verified' for set_item).") },
+                    { "items", new Dictionary<string, object>
+                        {
+                            { "type", "array" },
+                            { "description", "Batch array of block specification objects for action='set_items'." },
+                            { "items", ObjSchema(new Dictionary<string, object>
+                                {
+                                    { "block_name", Prop("string", "CAD block name.") },
+                                    { "description", Prop("string", "Engineering specification text.") },
+                                    { "watt", Prop("number", "Active Wattage (W).") },
+                                    { "va", Prop("number", "Apparent VA.") },
+                                    { "voltage_v", Prop("number", "Voltage (V).") },
+                                    { "power_factor", Prop("number", "Power factor.") },
+                                    { "is_emergency", Prop("boolean", "Emergency flag.") },
+                                    { "category", Prop("string", "Category.") }
+                                })
+                            }
+                        }
+                    },
+                    { "overwrite_verified", Prop("boolean", "Whether extract_from_drawing/extract_from_selection overwrites user_verified entries (default false).") },
+                    { "visible_only", Prop("boolean", "Only scan visible layers when extracting from drawing (default true).") },
+                    { "export_excel", Prop("boolean", "Also export the Project Legend DB catalog to RTL Excel .xlsx (default false).") },
+                    { "excel_path", Prop("string", "Optional Excel .xlsx path for export_excel or import_excel.") },
+                    { "sheet_name", Prop("string", "Optional Excel worksheet name for import_excel.") }
                 })));
 
             return tools;

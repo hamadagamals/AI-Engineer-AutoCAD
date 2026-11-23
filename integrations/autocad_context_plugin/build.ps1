@@ -93,6 +93,7 @@ $assembly = Join-Path $resolvedOutput "AIEngineer.AutoCAD.Context.dll"
     (Join-Path $pluginRoot "CadSpatialIndex.cs") `
     (Join-Path $pluginRoot "CadMepAndTakeoffTools.cs") `
     (Join-Path $pluginRoot "CadPanelAndQaTools.cs") `
+    (Join-Path $pluginRoot "CadProjectLegendDb.cs") `
     (Join-Path $pluginRoot "CadTextAndAttributesTools.cs") `
     (Join-Path $pluginRoot "CadGeometryQaAndLayoutTools.cs") `
     (Join-Path $pluginRoot "CadLightingAndDialuxTools.cs") `

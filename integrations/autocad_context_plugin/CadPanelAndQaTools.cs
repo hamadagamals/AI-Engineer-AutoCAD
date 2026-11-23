@@ -45,6 +45,8 @@ namespace AIEngineer.AutoCAD
             public double ImbalancePercent;
             public double ConnectedKva;
             public double DemandKva;
+            public double ConnectedKw;
+            public double DemandKw;
             public LvCircuitCalcResult MainFeeder;
         }
 
@@ -137,6 +139,7 @@ namespace AIEngineer.AutoCAD
         }
 
         private static BalancedPanelSchedule BuildBalancedPanelSchedule(
+            Document doc,
             string panelName,
             List<TracedCircuitSummary> rawCircuits,
             double fixtureVa,
@@ -173,8 +176,28 @@ namespace AIEngineer.AutoCAD
                 TracedCircuitSummary c = rawCircuits[i];
                 int circPhases = 1;
                 double estVa = Math.Max(40.0, c.MatchedBlocksCount * Math.Max(10.0, fixtureVa));
+                bool useExactKw = false;
+                double exactKw = 0.0;
                 if (c.CountsByBlock != null && c.CountsByBlock.ContainsKey("__VA__"))
+                {
                     estVa = Math.Max(40.0, c.CountsByBlock["__VA__"]);
+                }
+                else if (doc != null && c.CountsByBlock != null && c.CountsByBlock.Count > 0)
+                {
+                    double dbKw, dbKva;
+                    bool dbAssumed;
+                    string dbSrc;
+                    Dictionary<string, object> dbRows, dbBrk;
+                    List<string> dbMiss;
+                    ComputeCircuitLoadFromProjectDb(
+                        doc, c.CountsByBlock, null, null, fixtureVa, powerFactor,
+                        out dbKw, out dbKva, out dbAssumed, out dbSrc, out dbRows, out dbMiss, out dbBrk);
+                    if (dbSrc == "project_legend_db" || dbSrc == "partial_legend_db")
+                    {
+                        if (dbKva > 1e-6) estVa = Math.Max(10.0, Math.Round(dbKva * 1000.0, 1));
+                        if (dbKw > 1e-6) { exactKw = dbKw; useExactKw = true; }
+                    }
+                }
                 if (c.CountsByBlock != null && c.CountsByBlock.ContainsKey("__PHASES__"))
                     circPhases = c.CountsByBlock["__PHASES__"] == 3 ? 3 : 1;
 
@@ -192,7 +215,6 @@ namespace AIEngineer.AutoCAD
                     { "load_type", loadType },
                     { "phases", circPhases },
                     { "voltage_v", circV },
-                    { "load_kva", estVa / 1000.0 },
                     { "power_factor", powerFactor },
                     { "length_m", circLen },
                     { "max_vd_percent", circMaxVd },
@@ -201,6 +223,10 @@ namespace AIEngineer.AutoCAD
                     { "install_method", installMethod },
                     { "ambient_temp_c", ambientTempC }
                 };
+                if (useExactKw)
+                    itemArgs["load_kw"] = exactKw;
+                else
+                    itemArgs["load_kva"] = estVa / 1000.0;
 
                 LvCircuitCalcResult calc = ComputeSingleLvCircuit(itemArgs, baseDefaults, i + 1);
                 sizedWays.Add(new BalancedCircuitWay
@@ -316,8 +342,15 @@ namespace AIEngineer.AutoCAD
             double maxP = Math.Max(sumR, Math.Max(sumY, sumB));
             double minP = Math.Min(sumR, Math.Min(sumY, sumB));
             panel.ImbalancePercent = avg > 1e-6 ? Math.Round(((maxP - minP) / avg) * 100.0, 2) : 0.0;
-            panel.ConnectedKva = Math.Round(panel.TotalConnectedVa / 1000.0, 2);
-            panel.DemandKva = Math.Round(panel.ConnectedKva * demandFactor, 2);
+            panel.ConnectedKva = Math.Round(panel.TotalConnectedVa / 1000.0, 3);
+            panel.DemandKva = Math.Round(panel.ConnectedKva * demandFactor, 3);
+            double sumKwAll = 0.0;
+            for (int i = 0; i < sizedWays.Count; i++)
+            {
+                if (sizedWays[i].Calc != null) sumKwAll += sizedWays[i].Calc.LoadKw;
+            }
+            panel.ConnectedKw = Math.Round(sumKwAll, 3);
+            panel.DemandKw = Math.Round(panel.ConnectedKw * demandFactor, 3);
 
             Dictionary<string, object> mainArgs = new Dictionary<string, object>
             {
@@ -822,6 +855,7 @@ namespace AIEngineer.AutoCAD
             bool exportExcel = GetBool(args, "export_excel", false);
             bool zoom = GetBool(args, "zoom", true);
             bool honorSelection = GetBool(args, "use_selected", false);
+            string sourceMode = (GetStr(args, "source") ?? "auto").Trim().ToLowerInvariant();
 
             List<TracedCircuitSummary> sourceCircuits = ParseExplicitPanelCircuitsArg(
                 args.ContainsKey("circuits") ? args["circuits"] : null,
@@ -836,7 +870,40 @@ namespace AIEngineer.AutoCAD
 
             using (DocumentLock docLock = doc.LockDocument())
             {
-                if (sourceCircuits.Count == 0)
+                if (sourceCircuits.Count == 0 && (sourceMode == "saved_memory" || sourceMode == "memory" || sourceMode == "saved"))
+                {
+                    List<SavedCircuitRecord> savedList = GetAllSavedCircuitRecords(doc);
+                    if (savedList.Count == 0)
+                        return Err("لا توجد لينيات محفوظة في ذاكرة المشروع حتى الآن. استخرج اللينيات أولاً أو استخدم source: 'auto'.");
+                    for (int si = 0; si < savedList.Count; si++)
+                    {
+                        SavedCircuitRecord sr = savedList[si];
+                        sourceCircuits.Add(new TracedCircuitSummary
+                        {
+                            CircuitName = sr.CircuitName,
+                            PanelName = ExtractPanelNameFallback(sr.CircuitName, sr.PanelName),
+                            TerminationType = sr.TerminationType,
+                            WireLayer = sr.WireLayer,
+                            WireColorKey = sr.WireColorKey,
+                            PathCurvesCount = sr.PathHandles != null ? sr.PathHandles.Count : 0,
+                            LengthMeters = sr.LengthMeters,
+                            MatchedBlocksCount = sr.MatchedBlockHandles != null ? sr.MatchedBlockHandles.Count : 0,
+                            CountsByBlock = new Dictionary<string, int>(sr.CountsByBlock ?? new Dictionary<string, int>(), StringComparer.OrdinalIgnoreCase)
+                        });
+                    }
+                    using (Transaction trExt = db.TransactionManager.StartTransaction())
+                    {
+                        Dictionary<string, bool> hiddenMap = BuildLayerHiddenMap(db, trExt);
+                        double tmpMed;
+                        ComputeDrawingFixtureMetrics(db, trExt, true, hiddenMap, out drawingSpan, out tmpMed, out mainExt);
+                        refSpan = tmpMed;
+                        Dictionary<string, object> uInfo = GetUnitsInfo(db);
+                        double rawU = Convert.ToDouble(uInfo["units_per_m"], CultureInfo.InvariantCulture);
+                        effectiveUnitsPerM = ResolveEffectiveUnitsPerMeter(db, rawU, drawingSpan, refSpan, out scaleInferred, out scaleWarning);
+                        trExt.Commit();
+                    }
+                }
+                else if (sourceCircuits.Count == 0)
                 {
                     DrawingCircuitScanResult scan;
                     using (Transaction tr = db.TransactionManager.StartTransaction())
@@ -904,7 +971,7 @@ namespace AIEngineer.AutoCAD
                 {
                     string pn = panelOrder[pi];
                     BalancedPanelSchedule built = BuildBalancedPanelSchedule(
-                        pn, groupedByPanel[pn], fixtureVa, voltageLnV, voltageLlV, powerFactor,
+                        doc, pn, groupedByPanel[pn], fixtureVa, voltageLnV, voltageLlV, powerFactor,
                         demandFactor, sparePercent, feederLengthM, maxVdPercent,
                         material, insulation, installMethod, ambientTempC);
                     panels.Add(built);
@@ -1036,6 +1103,8 @@ namespace AIEngineer.AutoCAD
                         { "phase_y_va", p.TotalYVa },
                         { "phase_b_va", p.TotalBVa },
                         { "imbalance_percent", p.ImbalancePercent },
+                        { "connected_kw", p.ConnectedKw },
+                        { "demand_kw", p.DemandKw },
                         { "connected_kva", p.ConnectedKva },
                         { "demand_kva", p.DemandKva },
                         { "main_breaker", p.MainFeeder.BreakerRatingA.ToString("0", CultureInfo.InvariantCulture) + "A " + p.MainFeeder.BreakerType + " (" + p.MainFeeder.RecommendedIcuKa.ToString("0", CultureInfo.InvariantCulture) + "kA)" },

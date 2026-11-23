@@ -326,6 +326,8 @@ namespace AIEngineer.AutoCAD
                         return GeneratePanelScheduleAndSld(doc, args);
                     case "audit_electrical_drawing":
                         return AuditElectricalDrawing(doc, args);
+                    case "manage_project_legend_db":
+                        return ManageProjectLegendDb(doc, args);
                     case "manage_attributes":
                         return ManageAttributes(doc, args);
                     case "text_tools":
@@ -1427,6 +1429,39 @@ namespace AIEngineer.AutoCAD
             public SavedColorState DominantColor;
         }
 
+        private const string CircTableRegApp = "AIENG_CIRC_TBL";
+
+        private static void AttachCircTableXData(Database db, Transaction tr, Entity ent, string tag)
+        {
+            if (ent == null || string.IsNullOrEmpty(tag)) return;
+            try
+            {
+                EnsureRegApp(db, tr, CircTableRegApp);
+                ent.XData = new ResultBuffer(
+                    new TypedValue((int)DxfCode.ExtendedDataRegAppName, CircTableRegApp),
+                    new TypedValue((int)DxfCode.ExtendedDataAsciiString, tag));
+            }
+            catch { }
+        }
+
+        private static string ReadCircTableTag(Entity ent)
+        {
+            if (ent == null) return "";
+            try
+            {
+                ResultBuffer rb = ent.GetXDataForApplication(CircTableRegApp);
+                if (rb == null) return "";
+                TypedValue[] vals = rb.AsArray();
+                for (int i = 0; i < vals.Length; i++)
+                {
+                    if (vals[i].TypeCode == (int)DxfCode.ExtendedDataAsciiString && vals[i].Value != null)
+                        return vals[i].Value.ToString();
+                }
+            }
+            catch { }
+            return "";
+        }
+
         private static Dictionary<string, object> DrawBlockLegend(Document doc, Dictionary<string, object> args)
         {
             Dictionary<string, string> descMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1496,6 +1531,14 @@ namespace AIEngineer.AutoCAD
             string maxVdLabel = GetStr(args, "max_vd_label") ?? "";
             string rowVdLabel = GetStr(args, "row_vd_label") ?? "";
             bool vdPass = GetBool(args, "vd_pass", true);
+            bool stackByPanel = GetBool(args, "stack_by_panel", false);
+            bool replaceAllLegends = GetBool(args, "replace_all_legends", false);
+            string panelTableKey = (GetStr(args, "panel_table_key") ?? "").Trim().ToUpperInvariant();
+            string circuitTableKey = (GetStr(args, "circuit_table_key") ?? "").Trim().ToUpperInvariant();
+            string xdataTag = (!string.IsNullOrEmpty(panelTableKey) && !string.IsNullOrEmpty(circuitTableKey))
+                ? (panelTableKey + "|" + circuitTableKey)
+                : "";
+            bool stackedMode = stackByPanel && !replaceAllLegends && !string.IsNullOrEmpty(xdataTag);
 
             Database db = doc.Database;
             int erasedCount = 0;
@@ -1505,6 +1548,13 @@ namespace AIEngineer.AutoCAD
             List<object> rowSummaries = new List<object>();
             Extents3d? drawingExt = null;
             Extents3d? legendExt = null;
+            Extents3d? sameCircExt = null;
+            Extents3d? samePanelExt = null;
+            double? allBoardTopY = null;
+            double? otherPanelsMaxX = null;
+            List<Extents3d> samePanelOtherExts = new List<Extents3d>();
+            Extents3d? untaggedLegendBlocker = null;
+            bool replacedInPlace = false;
             string safeLegendLayer = legendLayer;
             int totalBlocksRepresented = 0;
             bool switchedToModel = false;
@@ -1545,7 +1595,7 @@ namespace AIEngineer.AutoCAD
                     }
 
                     HashSet<string> layersToErase = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    if (replaceExisting && !string.Equals(safeLegendLayer, "0", StringComparison.OrdinalIgnoreCase))
+                    if (!stackedMode && replaceExisting && !string.Equals(safeLegendLayer, "0", StringComparison.OrdinalIgnoreCase))
                         layersToErase.Add(safeLegendLayer);
                     foreach (string cl in clearLayers)
                     {
@@ -1556,6 +1606,69 @@ namespace AIEngineer.AutoCAD
                             continue;
                         }
                         layersToErase.Add(cl);
+                    }
+
+                    if (stackedMode && !string.Equals(safeLegendLayer, "0", StringComparison.OrdinalIgnoreCase))
+                    {
+                        foreach (ObjectId mid in ms)
+                        {
+                            if (erasedIds.Contains(mid) || mid.IsErased) continue;
+                            Entity me = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                            if (me == null || me.IsErased) continue;
+                            if (!string.Equals(me.Layer ?? "", safeLegendLayer, StringComparison.OrdinalIgnoreCase)) continue;
+
+                            Extents3d mex = new Extents3d();
+                            bool hasEx = false;
+                            try
+                            {
+                                mex = me.GeometricExtents;
+                                hasEx = IsFiniteBounds(mex);
+                            }
+                            catch { }
+
+                            string tag = ReadCircTableTag(me);
+                            if (string.Equals(tag, xdataTag, StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (hasEx)
+                                {
+                                    if (!sameCircExt.HasValue) sameCircExt = mex;
+                                    else { Extents3d u = sameCircExt.Value; u.AddExtents(mex); sameCircExt = u; }
+                                }
+                                try
+                                {
+                                    me.UpgradeOpen();
+                                    me.Erase(true);
+                                    erasedIds.Add(mid);
+                                    legendErasedIds.Add(mid);
+                                    erasedCount++;
+                                    replacedInPlace = true;
+                                }
+                                catch { }
+                            }
+                            else if (!string.IsNullOrEmpty(tag))
+                            {
+                                int bar = tag.IndexOf('|');
+                                string entPanel = bar > 0 ? tag.Substring(0, bar) : tag;
+                                if (hasEx)
+                                {
+                                    if (!allBoardTopY.HasValue || mex.MaxPoint.Y > allBoardTopY.Value)
+                                        allBoardTopY = mex.MaxPoint.Y;
+                                    if (!otherPanelsMaxX.HasValue || mex.MaxPoint.X > otherPanelsMaxX.Value)
+                                        otherPanelsMaxX = mex.MaxPoint.X;
+                                    if (string.Equals(entPanel, panelTableKey, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        if (!samePanelExt.HasValue) samePanelExt = mex;
+                                        else { Extents3d u = samePanelExt.Value; u.AddExtents(mex); samePanelExt = u; }
+                                        samePanelOtherExts.Add(mex);
+                                    }
+                                }
+                            }
+                            else if (hasEx)
+                            {
+                                if (!untaggedLegendBlocker.HasValue) untaggedLegendBlocker = mex;
+                                else { Extents3d u = untaggedLegendBlocker.Value; u.AddExtents(mex); untaggedLegendBlocker = u; }
+                            }
+                        }
                     }
 
                     if (layersToErase.Count > 0)
@@ -1821,6 +1934,87 @@ namespace AIEngineer.AutoCAD
                     {
                         x0 = explicitOrigin[0];
                         yTop = explicitOrigin[1];
+                    }
+                    else if (stackedMode)
+                    {
+                        double boardVPad = Math.Max(rowH * 1.2, dwgSpan * 0.015);
+                        double boardColGap = Math.Max(rowH * 2.2, dwgSpan * 0.025);
+                        if (sameCircExt.HasValue)
+                        {
+                            x0 = sameCircExt.Value.MinPoint.X;
+                            yTop = sameCircExt.Value.MaxPoint.Y;
+                            double newBot = yTop - tableH;
+                            bool hitsSameCol = false;
+                            for (int si = 0; si < samePanelOtherExts.Count; si++)
+                            {
+                                Extents3d oe = samePanelOtherExts[si];
+                                if (!(x0 + tableW < oe.MinPoint.X - 1e-3 || x0 > oe.MaxPoint.X + 1e-3 ||
+                                      newBot > oe.MaxPoint.Y + boardVPad * 0.4 || yTop < oe.MinPoint.Y - boardVPad * 0.4))
+                                {
+                                    hitsSameCol = true;
+                                    break;
+                                }
+                            }
+                            if (hitsSameCol && samePanelExt.HasValue)
+                            {
+                                x0 = samePanelExt.Value.MinPoint.X;
+                                yTop = samePanelExt.Value.MinPoint.Y - boardVPad;
+                            }
+                        }
+                        else if (samePanelExt.HasValue)
+                        {
+                            x0 = samePanelExt.Value.MinPoint.X;
+                            yTop = samePanelExt.Value.MinPoint.Y - boardVPad;
+                        }
+                        else if (otherPanelsMaxX.HasValue)
+                        {
+                            x0 = otherPanelsMaxX.Value + boardColGap;
+                            yTop = allBoardTopY.HasValue
+                                ? allBoardTopY.Value
+                                : (drawingExt.HasValue ? ((drawingExt.Value.MinPoint.Y + drawingExt.Value.MaxPoint.Y) / 2.0 + tableH / 2.0) : tableH);
+                        }
+                        else if (drawingExt.HasValue)
+                        {
+                            Extents3d de = drawingExt.Value;
+                            double dMidY = (de.MinPoint.Y + de.MaxPoint.Y) / 2.0;
+                            x0 = de.MaxPoint.X + gap;
+                            yTop = dMidY + tableH / 2.0;
+                            string[] blockerLayers = new string[]
+                            {
+                                "_AI_COORD_TABLE", "_AI_CIRCUIT_SCHEDULE", "_AI_PANEL_SCHEDULE", "_AI_SLD",
+                                "_AI_ELECTRICAL_QA", "_AI_LV_CALC_TABLE", "_AI_BOQ_TABLE", "_AI_EXCEL_TABLE",
+                                "_AI_LIGHTING_TABLE"
+                            };
+                            List<Extents3d> blockers = new List<Extents3d>();
+                            for (int bi = 0; bi < blockerLayers.Length; bi++)
+                            {
+                                Extents3d? bExt = CollectLayerExtents(ms, tr, blockerLayers[bi]);
+                                if (bExt.HasValue && IsFiniteBounds(bExt.Value))
+                                    blockers.Add(bExt.Value);
+                            }
+                            if (untaggedLegendBlocker.HasValue)
+                                blockers.Add(untaggedLegendBlocker.Value);
+                            double hPad = Math.Max(rowH * 1.5, dwgSpan * 0.02);
+                            double vPad = Math.Max(rowH * 2.5, dwgSpan * 0.03);
+                            for (int pass = 0; pass < blockers.Count + 3; pass++)
+                            {
+                                bool shifted = false;
+                                double lx1 = x0, ly1 = yTop - tableH, lx2 = x0 + tableW, ly2 = yTop;
+                                for (int bi = 0; bi < blockers.Count; bi++)
+                                {
+                                    Extents3d ce = blockers[bi];
+                                    bool hitBlk = !(lx2 < ce.MinPoint.X - hPad || lx1 > ce.MaxPoint.X + hPad ||
+                                                    ly2 < ce.MinPoint.Y - hPad || ly1 > ce.MaxPoint.Y + hPad);
+                                    if (hitBlk)
+                                    {
+                                        yTop = ce.MinPoint.Y - vPad;
+                                        shifted = true;
+                                        break;
+                                    }
+                                }
+                                if (!shifted) break;
+                            }
+                        }
                     }
                     else if (drawingExt.HasValue)
                     {
@@ -2140,6 +2334,17 @@ namespace AIEngineer.AutoCAD
                         createdHandles.Add(footVd.Handle.ToString());
                     }
 
+                    if (stackedMode && !string.IsNullOrEmpty(xdataTag))
+                    {
+                        for (int ci = 0; ci < createdHandles.Count; ci++)
+                        {
+                            ObjectId cid = ResolveHandle(db, createdHandles[ci]);
+                            if (cid.IsNull || cid.IsErased) continue;
+                            Entity ce = tr.GetObject(cid, OpenMode.ForWrite) as Entity;
+                            if (ce != null) AttachCircTableXData(db, tr, ce, xdataTag);
+                        }
+                    }
+
                     db.UpdateExt(true);
                     tr.Commit();
                 }
@@ -2189,6 +2394,10 @@ namespace AIEngineer.AutoCAD
                 { "switched_to_model", switchedToModel },
                 { "unicode_font", "Arial (_AI_UNICODE)" },
                 { "has_electrical_columns", includeElectricalCols },
+                { "stacked_by_panel", stackedMode },
+                { "replaced_in_place", replacedInPlace },
+                { "panel_table_key", panelTableKey },
+                { "circuit_table_key", circuitTableKey },
                 { "rows", rowSummaries }
             };
 

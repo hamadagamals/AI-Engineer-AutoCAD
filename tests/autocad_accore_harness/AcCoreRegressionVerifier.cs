@@ -136,7 +136,7 @@ namespace AcCoreRegressionHarness
                 int coreSchemaErrors = 0;
                 int newToolDescErrors = 0;
                 HashSet<string> strictTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-                    "find_blocks_along_path", "trace_all_circuits", "generate_panel_schedule_and_sld", "audit_electrical_drawing"
+                    "find_blocks_along_path", "trace_all_circuits", "generate_panel_schedule_and_sld", "audit_electrical_drawing", "manage_project_legend_db"
                 };
 
                 foreach (Dictionary<string, object> s in specs)
@@ -168,7 +168,7 @@ namespace AcCoreRegressionHarness
                     }
                 }
                 ed.WriteMessage("\nAUTOCAD_TOOLS=" + specs.Count + "|SCHEMA_ERRORS=" + (coreSchemaErrors + newToolDescErrors) + "\n");
-                AssertTrue(specs.Count == 37, "Expected 37 tools, got " + specs.Count);
+                AssertTrue(specs.Count == 38, "Expected 38 tools, got " + specs.Count);
                 AssertTrue(coreSchemaErrors == 0 && newToolDescErrors == 0, "Schema errors found");
 
                 MethodInfo selectSpecs = agentType.GetMethod("SelectRelevantToolSpecs", flags);
@@ -183,7 +183,7 @@ namespace AcCoreRegressionHarness
                     rQa.Add(GetStrVal(rs, "name"));
 
                 ed.WriteMessage("\nROUTER_COUNTS=" + rCirc.Count + "," + rPanel.Count + "," + rQa.Count + "\n");
-                AssertTrue(rCirc.Contains("find_blocks_along_path") && rCirc.Contains("trace_all_circuits"), "Circuit router missing tools");
+                AssertTrue(rCirc.Contains("find_blocks_along_path") && rCirc.Contains("trace_all_circuits") && rCirc.Contains("manage_project_legend_db"), "Circuit router missing tools");
                 AssertTrue(rPanel.Contains("generate_panel_schedule_and_sld") && rPanel.Contains("calculate_lv_electrical"), "Panel router missing tools");
                 AssertTrue(rQa.Contains("audit_electrical_drawing"), "QA router missing tool");
 
@@ -195,7 +195,8 @@ namespace AcCoreRegressionHarness
                     "FindBlocksAlongPath", "ExecuteCircuitTracePass", "FinalizeCircuitPathOutput",
                     "TraceAllCircuits", "ScanAllCircuitsInternal", "ComputeDrawingFixtureMetrics",
                     "CollectAllCircuitCandidateCurveIds", "TraceSingleCircuitComponentCached", "BuildCircuitScheduleSheet",
-                    "GeneratePanelScheduleAndSld", "AuditElectricalDrawing", "DrawSingleLineDiagram", "BuildBalancedPanelSchedule"
+                    "GeneratePanelScheduleAndSld", "AuditElectricalDrawing", "DrawSingleLineDiagram", "BuildBalancedPanelSchedule",
+                    "ManageProjectLegendDb"
                 };
                 foreach (string jm in jitMethods)
                 {
@@ -609,6 +610,181 @@ namespace AcCoreRegressionHarness
                         if (de != null && !de.IsErased) de.Erase(true);
                     }
                     trDel10.Commit();
+                }
+
+                // 4i. Test 11: Project Legend Spec DB Extraction ("AS ABOVE" inheritance), Mixed Circuit Auto-Lookup, Stacked Panel Board & Saved-Memory Panel Schedule
+                List<ObjectId> t11TempIds = new List<ObjectId>();
+                ObjectId c11_1SeedId, c11_2SeedId, c11_3SeedId;
+                using (Transaction tr11 = db.TransactionManager.StartTransaction())
+                {
+                    BlockTable bt = (BlockTable)tr11.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    ObjectId b60 = EnsureRectBlock(tr11, bt, "60x60", 0.30, 0.30, 2);
+                    ObjectId b60e = EnsureRectBlock(tr11, bt, "60x60E", 0.30, 0.30, 1);
+                    ObjectId bApp = EnsureRectBlock(tr11, bt, "APP", 0.20, 0.20, 3);
+                    ObjectId bAppe = EnsureRectBlock(tr11, bt, "APPE", 0.20, 0.20, 1);
+                    BlockTableRecord ms = (BlockTableRecord)tr11.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                    // Erase existing _AI_BLOCK_LEGEND before starting clean Test 11 board
+                    foreach (ObjectId oid in ms)
+                    {
+                        Entity ee = tr11.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ee != null && !ee.IsErased && string.Equals(ee.Layer ?? "", "_AI_BLOCK_LEGEND", StringComparison.OrdinalIgnoreCase))
+                        {
+                            ee.UpgradeOpen();
+                            ee.Erase(true);
+                        }
+                    }
+
+                    // 4-row Legend table at x=-40.0
+                    t11TempIds.Add(InsertBlock(ms, tr11, b60, new Point3d(-40.0, 20.0, 0), "E-FIXTURES"));
+                    t11TempIds.Add(AddText(ms, tr11, new Point3d(-38.5, 20.0, 0), "LED LIGHTING FIXTURE 45 WATT, RECESSED MOUNTED, 230V", 0.22, "E-FIXTURES"));
+                    t11TempIds.Add(InsertBlock(ms, tr11, b60e, new Point3d(-40.0, 18.5, 0), "E-FIXTURES"));
+                    t11TempIds.Add(AddText(ms, tr11, new Point3d(-38.5, 18.5, 0), "AS ABOVE BUT WITH EMERGENCY BACKUP BATTERY FOR 1.5 Hrs", 0.22, "E-FIXTURES"));
+                    t11TempIds.Add(InsertBlock(ms, tr11, bApp, new Point3d(-40.0, 17.0, 0), "E-FIXTURES"));
+                    t11TempIds.Add(AddText(ms, tr11, new Point3d(-38.5, 17.0, 0), "WEATHER PROOF LED LIGHTING FIXTURE 22 WATT, WALL MOUNTED 230V, IP65", 0.22, "E-FIXTURES"));
+                    t11TempIds.Add(InsertBlock(ms, tr11, bAppe, new Point3d(-40.0, 15.5, 0), "E-FIXTURES"));
+                    t11TempIds.Add(AddText(ms, tr11, new Point3d(-38.5, 15.5, 0), "AS ABOVE BUT WITH EMERGENCY BACKUP BATTERY FOR 1.5 Hrs", 0.22, "E-FIXTURES"));
+
+                    // Circuit 1: LP-DB1/1 = 2x 60x60E (45W each) + 1x APPE (22W) = 112W = 0.112 kW
+                    t11TempIds.Add(InsertBlock(ms, tr11, b60e, new Point3d(2.0, -30.0, 0), "E-FIXTURES"));
+                    t11TempIds.Add(InsertBlock(ms, tr11, b60e, new Point3d(5.0, -30.0, 0), "E-FIXTURES"));
+                    t11TempIds.Add(InsertBlock(ms, tr11, bAppe, new Point3d(8.0, -30.0, 0), "E-FIXTURES"));
+                    c11_1SeedId = AddLine(ms, tr11, new Point3d(2.30, -30.0, 0), new Point3d(4.70, -30.0, 0), "E-LIGHTING", 4);
+                    t11TempIds.Add(c11_1SeedId);
+                    t11TempIds.Add(AddLine(ms, tr11, new Point3d(5.30, -30.0, 0), new Point3d(7.80, -30.0, 0), "E-LIGHTING", 4));
+                    t11TempIds.Add(AddLine(ms, tr11, new Point3d(8.20, -30.0, 0), new Point3d(10.5, -30.0, 0), "E-LIGHTING", 4));
+                    t11TempIds.Add(InsertBlock(ms, tr11, arrowBtr, new Point3d(10.5, -30.0, 0), "E-LIGHTING"));
+                    t11TempIds.Add(AddText(ms, tr11, new Point3d(10.7, -29.85, 0), "LP-DB1/1", 0.18, "E-LIGHTING"));
+
+                    // Circuit 2: LP-DB1/2 = 2x 60x60 (45W each) = 90W = 0.090 kW
+                    t11TempIds.Add(InsertBlock(ms, tr11, b60, new Point3d(2.0, -33.0, 0), "E-FIXTURES"));
+                    t11TempIds.Add(InsertBlock(ms, tr11, b60, new Point3d(5.0, -33.0, 0), "E-FIXTURES"));
+                    c11_2SeedId = AddLine(ms, tr11, new Point3d(2.30, -33.0, 0), new Point3d(4.70, -33.0, 0), "E-LIGHTING", 4);
+                    t11TempIds.Add(c11_2SeedId);
+                    t11TempIds.Add(AddLine(ms, tr11, new Point3d(5.30, -33.0, 0), new Point3d(7.5, -33.0, 0), "E-LIGHTING", 4));
+                    t11TempIds.Add(InsertBlock(ms, tr11, arrowBtr, new Point3d(7.5, -33.0, 0), "E-LIGHTING"));
+                    t11TempIds.Add(AddText(ms, tr11, new Point3d(7.7, -32.85, 0), "LP-DB1/2", 0.18, "E-LIGHTING"));
+
+                    // Circuit 3: ELP-DB2/1 = 1x APPE (22W) on new panel ELP-DB2
+                    t11TempIds.Add(InsertBlock(ms, tr11, bAppe, new Point3d(2.0, -36.0, 0), "E-FIXTURES"));
+                    c11_3SeedId = AddLine(ms, tr11, new Point3d(2.20, -36.0, 0), new Point3d(5.0, -36.0, 0), "E-LIGHTING", 4);
+                    t11TempIds.Add(c11_3SeedId);
+                    t11TempIds.Add(InsertBlock(ms, tr11, arrowBtr, new Point3d(5.0, -36.0, 0), "E-LIGHTING"));
+                    t11TempIds.Add(AddText(ms, tr11, new Point3d(5.2, -35.85, 0), "ELP-DB2/1", 0.18, "E-LIGHTING"));
+
+                    tr11.Commit();
+                }
+
+                // 11A: Extract Legend into Project DB
+                Dictionary<string, object> r11a = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "manage_project_legend_db",
+                    new Dictionary<string, object> { { "action", "extract_from_drawing" } }
+                });
+                ed.WriteMessage("\nTEST11A=" + jss.Serialize(r11a) + "\n");
+                AssertTrue(GetBoolVal(r11a, "ok") && GetIntVal(r11a, "items_count") >= 4, "Test 11A expected >=4 extracted items");
+                Dictionary<string, Dictionary<string, object>> dbByName = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+                ArrayList items11a = r11a["items"] as ArrayList;
+                if (items11a == null) { List<object> il = r11a["items"] as List<object>; items11a = il != null ? new ArrayList(il) : null; }
+                AssertTrue(items11a != null, "Test 11A items missing");
+                foreach (object io in items11a)
+                {
+                    Dictionary<string, object> idict = io as Dictionary<string, object>;
+                    if (idict != null) dbByName[GetStrVal(idict, "block_name")] = idict;
+                }
+                AssertTrue(dbByName.ContainsKey("60x60") && Math.Abs(GetDblVal(dbByName["60x60"], "watt") - 45.0) < 0.1, "Test 11A 60x60 expected 45W");
+                AssertTrue(dbByName.ContainsKey("60x60E") && Math.Abs(GetDblVal(dbByName["60x60E"], "watt") - 45.0) < 0.1 &&
+                           GetBoolVal(dbByName["60x60E"], "is_emergency") && string.Equals(GetStrVal(dbByName["60x60E"], "inherited_from"), "60x60", StringComparison.OrdinalIgnoreCase),
+                    "Test 11A 60x60E AS ABOVE inheritance failed");
+                AssertTrue(dbByName.ContainsKey("APP") && Math.Abs(GetDblVal(dbByName["APP"], "watt") - 22.0) < 0.1, "Test 11A APP expected 22W");
+                AssertTrue(dbByName.ContainsKey("APPE") && Math.Abs(GetDblVal(dbByName["APPE"], "watt") - 22.0) < 0.1 &&
+                           GetBoolVal(dbByName["APPE"], "is_emergency") && string.Equals(GetStrVal(dbByName["APPE"], "inherited_from"), "APP", StringComparison.OrdinalIgnoreCase),
+                    "Test 11A APPE AS ABOVE inheritance failed");
+
+                // 11B: Trace mixed circuit LP-DB1/1 using auto-lookup from Project DB
+                ed.SetImpliedSelection(new ObjectId[] { c11_1SeedId });
+                Dictionary<string, object> r11b = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "pick_if_empty", false }, { "include_electrical_calc", true }, { "draw_legend", true }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST11B=" + jss.Serialize(r11b) + "\n");
+                AssertTrue(GetBoolVal(r11b, "ok") && GetStrVal(r11b, "circuit_name") == "LP-DB1/1" && GetIntVal(r11b, "matched_blocks_count") == 3, "Test 11B trace failed");
+                AssertTrue(GetBoolVal(r11b, "legend_drawn") && GetBoolVal(r11b, "legend_has_electrical_columns") && GetBoolVal(r11b, "legend_stacked_by_panel"), "Test 11B stacked legend flags failed");
+                Dictionary<string, object> ec11b = r11b["electrical_calc"] as Dictionary<string, object>;
+                AssertTrue(ec11b != null && !GetBoolVal(ec11b, "load_assumed") && GetStrVal(ec11b, "load_source") == "project_legend_db", "Test 11B expected non-assumed DB lookup");
+                AssertTrue(Math.Abs(GetDblVal(ec11b, "load_kw") - 0.112) < 0.002, "Test 11B expected exact 0.112 kW (2*45 + 22)");
+                double[] lb11_1 = r11b["legend_bounds"] as double[];
+                AssertTrue(lb11_1 != null && lb11_1.Length == 4, "Test 11B legend_bounds missing");
+
+                // 11C: Stack LP-DB1/2 below LP-DB1/1, ELP-DB2/1 in new column to the right, and verify in-place replacement of LP-DB1/1
+                ed.SetImpliedSelection(new ObjectId[] { c11_2SeedId });
+                Dictionary<string, object> r11c1 = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "pick_if_empty", false }, { "include_electrical_calc", true }, { "draw_legend", true }, { "zoom", false } }
+                });
+                AssertTrue(GetBoolVal(r11c1, "ok") && GetStrVal(r11c1, "circuit_name") == "LP-DB1/2", "Test 11C1 LP-DB1/2 failed");
+                double[] lb11_2 = r11c1["legend_bounds"] as double[];
+                AssertTrue(lb11_2 != null && Math.Abs(lb11_2[0] - lb11_1[0]) < 0.5 && lb11_2[3] < lb11_1[1] - 0.1,
+                    "Test 11C expected LP-DB1/2 stacked vertically underneath LP-DB1/1");
+
+                ed.SetImpliedSelection(new ObjectId[] { c11_3SeedId });
+                Dictionary<string, object> r11c2 = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "pick_if_empty", false }, { "include_electrical_calc", true }, { "draw_legend", true }, { "zoom", false } }
+                });
+                AssertTrue(GetBoolVal(r11c2, "ok") && GetStrVal(r11c2, "circuit_name") == "ELP-DB2/1", "Test 11C2 ELP-DB2/1 failed");
+                double[] lb11_3 = r11c2["legend_bounds"] as double[];
+                AssertTrue(lb11_3 != null && lb11_3[0] > lb11_1[2] + 0.1,
+                    "Test 11C expected ELP-DB2/1 in a new panel column strictly to the right");
+
+                ed.SetImpliedSelection(new ObjectId[0]);
+                Dictionary<string, object> r11c3 = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object> { { "circuit_name", "LP-DB1/1" }, { "include_electrical_calc", true }, { "draw_legend", true }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST11C=" + jss.Serialize(r11c3) + "\n");
+                AssertTrue(GetBoolVal(r11c3, "ok") && GetBoolVal(r11c3, "legend_replaced_in_place"), "Test 11C expected in-place update of LP-DB1/1");
+                double[] lb11_re = r11c3["legend_bounds"] as double[];
+                AssertTrue(lb11_re != null && Math.Abs(lb11_re[0] - lb11_1[0]) < 0.5 && Math.Abs(lb11_re[3] - lb11_1[3]) < 0.5,
+                    "Test 11C in-place refresh drifted position");
+
+                // 11D: Saved-Memory Panel Schedule using Project DB wattages
+                Dictionary<string, object> r11d = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "generate_panel_schedule_and_sld",
+                    new Dictionary<string, object> { { "source", "saved_memory" }, { "panel_name", "LP-DB1" }, { "draw_panel_schedule", true }, { "draw_sld", true }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST11D=" + jss.Serialize(r11d) + "\n");
+                AssertTrue(GetBoolVal(r11d, "ok") && GetIntVal(r11d, "panels_count") == 1 && GetIntVal(r11d, "circuits_count") == 2, "Test 11D saved_memory panel schedule failed");
+                ArrayList p11Arr = r11d["panels"] as ArrayList;
+                if (p11Arr == null) { List<object> pl = r11d["panels"] as List<object>; p11Arr = pl != null ? new ArrayList(pl) : null; }
+                AssertTrue(p11Arr != null && p11Arr.Count == 1, "Test 11D panels payload missing");
+                Dictionary<string, object> p11 = (Dictionary<string, object>)p11Arr[0];
+                AssertTrue(GetStrVal(p11, "panel_name") == "LP-DB1" && Math.Abs(GetDblVal(p11, "connected_kw") - 0.202) < 0.005,
+                    "Test 11D LP-DB1 connected_kw expected ~0.202 kW (112W + 90W)");
+
+                // Clean up temporary Test 11 entities, legend DB, and AI layers before Test 3
+                execTool.Invoke(null, new object[] { doc, "manage_project_legend_db", new Dictionary<string, object> { { "action", "clear_catalog" } } });
+                using (Transaction trDel11 = db.TransactionManager.StartTransaction())
+                {
+                    for (int di = 0; di < t11TempIds.Count; di++)
+                    {
+                        Entity de = trDel11.GetObject(t11TempIds[di], OpenMode.ForWrite, false, true) as Entity;
+                        if (de != null && !de.IsErased) de.Erase(true);
+                    }
+                    BlockTableRecord ms = (BlockTableRecord)trDel11.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
+                    foreach (ObjectId oid in ms)
+                    {
+                        Entity ee = trDel11.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ee == null || ee.IsErased) continue;
+                        string lyr = ee.Layer ?? "";
+                        if (string.Equals(lyr, "_AI_BLOCK_LEGEND", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(lyr, "_AI_PANEL_SCHEDULE", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(lyr, "_AI_SLD", StringComparison.OrdinalIgnoreCase))
+                        {
+                            ee.UpgradeOpen();
+                            ee.Erase(true);
+                        }
+                    }
+                    trDel11.Commit();
                 }
 
                 // 5. Test 3: AuditElectricalDrawing (Orphan + Duplicate + Overload + VD>3% + Unit Mismatch)

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-23 - Phase 3 Persistent Project Legend Spec Database, Per-Panel Stacked Circuit Board & Saved-Memory Panel Schedules
+
+- **Persistent Project Legend Specification Database (`integrations/autocad_context_plugin/CadProjectLegendDb.cs`, `build.ps1`):**
+  - Added `manage_project_legend_db` tool (`action`: `get_catalog`, `extract_from_drawing`, `extract_from_selection`, `set_item`, `set_items`, `export_excel`, `import_excel`, `clear_catalog`) with deterministic regex parsing for Watts (`45 WATT`, `22W`), compound wattages (`2x18W`), kW/VA/kVA, voltage (`220/230/380V`), emergency flags, and top-to-bottom `"AS ABOVE"` spec inheritance across native AutoCAD `Table`, loose Legend columns, and nested Legend blocks.
+  - Persists unified `project_database.json` (`legend_catalog` + `circuits`) under `%LOCALAPPDATA%\AI-Engineer\project_db\<project_slug>_<hash>\`, writable DWG folder mirror `.ai-engineer-project-db.json`, and `%LOCALAPPDATA%\AI-Engineer\project_db\projects_index.json` across AutoCAD/PC restarts (strictly scoped to saved `.dwg` files, excluding `.dwt` AutoCAD templates in both `ResolveProjectDbPaths` and `ResolveCircuitMemorySidecarPath`).
+- **Mixed-Fixture Auto-Lookup & Per-Panel Stacked Circuit Table Board (`integrations/autocad_context_plugin/CadToolExecutor.cs`, `CadMepAndTakeoffTools.cs`):**
+  - Wired `ComputeCircuitLoadFromProjectDb` into `FinalizeCircuitPathOutput` (`find_blocks_along_path`) so mixed-fixture circuits (`2x 60x60E + 1x APPE`) automatically sum exact per-block catalog Wattages (`load_source: "project_legend_db"`, transparent missing-block warnings).
+  - Upgraded `DrawBlockLegend` with `AIENG_CIRC_TBL` XData tagging and `stack_by_panel` layout: circuits sharing a `PANEL` stack vertically underneath one column, each new panel opens a clean column to the right, and re-running a circuit updates only its own table cleanly in-place.
+- **Saved-Memory Panel Schedule + Catalog Enrichment (`integrations/autocad_context_plugin/CadPanelAndQaTools.cs`, `DirectCadAgent.cs`):**
+  - Enriched `BuildBalancedPanelSchedule` with `ComputeCircuitLoadFromProjectDb` and added `source: "saved_memory"` support to `GeneratePanelScheduleAndSld` plus `connected_kw` / `demand_kw` panel totals.
+  - Registered `manage_project_legend_db` (`AUTOCAD_TOOLS=38|SCHEMA_ERRORS=0`), intent router triggers, and anti-hallucination Rule `6o`.
+- **Verification:**
+  - Built `AIEngineer.AutoCAD.Context.dll` (`1,245,184` bytes) and passed AutoCAD 2021 `accoreconsole.exe` regression `Tests 1–11` (`TEST11A`: 4-row Legend extraction + `"AS ABOVE"` inheritance; `TEST11B`: mixed circuit `LP-DB1/1` = `0.112 kW`; `TEST11C`: per-panel stacking + new panel column + in-place refresh; `TEST11D`: `saved_memory` Panel Schedule + SLD `LP-DB1` = `0.202 kW`; `BENCHMARK_30C_300F_MS=53`; `ACCORE_REGRESSION_PASS`).
+
 ## 2026-11-23 - Phase 2.3 Field-Feedback Hotfix (`INSUNITS=Millimeters` Scale Inference, Strict Crossing Bridges & `merge_with_saved` Branch Tracing)
 
 - **Meter-in-Millimeters Scale Inference (`integrations/autocad_context_plugin/CadMepAndTakeoffTools.cs`):**
