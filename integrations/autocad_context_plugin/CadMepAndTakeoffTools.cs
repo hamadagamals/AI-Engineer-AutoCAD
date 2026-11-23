@@ -2111,12 +2111,54 @@ namespace AIEngineer.AutoCAD
             public HashSet<int> ExplicitColors = new HashSet<int>();
             public HashSet<string> ColorKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             public HashSet<string> SampleBlockNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public HashSet<string> TerminatorBlockNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             public bool PreferCurvedWires;
             public double MedianFixtureSpan;
             public double LearnedSnapTol;
+            public int LearnedFixtureCount;
         }
 
         private static readonly Dictionary<IntPtr, CircuitSampleProfile> s_circuitProfileByDb = new Dictionary<IntPtr, CircuitSampleProfile>();
+
+        private static double ResolveEffectiveUnitsPerMeter(
+            Database db,
+            double rawUnitsPerM,
+            double drawingSpan,
+            double medianFixtureSpan,
+            out bool scaleInferred,
+            out string scaleWarning)
+        {
+            scaleInferred = false;
+            scaleWarning = "";
+            double fallback = rawUnitsPerM > 1e-9 ? rawUnitsPerM : 1000.0;
+            if (db == null || medianFixtureSpan <= 1e-4) return fallback;
+
+            UnitsValue iu = db.Insunits;
+            if (iu == UnitsValue.Undefined || iu == UnitsValue.Inches)
+            {
+                if (medianFixtureSpan >= 0.15 && medianFixtureSpan <= 2.5)
+                {
+                    scaleInferred = true;
+                    scaleWarning = "تم اكتشاف أن المخطط مرسوم بوحدة المتر (1 وحدة = 1 متر) رغم ضبط INSUNITS على " +
+                                   iu.ToString() + "؛ تم تصحيح المقياس وحساب الطول الفعلي بالمتر تلقائياً.";
+                    return 1.0;
+                }
+                if (iu == UnitsValue.Undefined && medianFixtureSpan >= 15.0 && medianFixtureSpan <= 250.0)
+                {
+                    scaleInferred = true;
+                    scaleWarning = "تم استنتاج وحدة الرسم (سنتيمتر) تلقائياً لأن INSUNITS غير محدد.";
+                    return 100.0;
+                }
+                if (medianFixtureSpan >= 250.0 && medianFixtureSpan <= 2500.0)
+                {
+                    scaleInferred = true;
+                    scaleWarning = "تم اكتشاف أن المخطط مرسوم بالمليمتر رغم ضبط INSUNITS على " +
+                                   iu.ToString() + "؛ تم تصحيح المقياس تلقائياً.";
+                    return 1000.0;
+                }
+            }
+            return fallback;
+        }
 
         private static bool IsPanelOrFrameBlockName(string blockName)
         {
@@ -2664,11 +2706,15 @@ namespace AIEngineer.AutoCAD
             List<string> excludeBlocks,
             string blockFilter,
             CircuitSampleProfile learnedProfile,
+            int maxCircuitBlocks,
+            HashSet<ObjectId> skipCurveIds,
             out List<string> bridgedBlockNames,
-            out List<ObjectId> touchedTerminatorBlockIds)
+            out List<ObjectId> touchedTerminatorBlockIds,
+            out bool circuitGuardTriggered)
         {
             bridgedBlockNames = new List<string>();
             touchedTerminatorBlockIds = new List<ObjectId>();
+            circuitGuardTriggered = false;
             if (pathCurveIds == null || pathCurveIds.Count == 0) return 0;
 
             Dictionary<string, SavedColorState> layerColorMap = BuildLayerColorStateMap(db, tr);
@@ -2677,6 +2723,10 @@ namespace AIEngineer.AutoCAD
             bool anyNeutralSeed = false;
             Queue<CurveChainNode> queue = new Queue<CurveChainNode>();
             HashSet<ObjectId> visited = new HashSet<ObjectId>();
+            if (skipCurveIds != null)
+            {
+                foreach (ObjectId sid in skipCurveIds) visited.Add(sid);
+            }
             List<CurveChainNode> allNodeRefs = new List<CurveChainNode>();
 
             try
@@ -2718,28 +2768,28 @@ namespace AIEngineer.AutoCAD
                     ? Math.Max(1e-3, Math.Min(snapTol, medianFixtureSpan * 0.10))
                     : Math.Max(1e-3, Math.Min(snapTol, 0.06 * unitsPerM));
                 double breakGapMax = medianFixtureSpan > 1e-3
-                    ? Math.Max(medianFixtureSpan * 1.15, 0.8 * unitsPerM)
-                    : Math.Max(0.9 * unitsPerM, snapTol * 8.0);
+                    ? Math.Max(tightSnapTol * 2.0, medianFixtureSpan * 0.90)
+                    : Math.Max(1e-3, 0.75 * unitsPerM);
                 double breakLateralTol = medianFixtureSpan > 1e-3
-                    ? Math.Max(1e-3, medianFixtureSpan * 0.14)
+                    ? Math.Max(1e-3, medianFixtureSpan * 0.12)
                     : Math.Max(1e-3, 0.08 * unitsPerM);
 
                 HashSet<ObjectId> visitedBlocks = new HashSet<ObjectId>();
                 int bridgedCount = 0;
-                const int MaxChainCurves = 512;
+                int maxChainCurves = (maxCircuitBlocks > 0) ? Math.Max(40, maxCircuitBlocks * 3) : 512;
 
-                while (queue.Count > 0 && pathCurveIds.Count < MaxChainCurves)
+                while (queue.Count > 0 && pathCurveIds.Count < maxChainCurves && !circuitGuardTriggered)
                 {
                     CurveChainNode cur = queue.Dequeue();
 
                     EnqueueConnectedCurvesAtEndpoints(
                         cur, candidates, bridgeBlocks, touchedTerminatorBlockIds, visited, queue, pathCurveIds, pathHandles,
                         tightSnapTol, connectGaps, breakGapMax, breakLateralTol,
-                        strictColor, strictLayer, learnedProfile, MaxChainCurves);
+                        strictColor, strictLayer, learnedProfile, maxChainCurves);
 
                     if (bridgeThroughBlocks && bridgeBlocks.Count > 0)
                     {
-                        for (int bi = 0; bi < bridgeBlocks.Count && pathCurveIds.Count < MaxChainCurves; bi++)
+                        for (int bi = 0; bi < bridgeBlocks.Count && pathCurveIds.Count < maxChainCurves; bi++)
                         {
                             BridgeBlockCandidate blk = bridgeBlocks[bi];
                             if (visitedBlocks.Contains(blk.Id)) continue;
@@ -2760,6 +2810,11 @@ namespace AIEngineer.AutoCAD
 
                             bridgedCount++;
                             if (!bridgedBlockNames.Contains(blk.BlockName)) bridgedBlockNames.Add(blk.BlockName);
+                            if (maxCircuitBlocks > 0 && bridgedCount >= maxCircuitBlocks)
+                            {
+                                circuitGuardTriggered = true;
+                                break;
+                            }
 
                             List<CurveChainNode> outgoing = new List<CurveChainNode>();
                             for (int ci = 0; ci < candidates.Count; ci++)
@@ -2771,9 +2826,9 @@ namespace AIEngineer.AutoCAD
                                     outgoing.Add(cand);
                             }
 
-                            if (outgoing.Count > 0 && outgoing.Count <= 8)
+                            if (outgoing.Count > 0 && outgoing.Count <= 6)
                             {
-                                for (int oi = 0; oi < outgoing.Count && pathCurveIds.Count < MaxChainCurves; oi++)
+                                for (int oi = 0; oi < outgoing.Count && pathCurveIds.Count < maxChainCurves; oi++)
                                 {
                                     CurveChainNode nxt = outgoing[oi];
                                     if (visited.Add(nxt.Id))
@@ -2883,7 +2938,7 @@ namespace AIEngineer.AutoCAD
                 try { sbex = sbr.GeometricExtents; } catch { continue; }
                 if (!IsFiniteBounds(sbex)) continue;
                 double sbSpan = Math.Max(sbex.MaxPoint.X - sbex.MinPoint.X, sbex.MaxPoint.Y - sbex.MinPoint.Y);
-                double seedTol = Math.Max(0.05 * unitsPerM, sbSpan * 0.16);
+                double seedTol = sbSpan > 1e-3 ? Math.Max(1e-3, sbSpan * 0.25) : Math.Max(1e-3, 0.05 * unitsPerM);
 
                 List<Curve> preferredHits = new List<Curve>();
                 List<Curve> fallbackHits = new List<Curve>();
@@ -2972,7 +3027,12 @@ namespace AIEngineer.AutoCAD
                 BlockReference br = tr.GetObject(selectedBlockIds[bi], OpenMode.ForRead) as BlockReference;
                 if (br == null) continue;
                 string bn = ResolveBlockName(tr, br);
-                if (IsPanelOrFrameBlockName(bn) || IsCircuitTerminatorArrowBlock(bn) || IsPanelDistributionBlockName(bn)) continue;
+                if (IsPanelOrFrameBlockName(bn)) continue;
+                if (IsCircuitTerminatorArrowBlock(bn) || IsPanelDistributionBlockName(bn))
+                {
+                    prof.TerminatorBlockNames.Add(bn);
+                    continue;
+                }
                 try
                 {
                     Extents3d bex = br.GeometricExtents;
@@ -2985,6 +3045,7 @@ namespace AIEngineer.AutoCAD
                 }
                 catch { }
             }
+            prof.LearnedFixtureCount = selBlkSpans.Count;
             if (selBlkSpans.Count > 0)
             {
                 selBlkSpans.Sort();
@@ -3446,7 +3507,32 @@ namespace AIEngineer.AutoCAD
             public string SeedWireColorKey = "";
             public string InsunitsName = "";
             public bool HasCustomTitle;
+            public bool UnitScaleInferred;
+            public double EffectiveUnitsPerM = 1000.0;
+            public string UnitScaleWarning = "";
+            public bool CircuitGuardTriggered;
+            public int MaxCircuitBlocks = 35;
+            public bool LearnedSampleThisCall;
             public List<CircuitTerminatorInfo> Terminators = new List<CircuitTerminatorInfo>();
+        }
+
+        private sealed class TracedCircuitSummary
+        {
+            public string CircuitName = "";
+            public string PanelName = "";
+            public string TerminationType = "open_end";
+            public string WireLayer = "";
+            public string WireColorKey = "";
+            public int PathCurvesCount;
+            public double LengthUnits;
+            public double LengthMeters;
+            public int MatchedBlocksCount;
+            public Dictionary<string, int> CountsByBlock = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            public string CountsSummary = "";
+            public bool GuardTriggered;
+            public double MinX;
+            public double MinY;
+            public string EndSummary = "";
         }
 
         private static List<Point2d> CollectOpenWireTips(Transaction tr, List<ObjectId> pathCurveIds, double tol)
@@ -3662,6 +3748,9 @@ namespace AIEngineer.AutoCAD
                 { "circuit_terminators", termOut },
                 { "wire_color_key", traceMeta != null ? traceMeta.SeedWireColorKey : "" },
                 { "insunits_name", traceMeta != null ? traceMeta.InsunitsName : "" },
+                { "effective_units_per_m", Round(unitsPerM) },
+                { "unit_scale_inferred", traceMeta != null && traceMeta.UnitScaleInferred },
+                { "circuit_guard_triggered", traceMeta != null && traceMeta.CircuitGuardTriggered },
                 { "path_curves_count", pathCurveIds.Count },
                 { "initial_path_handles", initialPathHandles },
                 { "chain_followed", pathCurveIds.Count > initialPathHandles.Count },
@@ -3684,8 +3773,25 @@ namespace AIEngineer.AutoCAD
                 { "legend_title", effectiveTitle },
                 { "switched_to_model", switchedToModel }
             };
+            if (traceMeta != null && !string.IsNullOrEmpty(traceMeta.UnitScaleWarning))
+                res["unit_scale_warning"] = traceMeta.UnitScaleWarning;
+            if (traceMeta != null && traceMeta.LearnedSampleThisCall)
+                res["learned_sample"] = true;
+            if (traceMeta != null && traceMeta.CircuitGuardTriggered)
+            {
+                res["warning"] = "توقف التتبع التلقائي عند الحد الهندسي (" + traceMeta.MaxCircuitBlocks +
+                    " كشافات في الدائرة الواحدة) لمنع تداخل أكثر من لينيا. تأكد من فصل الأسلاك أو ارفع max_circuit_blocks إذا كانت دائرة خاصة أكبر.";
+            }
             if (learnedProfile != null && learnedProfile.CircuitLayers.Count > 0)
+            {
                 res["learned_circuit_layers"] = new List<string>(learnedProfile.CircuitLayers);
+                if (learnedProfile.ColorKeys.Count > 0)
+                    res["learned_wire_colors"] = new List<string>(learnedProfile.ColorKeys);
+                if (learnedProfile.SampleBlockNames.Count > 0)
+                    res["learned_fixture_blocks"] = new List<string>(learnedProfile.SampleBlockNames);
+                if (learnedProfile.TerminatorBlockNames.Count > 0)
+                    res["learned_terminator_blocks"] = new List<string>(learnedProfile.TerminatorBlockNames);
+            }
             if (nestedBlocksAlongPath.Count > 0)
                 res["nested_blocks_along_path"] = nestedBlocksAlongPath;
             if (selectedAndPathExt.HasValue)
@@ -3767,6 +3873,8 @@ namespace AIEngineer.AutoCAD
             List<string> initialPathHandles,
             CircuitSampleProfile learnedProfile,
             double unitsPerM,
+            bool scaleInferred,
+            string scaleWarning,
             string insunitsName,
             double medianFixtureSpan,
             double drawingSpan,
@@ -3783,6 +3891,8 @@ namespace AIEngineer.AutoCAD
             bool connectGaps,
             bool strictColor,
             bool strictLayer,
+            bool learnedSampleThisCall,
+            int maxCircuitBlocks,
             bool zoom,
             string zoomMode,
             string title,
@@ -3807,7 +3917,12 @@ namespace AIEngineer.AutoCAD
             CircuitTraceMeta traceMeta = new CircuitTraceMeta
             {
                 HasCustomTitle = hasCustomTitle,
-                InsunitsName = insunitsName ?? ""
+                InsunitsName = insunitsName ?? "",
+                UnitScaleInferred = scaleInferred,
+                EffectiveUnitsPerM = unitsPerM,
+                UnitScaleWarning = scaleWarning ?? "",
+                MaxCircuitBlocks = maxCircuitBlocks,
+                LearnedSampleThisCall = learnedSampleThisCall
             };
 
             using (DocumentLock docLock = doc.LockDocument())
@@ -3846,12 +3961,15 @@ namespace AIEngineer.AutoCAD
                         if (followConnected)
                         {
                             List<ObjectId> termIds;
+                            bool guardTriggered;
                             bridgedBlockCount = ExpandConnectedPathCurves(
                                 db, tr, pathCurveIds, pathHandles, layerHiddenFlags, visibleOnly, chainSnapTol,
                                 bridgeThroughBlocks, connectGaps, strictColor, strictLayer,
                                 unitsPerM, refSpan, drawingSpan,
                                 includeContainerBlocks, excludeBlocks, blockFilter, learnedProfile,
-                                out bridgedBlockNames, out termIds);
+                                maxCircuitBlocks, null,
+                                out bridgedBlockNames, out termIds, out guardTriggered);
+                            traceMeta.CircuitGuardTriggered = guardTriggered;
                             if (termIds != null)
                             {
                                 for (int ti = 0; ti < termIds.Count; ti++) touchedTermSet.Add(termIds[ti]);
@@ -3878,8 +3996,8 @@ namespace AIEngineer.AutoCAD
                         double tightTipTol = refSpan > 1e-3 ? Math.Max(1e-3, refSpan * 0.12) : Math.Max(1e-3, 0.06 * unitsPerM);
                         List<Point2d> openTips = CollectOpenWireTips(tr, pathCurveIds, tightTipTol);
                         double tagSearchRadius = refSpan > 1e-3
-                            ? Math.Max(refSpan * 5.0, 2.5 * unitsPerM)
-                            : Math.Max(3.5 * unitsPerM, 150.0);
+                            ? (refSpan * 4.5)
+                            : Math.Max(2.5 * unitsPerM, 2.5);
                         CollectNearbyCircuitTags(
                             tr, ms, layerHiddenFlags, visibleOnly, tagSearchRadius,
                             traceMeta.Terminators, openTips,
@@ -3932,6 +4050,8 @@ namespace AIEngineer.AutoCAD
             bool strictLayer = GetBool(args, "strict_layer", false);
             bool learnSample = GetBool(args, "learn_sample", false);
             bool resetSample = GetBool(args, "reset_sample", false);
+            int maxCircuitBlocks = GetInt(args, "max_circuit_blocks", 35);
+            if (maxCircuitBlocks < 0) maxCircuitBlocks = 0;
             bool includeContainerBlocks = GetBool(args, "include_container_blocks", false);
             bool includeTerminatorBlocks = GetBool(args, "include_terminator_blocks", false);
             bool zoom = GetBool(args, "zoom", true);
@@ -3945,8 +4065,8 @@ namespace AIEngineer.AutoCAD
                 selectPaths = true;
 
             Dictionary<string, object> unitsInfo = GetUnitsInfo(db);
-            double unitsPerM = Convert.ToDouble(unitsInfo["units_per_m"], CultureInfo.InvariantCulture);
-            if (unitsPerM <= 1e-9) unitsPerM = 1000.0;
+            double rawUnitsPerM = Convert.ToDouble(unitsInfo["units_per_m"], CultureInfo.InvariantCulture);
+            if (rawUnitsPerM <= 1e-9) rawUnitsPerM = 1000.0;
             string insunitsName = unitsInfo.ContainsKey("name") && unitsInfo["name"] != null
                 ? unitsInfo["name"].ToString()
                 : "";
@@ -3974,7 +4094,7 @@ namespace AIEngineer.AutoCAD
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
                     ScanCircuitSeedEntities(
-                        db, tr, candidateHandles, visibleOnly, unitsPerM, usePreviousPath, excludeBlocks, blockFilter, learnSample,
+                        db, tr, candidateHandles, visibleOnly, rawUnitsPerM, usePreviousPath, excludeBlocks, blockFilter, learnSample,
                         ref learnedProfile, out drawingSpan, out medianFixtureSpan, out selectionHadOnlyBlocks,
                         pathCurveIds, pathHandles, selectedBlockIds);
                     tr.Commit();
@@ -3995,16 +4115,518 @@ namespace AIEngineer.AutoCAD
                 return Err("لم يتم تحديد أي خط أو مسار (Line/Polyline/Arc) في أوتوكاد. حدد الخط/الكابل أولاً ثم أعد المحاولة.");
             }
 
+            bool scaleInferred;
+            string scaleWarning;
+            double effectiveUnitsPerM = ResolveEffectiveUnitsPerMeter(
+                db, rawUnitsPerM, drawingSpan, medianFixtureSpan, out scaleInferred, out scaleWarning);
+
+            // Strict sample lock: when teaching a full circuit sample, keep ONLY what user selected cleanly without expanding
+            bool effectiveFollowConnected = followConnected;
+            if (learnSample && (pathCurveIds.Count >= 2 || (pathCurveIds.Count >= 1 && selectedBlockIds.Count >= 2)))
+                effectiveFollowConnected = false;
+
             RecordUserSelectionSnapshot(doc, pathHandles);
             List<string> initialPathHandles = new List<string>(pathHandles);
 
             return ExecuteCircuitTracePass(
                 doc, db, args, pathCurveIds, pathHandles, initialPathHandles,
-                learnedProfile, unitsPerM, insunitsName, medianFixtureSpan, drawingSpan,
+                learnedProfile, effectiveUnitsPerM, scaleInferred, scaleWarning, insunitsName, medianFixtureSpan, drawingSpan,
                 visibleOnly, includeAnonymous, includeSystem, includeContainerBlocks, includeTerminatorBlocks,
-                selectBlocks, selectPaths, drawLegend, followConnected, bridgeThroughBlocks,
-                connectGaps, strictColor, strictLayer, zoom, zoomMode, title, hasCustomTitle, legendPosition,
+                selectBlocks, selectPaths, drawLegend, effectiveFollowConnected, bridgeThroughBlocks,
+                connectGaps, strictColor, strictLayer, learnSample, maxCircuitBlocks,
+                zoom, zoomMode, title, hasCustomTitle, legendPosition,
                 layerFilter, blockFilter, excludeBlocks, explicitTolerance);
+        }
+
+        // ==================== Batch All-Circuits Partition & Schedule (`trace_all_circuits`) ====================
+
+        private static bool IsCandidateCircuitLayerName(string layerName)
+        {
+            if (string.IsNullOrWhiteSpace(layerName)) return false;
+            if (IsLegendOrHighlightLayer(layerName) || IsAiAnnotationLayer(layerName) || IsArchitecturalLayerName(layerName))
+                return false;
+            string u = layerName.Trim().ToUpperInvariant();
+            return u.Contains("LTG") || u.Contains("LIGHT") || u.Contains("WIRE") || u.Contains("CIRC") ||
+                   u.Contains("ELEC") || u.Contains("POWER") || u.Contains("SOCK") || u.Contains("RECEPT") ||
+                   u.Contains("HOME") || u.Contains("EMERG");
+        }
+
+        private static void ComputeDrawingFixtureMetrics(
+            Database db,
+            Transaction tr,
+            bool visibleOnly,
+            Dictionary<string, bool> hiddenMap,
+            out double drawingSpan,
+            out double medianFixtureSpan,
+            out Extents3d? mainExt)
+        {
+            drawingSpan = 0.0;
+            medianFixtureSpan = 0.0;
+            mainExt = null;
+            BlockTableRecord ms = (BlockTableRecord)tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+            List<double> rawSpans = new List<double>();
+            foreach (ObjectId mid in ms)
+            {
+                if (mid.IsErased) continue;
+                Entity me = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                if (me == null || me.IsErased || IsLegendOrHighlightLayer(me.Layer) || IsAiAnnotationLayer(me.Layer)) continue;
+                if (visibleOnly && !IsEntityVisible(me, hiddenMap)) continue;
+                Extents3d mex;
+                try { mex = me.GeometricExtents; } catch { continue; }
+                if (!IsFiniteBounds(mex)) continue;
+                if (!mainExt.HasValue) mainExt = mex;
+                else { Extents3d u = mainExt.Value; u.AddExtents(mex); mainExt = u; }
+
+                BlockReference mbr = me as BlockReference;
+                if (mbr != null)
+                {
+                    string bn = ResolveBlockName(tr, mbr);
+                    if (!string.IsNullOrEmpty(bn) && !IsAnonymousBlockName(bn) && !IsSystemBlockName(bn) &&
+                        !IsPanelOrFrameBlockName(bn) && !IsCircuitTerminatorArrowBlock(bn) && !IsPanelDistributionBlockName(bn))
+                    {
+                        double sp = Math.Max(mex.MaxPoint.X - mex.MinPoint.X, mex.MaxPoint.Y - mex.MinPoint.Y);
+                        if (sp > 1e-4) rawSpans.Add(sp);
+                    }
+                }
+            }
+            if (mainExt.HasValue)
+                drawingSpan = Math.Max(mainExt.Value.MaxPoint.X - mainExt.Value.MinPoint.X, mainExt.Value.MaxPoint.Y - mainExt.Value.MinPoint.Y);
+            List<double> smallSpans = new List<double>();
+            for (int i = 0; i < rawSpans.Count; i++)
+            {
+                if (drawingSpan <= 1e-3 || rawSpans[i] < drawingSpan * 0.08) smallSpans.Add(rawSpans[i]);
+            }
+            if (smallSpans.Count > 0)
+            {
+                smallSpans.Sort();
+                medianFixtureSpan = smallSpans[smallSpans.Count / 2];
+            }
+        }
+
+        private static List<ObjectId> CollectAllCircuitCandidateCurveIds(
+            Database db,
+            Transaction tr,
+            Dictionary<string, bool> hiddenMap,
+            Dictionary<string, SavedColorState> colorMap,
+            bool visibleOnly,
+            string layerFilter,
+            string colorFilter,
+            List<string> selectedHandles,
+            CircuitSampleProfile learnedProfile)
+        {
+            HashSet<string> seedLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (selectedHandles != null && selectedHandles.Count > 0)
+            {
+                for (int i = 0; i < selectedHandles.Count; i++)
+                {
+                    ObjectId sid = ResolveHandle(db, selectedHandles[i]);
+                    if (sid.IsNull || sid.IsErased) continue;
+                    Curve scv = tr.GetObject(sid, OpenMode.ForRead) as Curve;
+                    if (scv != null && !IsAiAnnotationLayer(scv.Layer)) seedLayers.Add(scv.Layer ?? "0");
+                }
+            }
+            if (seedLayers.Count == 0 && learnedProfile != null && learnedProfile.CircuitLayers.Count > 0)
+            {
+                foreach (string lyr in learnedProfile.CircuitLayers)
+                {
+                    if (!string.IsNullOrWhiteSpace(lyr)) seedLayers.Add(lyr);
+                }
+            }
+
+            List<ObjectId> explicitList = new List<ObjectId>();
+            List<ObjectId> namedMepList = new List<ObjectId>();
+            List<ObjectId> coloredZeroList = new List<ObjectId>();
+            BlockTableRecord ms = (BlockTableRecord)tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+
+            foreach (ObjectId mid in ms)
+            {
+                if (mid.IsErased) continue;
+                Entity ent = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                Curve cv = ent as Curve;
+                if (cv == null || ent.IsErased || IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer)) continue;
+                if (visibleOnly && !IsEntityVisible(ent, hiddenMap)) continue;
+                Point2d sp, ep;
+                if (!TryGetCurveEndpointsXY(cv, out sp, out ep)) continue;
+
+                string lyr = ent.Layer ?? "0";
+                bool nn;
+                string cKey = ResolveEntityEffectiveColorKey(ent, colorMap, out nn);
+                if (!string.IsNullOrWhiteSpace(colorFilter) &&
+                    !string.Equals(cKey, colorFilter.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                    !MatchesPatternOrSubstring(cKey, colorFilter))
+                    continue;
+
+                if (!string.IsNullOrWhiteSpace(layerFilter))
+                {
+                    if (MatchesPatternOrSubstring(lyr, layerFilter)) explicitList.Add(mid);
+                    continue;
+                }
+                if (seedLayers.Count > 0)
+                {
+                    if (seedLayers.Contains(lyr)) explicitList.Add(mid);
+                    continue;
+                }
+                if (IsCandidateCircuitLayerName(lyr))
+                    namedMepList.Add(mid);
+                else if (nn && !IsArchitecturalLayerName(lyr))
+                    coloredZeroList.Add(mid);
+            }
+
+            if (!string.IsNullOrWhiteSpace(layerFilter) || seedLayers.Count > 0) return explicitList;
+            if (namedMepList.Count > 0) return namedMepList;
+            return coloredZeroList;
+        }
+
+        private static TracedCircuitSummary TraceSingleCircuitComponent(
+            Database db,
+            Transaction tr,
+            BlockTableRecord ms,
+            ObjectId seedId,
+            Dictionary<string, bool> hiddenMap,
+            Dictionary<string, SavedColorState> colorMap,
+            HashSet<ObjectId> globalVisitedCurves,
+            bool visibleOnly,
+            bool strictColor,
+            bool strictLayer,
+            bool connectGaps,
+            bool bridgeThroughBlocks,
+            int maxCircuitBlocks,
+            double effectiveUnitsPerM,
+            double refSpan,
+            double drawingSpan)
+        {
+            Curve seedCv = tr.GetObject(seedId, OpenMode.ForRead) as Curve;
+            if (seedCv == null || seedCv.IsErased) return null;
+
+            List<ObjectId> compIds = new List<ObjectId> { seedId };
+            List<string> compHandles = new List<string> { seedCv.Handle.ToString() };
+            double snapTol = refSpan > 1e-3 ? Math.Max(1e-3, refSpan * 0.12) : Math.Max(1e-3, 0.05 * effectiveUnitsPerM);
+
+            List<string> bridgedNames;
+            List<ObjectId> termIds;
+            bool guardTriggered;
+            ExpandConnectedPathCurves(
+                db, tr, compIds, compHandles, hiddenMap, visibleOnly, snapTol,
+                bridgeThroughBlocks, connectGaps, strictColor, strictLayer,
+                effectiveUnitsPerM, refSpan, drawingSpan,
+                false, null, "", null, maxCircuitBlocks, globalVisitedCurves,
+                out bridgedNames, out termIds, out guardTriggered);
+
+            for (int i = 0; i < compIds.Count; i++) globalVisitedCurves.Add(compIds[i]);
+
+            List<PathCurveCandidate> pathCandidates = new List<PathCurveCandidate>();
+            HashSet<string> pathTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            double totalLenUnits = 0.0;
+            Extents3d? compExt = null;
+            List<PathBlockMatchItem> matchedItems = new List<PathBlockMatchItem>();
+            Dictionary<string, int> countsByBlock = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            List<CircuitTerminatorInfo> terminators = new List<CircuitTerminatorInfo>();
+            int containerSkipped = 0;
+
+            try
+            {
+                CollectCircuitPathCandidates(tr, compIds, pathCandidates, pathTypes, ref totalLenUnits, ref compExt);
+                if (pathCandidates.Count == 0) return null;
+
+                HashSet<ObjectId> termSet = termIds != null ? new HashSet<ObjectId>(termIds) : new HashSet<ObjectId>();
+                MatchBlocksAlongCircuitPath(
+                    tr, ms, hiddenMap, pathCandidates, new HashSet<ObjectId>(compIds), termSet,
+                    visibleOnly, false, false, false, false, connectGaps,
+                    "", "", new List<string>(), null,
+                    effectiveUnitsPerM, refSpan, drawingSpan, null,
+                    matchedItems, countsByBlock, terminators, ref compExt, out containerSkipped);
+            }
+            finally
+            {
+                for (int i = 0; i < pathCandidates.Count; i++)
+                {
+                    try { if (pathCandidates[i].FlatCurve != null) pathCandidates[i].FlatCurve.Dispose(); } catch { }
+                }
+            }
+
+            double tipTol = refSpan > 1e-3 ? Math.Max(1e-3, refSpan * 0.12) : Math.Max(1e-3, 0.06 * effectiveUnitsPerM);
+            List<Point2d> openTips = CollectOpenWireTips(tr, compIds, tipTol);
+            double tagRadius = refSpan > 1e-3 ? (refSpan * 4.5) : Math.Max(2.5 * effectiveUnitsPerM, 2.5);
+            string circName, panelName, termType;
+            CollectNearbyCircuitTags(tr, ms, hiddenMap, visibleOnly, tagRadius, terminators, openTips, out circName, out panelName, out termType);
+
+            bool nn;
+            string wColor = ResolveEntityEffectiveColorKey(seedCv, colorMap, out nn);
+            List<KeyValuePair<string, int>> pairs = new List<KeyValuePair<string, int>>(countsByBlock);
+            pairs.Sort(delegate(KeyValuePair<string, int> a, KeyValuePair<string, int> b)
+            {
+                int c = b.Value.CompareTo(a.Value);
+                return c != 0 ? c : string.Compare(a.Key, b.Key, StringComparison.OrdinalIgnoreCase);
+            });
+            List<string> parts = new List<string>();
+            for (int pi = 0; pi < pairs.Count; pi++)
+                parts.Add(pairs[pi].Key + " x" + pairs[pi].Value.ToString(CultureInfo.InvariantCulture));
+
+            string endText = termType == "panel_connection" ? "لوحة" : (termType == "home_run_arrow" ? "سهم ARROW" : "نهاية مفتوحة");
+            if (terminators.Count > 0 && !string.IsNullOrEmpty(terminators[0].BlockName))
+                endText = terminators[0].BlockName + (!string.IsNullOrEmpty(circName) ? (" -> " + circName) : "");
+
+            return new TracedCircuitSummary
+            {
+                CircuitName = circName ?? "",
+                PanelName = panelName ?? "",
+                TerminationType = termType ?? "open_end",
+                WireLayer = seedCv.Layer ?? "0",
+                WireColorKey = wColor,
+                PathCurvesCount = compIds.Count,
+                LengthUnits = totalLenUnits,
+                LengthMeters = Math.Round(totalLenUnits / effectiveUnitsPerM, 2),
+                MatchedBlocksCount = matchedItems.Count,
+                CountsByBlock = countsByBlock,
+                CountsSummary = parts.Count > 0 ? string.Join(", ", parts.ToArray()) : "-",
+                GuardTriggered = guardTriggered,
+                MinX = compExt.HasValue ? compExt.Value.MinPoint.X : 0.0,
+                MinY = compExt.HasValue ? compExt.Value.MinPoint.Y : 0.0,
+                EndSummary = endText + (guardTriggered ? " [توقف حد الأمان]" : "")
+            };
+        }
+
+        private static ExcelSheetData BuildCircuitScheduleSheet(
+            List<TracedCircuitSummary> circuits,
+            double fixtureVa,
+            string title,
+            string scaleWarning)
+        {
+            ExcelSheetData sheet = new ExcelSheetData();
+            sheet.SheetName = "Circuit Schedule";
+            sheet.Title = !string.IsNullOrWhiteSpace(title)
+                ? title
+                : ("جدول حصر وتفصيل دوائر/لينيات المخطط (" + circuits.Count.ToString(CultureInfo.InvariantCulture) + " لينية)");
+            sheet.Headers = new List<string>
+            {
+                "م",
+                "اسم اللينيا",
+                "اللوحة",
+                "الطبقة / اللون",
+                "البلوكات",
+                "تفصيل الأنواع",
+                "طول السلك (م)",
+                "الحمل التقديري (VA)",
+                "النهاية / ملاحظات"
+            };
+
+            int totalBlocks = 0;
+            double totalLenM = 0.0;
+            double totalVa = 0.0;
+            for (int i = 0; i < circuits.Count; i++)
+            {
+                TracedCircuitSummary c = circuits[i];
+                double estVa = Math.Round(c.MatchedBlocksCount * Math.Max(0.0, fixtureVa), 1);
+                totalBlocks += c.MatchedBlocksCount;
+                totalLenM += c.LengthMeters;
+                totalVa += estVa;
+                sheet.Rows.Add(new List<string>
+                {
+                    (i + 1).ToString(CultureInfo.InvariantCulture),
+                    string.IsNullOrWhiteSpace(c.CircuitName) ? ("CIRC-" + (i + 1).ToString(CultureInfo.InvariantCulture)) : c.CircuitName,
+                    string.IsNullOrWhiteSpace(c.PanelName) ? "-" : c.PanelName,
+                    c.WireLayer + " (" + c.WireColorKey + ")",
+                    c.MatchedBlocksCount.ToString(CultureInfo.InvariantCulture),
+                    c.CountsSummary,
+                    c.LengthMeters.ToString("0.##", CultureInfo.InvariantCulture),
+                    estVa.ToString("0.#", CultureInfo.InvariantCulture),
+                    c.EndSummary
+                });
+            }
+
+            string footerNote = string.IsNullOrWhiteSpace(scaleWarning) ? "مكتمل" : "تم تصحيح المقياس تلقائياً";
+            sheet.FooterRow = new List<string>
+            {
+                "الإجمالي (" + circuits.Count.ToString(CultureInfo.InvariantCulture) + ")",
+                "",
+                "",
+                "",
+                totalBlocks.ToString(CultureInfo.InvariantCulture),
+                "",
+                Math.Round(totalLenM, 2).ToString("0.##", CultureInfo.InvariantCulture) + " م",
+                Math.Round(totalVa, 1).ToString("0.#", CultureInfo.InvariantCulture) + " VA",
+                footerNote
+            };
+            return sheet;
+        }
+
+        private static Dictionary<string, object> TraceAllCircuits(Document doc, Dictionary<string, object> args)
+        {
+            Database db = doc.Database;
+            string layerFilter = GetStr(args, "layer_filter") ?? GetStr(args, "layer");
+            string colorFilter = GetStr(args, "color_filter") ?? GetStr(args, "color");
+            bool visibleOnly = GetBool(args, "visible_only", true);
+            bool strictColor = GetBool(args, "strict_color", true);
+            bool strictLayer = GetBool(args, "strict_layer", false);
+            bool connectGaps = GetBool(args, "connect_gaps", true);
+            bool bridgeThroughBlocks = GetBool(args, "bridge_through_blocks", true);
+            int maxCircuitBlocks = GetInt(args, "max_circuit_blocks", 35);
+            if (maxCircuitBlocks < 0) maxCircuitBlocks = 0;
+            int maxCircuits = GetInt(args, "max_circuits", 200);
+            if (maxCircuits < 1) maxCircuits = 200;
+            bool includeEmpty = GetBool(args, "include_empty", false);
+            double fixtureVa = GetDouble(args, "fixture_va", 40.0);
+            bool drawTable = GetBool(args, "draw_table", true);
+            string tablePos = GetStr(args, "table_position") ?? "outside_right";
+            double? tableGap = GetNullableDouble(args, "table_gap");
+            string rawTitle = GetStr(args, "title");
+            bool replaceExisting = GetBool(args, "replace_existing", true);
+            bool exportExcel = GetBool(args, "export_excel", false);
+            bool zoom = GetBool(args, "zoom", true);
+
+            Dictionary<string, object> unitsInfo = GetUnitsInfo(db);
+            double rawUnitsPerM = Convert.ToDouble(unitsInfo["units_per_m"], CultureInfo.InvariantCulture);
+            if (rawUnitsPerM <= 1e-9) rawUnitsPerM = 1000.0;
+            List<string> selectedHandles = GetSelectedHandleStrings(doc);
+            CircuitSampleProfile learnedProfile = null;
+            lock (s_lastCoordLock) { s_circuitProfileByDb.TryGetValue(db.UnmanagedObject, out learnedProfile); }
+
+            List<TracedCircuitSummary> circuits = new List<TracedCircuitSummary>();
+            double effectiveUnitsPerM = rawUnitsPerM;
+            bool scaleInferred = false;
+            string scaleWarning = "";
+            Extents3d? mainExt = null;
+            int totalBlocks = 0;
+            double totalLengthM = 0.0;
+            int guardTriggeredCount = 0;
+
+            using (DocumentLock docLock = doc.LockDocument())
+            {
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    Dictionary<string, bool> hiddenMap = BuildLayerHiddenMap(db, tr);
+                    Dictionary<string, SavedColorState> colorMap = BuildLayerColorStateMap(db, tr);
+                    double drawingSpan, medianFixtureSpan;
+                    ComputeDrawingFixtureMetrics(db, tr, visibleOnly, hiddenMap, out drawingSpan, out medianFixtureSpan, out mainExt);
+
+                    double refSpan = (learnedProfile != null && learnedProfile.MedianFixtureSpan > 1e-3)
+                        ? learnedProfile.MedianFixtureSpan
+                        : medianFixtureSpan;
+                    effectiveUnitsPerM = ResolveEffectiveUnitsPerMeter(db, rawUnitsPerM, drawingSpan, refSpan, out scaleInferred, out scaleWarning);
+
+                    List<ObjectId> seedCurveIds = CollectAllCircuitCandidateCurveIds(
+                        db, tr, hiddenMap, colorMap, visibleOnly, layerFilter, colorFilter, selectedHandles, learnedProfile);
+                    if (seedCurveIds.Count == 0)
+                    {
+                        tr.Commit();
+                        return Err("لم يتم العثور على طبقات أسلاك إنارة/قوى أو مسارات ملونة واضحة. حدد خط عينة واحد من اللينيا أو مرر layer_filter ثم أعد المحاولة.");
+                    }
+
+                    BlockTableRecord ms = (BlockTableRecord)tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                    HashSet<ObjectId> globalVisited = new HashSet<ObjectId>();
+
+                    for (int si = 0; si < seedCurveIds.Count && circuits.Count < maxCircuits; si++)
+                    {
+                        ObjectId seedId = seedCurveIds[si];
+                        if (globalVisited.Contains(seedId)) continue;
+                        TracedCircuitSummary summary = TraceSingleCircuitComponent(
+                            db, tr, ms, seedId, hiddenMap, colorMap, globalVisited,
+                            visibleOnly, strictColor, strictLayer, connectGaps, bridgeThroughBlocks,
+                            maxCircuitBlocks, effectiveUnitsPerM, refSpan, drawingSpan);
+                        if (summary == null) continue;
+                        if (!includeEmpty && summary.MatchedBlocksCount == 0) continue;
+                        circuits.Add(summary);
+                        totalBlocks += summary.MatchedBlocksCount;
+                        totalLengthM += summary.LengthMeters;
+                        if (summary.GuardTriggered) guardTriggeredCount++;
+                    }
+                    tr.Commit();
+                }
+
+                if (circuits.Count == 0)
+                    return Err("تم فحص الخطوط المرشحة ولم يتم رصد دوائر تحتوي على بلوكات إنارة/معدات مطابقة.");
+
+                circuits.Sort(delegate(TracedCircuitSummary a, TracedCircuitSummary b)
+                {
+                    bool aHas = !string.IsNullOrWhiteSpace(a.CircuitName);
+                    bool bHas = !string.IsNullOrWhiteSpace(b.CircuitName);
+                    if (aHas != bHas) return aHas ? -1 : 1;
+                    int c = string.Compare(a.PanelName, b.PanelName, StringComparison.OrdinalIgnoreCase);
+                    if (c != 0) return c;
+                    c = string.Compare(a.CircuitName, b.CircuitName, StringComparison.OrdinalIgnoreCase);
+                    if (c != 0) return c;
+                    c = b.MinY.CompareTo(a.MinY);
+                    return c != 0 ? c : a.MinX.CompareTo(b.MinX);
+                });
+
+                ExcelSheetData sheet = BuildCircuitScheduleSheet(circuits, fixtureVa, rawTitle, scaleWarning);
+                bool tableDrawn = false;
+                int createdCount = 0;
+                Extents3d? tableExt = null;
+
+                if (drawTable)
+                {
+                    if (!db.TileMode) { try { db.TileMode = true; } catch { } }
+                    List<ObjectId> createdIds = new List<ObjectId>();
+                    List<ObjectId> erasedIds = new List<ObjectId>();
+                    using (Transaction trTbl = db.TransactionManager.StartTransaction())
+                    {
+                        BlockTableRecord msW = (BlockTableRecord)trTbl.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
+                        tableExt = RenderStyledScheduleTable(
+                            doc, db, msW, trTbl, sheet, "_AI_CIRCUIT_SCHEDULE",
+                            replaceExisting, tablePos, tableGap, null, mainExt, createdIds, erasedIds);
+                        db.UpdateExt(true);
+                        trTbl.Commit();
+                    }
+                    tableDrawn = tableExt.HasValue;
+                    createdCount = createdIds.Count;
+                    if (createdIds.Count > 0 || erasedIds.Count > 0)
+                    {
+                        CadUndoEntry undo = new CadUndoEntry();
+                        undo.ToolName = "trace_all_circuits";
+                        undo.Summary = "Batch Circuit Schedule (" + circuits.Count.ToString(CultureInfo.InvariantCulture) + " circuits)";
+                        undo.CreatedIds.AddRange(createdIds);
+                        undo.ErasedIds.AddRange(erasedIds);
+                        PushUndoEntry(doc, undo);
+                    }
+                    if (zoom && tableExt.HasValue && IsFiniteBounds(tableExt.Value))
+                        ZoomToExtents3d(doc, tableExt.Value, 1.18);
+                    try { doc.Editor.UpdateScreen(); } catch { }
+                }
+
+                List<object> circuitList = new List<object>();
+                for (int i = 0; i < circuits.Count; i++)
+                {
+                    TracedCircuitSummary c = circuits[i];
+                    circuitList.Add(new Dictionary<string, object>
+                    {
+                        { "index", i + 1 },
+                        { "circuit_name", c.CircuitName },
+                        { "panel_name", c.PanelName },
+                        { "termination_type", c.TerminationType },
+                        { "wire_layer", c.WireLayer },
+                        { "wire_color_key", c.WireColorKey },
+                        { "path_curves_count", c.PathCurvesCount },
+                        { "total_path_length_m", c.LengthMeters },
+                        { "matched_blocks_count", c.MatchedBlocksCount },
+                        { "counts_by_block", c.CountsByBlock },
+                        { "estimated_va", Math.Round(c.MatchedBlocksCount * Math.Max(0.0, fixtureVa), 1) },
+                        { "guard_triggered", c.GuardTriggered }
+                    });
+                }
+
+                Dictionary<string, object> res = new Dictionary<string, object>
+                {
+                    { "circuits_count", circuits.Count },
+                    { "total_blocks_count", totalBlocks },
+                    { "total_path_length_m", Math.Round(totalLengthM, 2) },
+                    { "effective_units_per_m", Round(effectiveUnitsPerM) },
+                    { "unit_scale_inferred", scaleInferred },
+                    { "guard_triggered_count", guardTriggeredCount },
+                    { "circuits", circuitList },
+                    { "table_drawn", tableDrawn },
+                    { "table_layer", "_AI_CIRCUIT_SCHEDULE" },
+                    { "created_count", createdCount }
+                };
+                if (!string.IsNullOrEmpty(scaleWarning)) res["unit_scale_warning"] = scaleWarning;
+                if (exportExcel)
+                {
+                    string xlTarget = GetStr(args, "excel_path") ?? ExcelTableInterop.ResolveDefaultExportPath(doc, "circuit_schedule", ".xlsx");
+                    res["excel_exported"] = true;
+                    res["excel_path"] = ExcelTableInterop.WriteSpreadsheet(xlTarget, sheet);
+                }
+                return Ok(res);
+            }
         }
     }
 }

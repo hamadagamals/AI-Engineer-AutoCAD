@@ -31,7 +31,7 @@ namespace AIEngineer.AutoCAD
 
         public string Provider = ProviderGemini;
         public string GeminiApiKey = "";
-        public string GeminiModel = "gemini-3.5-flash-lite";
+        public string GeminiModel = "gemini-3.5-flash";
         public string ClaudeApiKey = "";
         public string ClaudeModel = "claude-sonnet-4-20250514";
         public string OpenAIApiKey = "";
@@ -149,7 +149,7 @@ namespace AIEngineer.AutoCAD
                 string.Equals(cfg.GeminiModel, "gemini-2.5-flash", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(cfg.GeminiModel, "gemini-2.5-flash-lite", StringComparison.OrdinalIgnoreCase))
             {
-                cfg.GeminiModel = "gemini-3.5-flash-lite";
+                cfg.GeminiModel = "gemini-3.5-flash";
             }
             if (string.IsNullOrWhiteSpace(cfg.ClaudeModel)) cfg.ClaudeModel = "claude-sonnet-4-20250514";
             if (string.IsNullOrWhiteSpace(cfg.OpenAIModel)) cfg.OpenAIModel = "gpt-5.3-codex";
@@ -182,7 +182,7 @@ namespace AIEngineer.AutoCAD
             if (string.IsNullOrEmpty(encGem) && !string.IsNullOrWhiteSpace(GeminiApiKey) && existingDisk != null && existingDisk.ContainsKey("gemini_api_key"))
                 encGem = Convert.ToString(existingDisk["gemini_api_key"], CultureInfo.InvariantCulture) ?? "";
             d["gemini_api_key"] = encGem;
-            d["gemini_model"] = (GeminiModel ?? "gemini-3.5-flash-lite").Trim();
+            d["gemini_model"] = (GeminiModel ?? "gemini-3.5-flash").Trim();
 
             string encClaude = ProtectSecret(ClaudeApiKey);
             if (string.IsNullOrEmpty(encClaude) && !string.IsNullOrWhiteSpace(ClaudeApiKey) && existingDisk != null && existingDisk.ContainsKey("claude_api_key"))
@@ -250,7 +250,7 @@ namespace AIEngineer.AutoCAD
 
         public string GetModel(string provider)
         {
-            if (provider == ProviderGemini) return string.IsNullOrWhiteSpace(GeminiModel) ? "gemini-3.5-flash-lite" : GeminiModel.Trim();
+            if (provider == ProviderGemini) return string.IsNullOrWhiteSpace(GeminiModel) ? "gemini-3.5-flash" : GeminiModel.Trim();
             if (provider == ProviderClaude) return string.IsNullOrWhiteSpace(ClaudeModel) ? "claude-sonnet-4-20250514" : ClaudeModel.Trim();
             if (provider == ProviderOpenAI) return string.IsNullOrWhiteSpace(OpenAIModel) ? "gpt-5.3-codex" : OpenAIModel.Trim();
             return "";
@@ -271,11 +271,11 @@ namespace AIEngineer.AutoCAD
             {
                 return new string[]
                 {
+                    "gemini-3.5-flash",
+                    "gemini-3.8-flash",
                     "gemini-3.5-flash-lite",
                     "gemini-3.1-flash-lite-preview",
                     "gemini-flash-lite-latest",
-                    "gemini-3.8-flash",
-                    "gemini-3.5-flash",
                     "gemini-3.1-pro-preview"
                 };
             }
@@ -448,7 +448,7 @@ namespace AIEngineer.AutoCAD
             saveBtn.Click += delegate
             {
                 _config.GeminiApiKey = (_geminiKey.Text ?? "").Trim();
-                _config.GeminiModel = (_geminiModel.Text ?? "gemini-3.5-flash-lite").Trim();
+                _config.GeminiModel = (_geminiModel.Text ?? "gemini-3.5-flash").Trim();
                 _config.ClaudeApiKey = (_claudeKey.Text ?? "").Trim();
                 _config.ClaudeModel = (_claudeModel.Text ?? "claude-sonnet-4-20250514").Trim();
                 _config.OpenAIApiKey = (_openaiKey.Text ?? "").Trim();
@@ -776,6 +776,7 @@ namespace AIEngineer.AutoCAD
             return n == "draw_entities" ||
                    n == "draw_block_legend" ||
                    n == "find_blocks_along_path" ||
+                   n == "trace_all_circuits" ||
                    n == "annotate_block_coordinates" ||
                    n == "convert_arrows_to_leaders" ||
                    n == "modify_entities" ||
@@ -1166,7 +1167,7 @@ namespace AIEngineer.AutoCAD
             List<string> modelCandidates = BuildGeminiCandidates(primaryModel);
 
             List<object> toolDecls = new List<object>();
-            foreach (Dictionary<string, object> spec in BuildToolSpecs())
+            foreach (Dictionary<string, object> spec in SelectRelevantToolSpecs(userMessage))
             {
                 toolDecls.Add(new Dictionary<string, object>
                 {
@@ -1470,7 +1471,7 @@ namespace AIEngineer.AutoCAD
             });
 
             List<object> claudeTools = new List<object>();
-            foreach (Dictionary<string, object> spec in BuildToolSpecs())
+            foreach (Dictionary<string, object> spec in SelectRelevantToolSpecs(userMessage))
             {
                 claudeTools.Add(new Dictionary<string, object>
                 {
@@ -1664,7 +1665,7 @@ namespace AIEngineer.AutoCAD
             });
 
             List<object> tools = new List<object>();
-            foreach (Dictionary<string, object> spec in BuildToolSpecs())
+            foreach (Dictionary<string, object> spec in SelectRelevantToolSpecs(userMessage))
             {
                 tools.Add(new Dictionary<string, object>
                 {
@@ -1824,7 +1825,7 @@ namespace AIEngineer.AutoCAD
             messages.Add(new Dictionary<string, object> { { "role", "user" }, { "content", FormatUserTextWithPendingAudit(userMessage, ref pendingAudit) } });
 
             List<object> tools = new List<object>();
-            foreach (Dictionary<string, object> spec in BuildToolSpecs())
+            foreach (Dictionary<string, object> spec in SelectRelevantToolSpecs(userMessage))
             {
                 tools.Add(new Dictionary<string, object>
                 {
@@ -2106,12 +2107,13 @@ namespace AIEngineer.AutoCAD
                 "6h. ATTRIBUTES & BATCH TEXT TOOLS (`manage_attributes`, `text_tools`): Use `manage_attributes` to extract all BlockReference attributes to Excel (`action: 'extract'`), bulk-update attribute tags (`action: 'update'`), or sync edited attributes back from Excel (`action: 'sync_from_excel'`). Use `text_tools` for batch find & replace across text/mtext/attributes (`action: 'find_replace'`), directional auto-numbering `C1..Cn` (`action: 'auto_number'`), or height/Arial Unicode style standardization (`action: 'standardize'`).\n" +
                 "6i. ADVANCED GEOMETRY, QA/CLEANUP, DWG COMPARE, BLOCK LIBRARY & LAYOUTS/PDF (`advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`): Never manually loop single entity moves/deletes when an exact batch engineering tool exists! Use `advanced_geometry_ops` for `align`, `distribute`, `array_rect`, `array_polar`, `offset`, `revision_cloud`, or `explode`. Use `drawing_qa_cleanup` for `audit_duplicates` (detect/clean stacked duplicate blocks!), `overkill`, `purge`, `standardize_bylayer`, `compare_dwg` (revision clouds + Excel diff), or `check_env`. Use `layout_and_plot_tools` for scaled PaperSpace Layouts/Viewports and `batch_plot_pdf`. Use `manage_block_library` (`save`/`list`/`insert`) for reusable company blocks across projects!\n" +
                 "6j. LIGHTING DESIGN, IES/LDT PHOTOMETRY & DIALUX STF EXPORT (`lighting_design_engine`, `export_dialux_stf`): Whenever the engineer asks to design/distribute lighting automatically according to Egyptian Code (`ECP`) / `EN 12464-1` / `CIBSE`, calculate Lux/Uniformity from `.ies`/`.ldt` files, balance lighting on 3 phases, or export an AutoCAD lighting plan to DIALux evo (`.stf`): ALWAYS call `lighting_design_engine` and/or `export_dialux_stf`! Note honestly that DIALux evo imports `.stf` (`File -> Import -> STF`) cleanly to skip manual room/fixture modeling, while official DIALux evo has no external headless API for running DIALux's own internal raytracer or PDF export.\n" +
-                "6k. LIGHTING/MEP CIRCUIT & BLOCK PATH TRACING (`find_blocks_along_path`): Whenever the engineer asks to trace, complete, select, count, name (circuit tag e.g. `LP-B3.2/11`), measure total length, or make a schedule/legend for an individual lighting/MEP circuit starting from a selected wire OR lamp OR sample circuit ('كمل المسار لدائرة الانارة', 'حدد مسار اللينيا من أول لمبة لآخر لمبة والسهم', 'اسم اللينيا ورقمها', 'حدد الخطوط المتصلة كدائرة كهربائية بدون البلوكات', 'استخرج كل البلوكات وطول الخط'):\n" +
+                "6k. LIGHTING/MEP CIRCUIT & BLOCK PATH TRACING (`find_blocks_along_path`, `trace_all_circuits`): Whenever the engineer asks to trace, complete, select, count, name (circuit tag e.g. `LP-B3.2/11`), measure total length, or make a schedule/legend for an individual lighting/MEP circuit OR separate ALL circuits into a master schedule ('كمل المسار لدائرة الانارة', 'حدد مسار اللينيا من أول لمبة لآخر لمبة والسهم', 'اسم اللينيا ورقمها', 'حدد الخطوط المتصلة كدائرة كهربائية بدون البلوكات', 'احصر كل اللينيات في جدول كل لينية لوحدها'):\n" +
                 "   - **NEVER use `quantity_takeoff`** (counts whole drawing) and **NEVER guess bounding boxes in `select_entities`**!\n" +
-                "   - **Strict Isolation & Jumper Bridging (DEFAULT ON):** By default `find_blocks_along_path` enforces `strict_color: true` (never jumps from purple wire to blue wire!), `connect_gaps: true` (bridges near-rim lamp gaps & collinear crossing cuts / 'كوبري'), `bridge_through_blocks: true` (`[Wire] -> [Lamp] -> [Wire]`), and `include_terminator_blocks: false` (stops at Home-Run `ARROW` or Panel `DB`/`LP` and auto-extracts `circuit_name` & `panel_name` e.g. `LP-B3.2/11` into the Legend title!).\n" +
-                "   - **Pattern A — Engineer shows ONE circuit as sample to learn (`learn_sample: true`):** Pass `learn_sample: true, select_blocks: true, draw_legend: true` ONLY on a single clean sample circuit (if an earlier noisy sample polluted things, pass `reset_sample: true`).\n" +
+                "   - **Strict Isolation, Auto-Scale & Guard (DEFAULT ON):** `find_blocks_along_path` automatically detects `INSUNITS` mismatches (e.g. Meter drawings saved as Inches), enforces `strict_color: true`, bridges fixture gaps & collinear crossing cuts (`connect_gaps: true`, proportional to fixture span), stops at Home-Run `ARROW` / Panel blocks (`include_terminator_blocks: false`), extracts `circuit_name`/`panel_name`, and guards against merging >`max_circuit_blocks` (35) fixtures. If `unit_scale_warning` or `warning` (`circuit_guard_triggered`) is returned, surface it clearly in your reply!\n" +
+                "   - **Pattern A — Engineer shows ONE circuit as sample to learn (`learn_sample: true`):** Pass `learn_sample: true, select_blocks: true, draw_legend: true` ONLY when they explicitly selected a clean sample circuit; `learn_sample: true` locks strictly to the selected entities without re-expanding across neighboring circuits (pass `reset_sample: true` to clear stale samples).\n" +
                 "   - **Pattern B — Engineer selects 1 wire OR 1 lamp (+ wire) of a SINGLE circuit to complete & count ONLY THAT circuit:** Call `find_blocks_along_path(follow_connected: true, bridge_through_blocks: true, connect_gaps: true, strict_color: true, select_blocks: true, draw_legend: true)`! Report `circuit_name`, `panel_name`, `termination_type`, `circuit_start`, `circuit_end`, `total_path_length_m`, and exact `counts_by_block` ONLY from the tool output (never invent a circuit name if `circuit_name` is empty!).\n" +
-                "   - **Pattern C — Engineer wants ONLY the connected wires selected WITHOUT blocks:** Pass `select_paths: true, select_blocks: false, follow_connected: true, bridge_through_blocks: true, connect_gaps: true, strict_color: true` (with `draw_legend: false` unless a schedule is requested, and `zoom_mode: \"selected\"`).\n" +
+                "   - **Pattern C — Engineer wants ONLY connected wires selected WITHOUT blocks:** Pass `select_paths: true, select_blocks: false, follow_connected: true, bridge_through_blocks: true, connect_gaps: true, strict_color: true` (with `draw_legend: false` unless a schedule is requested, and `zoom_mode: \"selected\"`).\n" +
+                "   - **Pattern D — Engineer wants ALL circuits separated & scheduled in ONE table (`trace_all_circuits`):** Whenever asked to separate/schedule EVERY circuit on the plan (`افصل كل لينية لوحدها`, `جدول حصر كل اللينيات`), call `trace_all_circuits(draw_table: true, export_excel: <if excel requested>)` directly!\n" +
                 "6l. CONVERTING DRAWN ARROWS / CALLOUT POLYLINES TO NATIVE `Leader` (`convert_arrows_to_leaders`): Whenever the engineer asks to convert existing drawn arrows/callouts (including horizontal shelf + angled pointer + Solid/Hatch/triangle/chevron arrowhead + optional text) in the drawing to native AutoCAD `Leader` ('حول كل الاسهم المرسومة الي leader', 'انا مختار عينة حول كل اللي مثلها الي leader', 'حول السهم المرسوم مع تعديل الاحداثيات الي راس السهم'):\n" +
                 "   - **NEVER call `select_entities(..., highlight_box: true)`**, **NEVER stop to ask unnecessary questions**, and **NEVER manually loop `draw_entities` + `delete_entities`**!\n" +
                 "   - When the engineer selected a **sample arrow** and asks to convert ALL similar arrows across the drawing (`'مختار عينة'`, `'حول كل الذي مثلها'`, `'الباقي مثله'`), ALWAYS pass `match_similar: true` (do NOT pass `selected_only: true` alone unless they literally want ONLY the single selected arrow converted)! It reads the selected sample's layer/color/parts (`horizontal line + pointer line + arrowhead`), matches EVERY identical arrow assembly across ModelSpace, merges them cleanly into native `Leader`s with `Vertex 0` snapped onto the exact sharp apex of each arrowhead pointing to the block, updates X/Y coordinates inside paired texts (`update_coordinates: true`) to match `Vertex 0`, attaches `AIENG_COORD_LDR` XData, erases the old lines/arrowheads in one Undo step, and cleans `_AI_HIGHLIGHT` boxes!\n" +
@@ -2126,7 +2128,125 @@ namespace AIEngineer.AutoCAD
                 uiSortPolicyLine;
         }
 
-        // ==================== Neutral Schema Builder (Gemini / Claude / OpenAI Compatible) ====================
+        // ==================== Intent-Based Tool Router & Schema Builder ====================
+
+        private static void AddToolNames(HashSet<string> allowed, params string[] names)
+        {
+            if (allowed == null || names == null) return;
+            for (int i = 0; i < names.Length; i++)
+            {
+                if (!string.IsNullOrEmpty(names[i])) allowed.Add(names[i]);
+            }
+        }
+
+        private static bool ContainsAnyKeyword(string textLow, params string[] keywords)
+        {
+            if (string.IsNullOrEmpty(textLow) || keywords == null) return false;
+            for (int i = 0; i < keywords.Length; i++)
+            {
+                if (textLow.Contains(keywords[i])) return true;
+            }
+            return false;
+        }
+
+        public static List<Dictionary<string, object>> SelectRelevantToolSpecs(string userMessage)
+        {
+            List<Dictionary<string, object>> allSpecs = BuildToolSpecs();
+            if (string.IsNullOrWhiteSpace(userMessage)) return allSpecs;
+
+            string low = userMessage.ToLowerInvariant();
+            HashSet<string> allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddToolNames(allowed,
+                "inspect_drawing", "query_entities", "select_entities",
+                "zoom_view", "undo_last_action", "get_plugin_diagnostics");
+
+            bool matchedDomain = false;
+
+            if (ContainsAnyKeyword(low,
+                "لينيا", "لينية", "لينيات", "لينيه", "دائرة", "دوائر", "مسار", "سلك", "اسلاك", "أسلاك",
+                "كيبل", "كابل", "سهم", "circuit", "circuits", "path", "homerun", "home-run", "home run", "trace"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "find_blocks_along_path", "trace_all_circuits", "draw_block_legend",
+                    "extract_load_schedule", "quantity_takeoff", "export_to_excel", "approve_or_rollback_preview");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "جهد", "هبوط", "قاطع", "قواطع", "قصر", "امبير", "أمبير", "كيلووات", "كيلو فولت", "مقطع",
+                "iec", "ecp", "breaker", "voltage", "cable", "amp", "kva", "kw", "hp", "isc", "lv", "panel", "لوحة", "لوحات", "احمال", "أحمال"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "calculate_lv_electrical", "extract_load_schedule", "trace_all_circuits",
+                    "export_to_excel", "approve_or_rollback_preview");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "اضاءة", "إضاءة", "انارة", "إنارة", "كشاف", "كشافات", "لمبة", "لمبات", "لوكس",
+                "lux", "dialux", "stf", "ies", "ldt", "luminaire", "lighting", "photometr"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "lighting_design_engine", "export_dialux_stf", "find_blocks_along_path",
+                    "trace_all_circuits", "draw_block_legend", "export_to_excel", "approve_or_rollback_preview");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "بلوك", "بلوكات", "جرد", "حصر", "جدول", "كميات", "مساحة", "اطوال", "أطوال",
+                "legend", "boq", "takeoff", "count", "block", "schedule"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "draw_block_legend", "quantity_takeoff", "extract_load_schedule",
+                    "find_blocks_along_path", "trace_all_circuits", "export_to_excel",
+                    "create_block", "convert_matching_shapes_to_block");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "احداثيات", "إحداثيات", "ترقيم", "تسمية", "ليدر", "نصوص", "نص", "سمات",
+                "coord", "annotate", "leader", "arrow", "text", "mtext", "attribute", "tag"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "annotate_block_coordinates", "convert_arrows_to_leaders", "text_tools",
+                    "manage_attributes", "export_to_excel", "approve_or_rollback_preview");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "ارسم", "رسم", "عدل", "تعديل", "انسخ", "نسخ", "احذف", "حذف", "حرك", "نقل",
+                "دوران", "مقياس", "طبقة", "لون", "مقاس", "مربع", "دائرة", "خط", "تمام", "تراجع", "اعتماد",
+                "draw", "create", "modify", "move", "copy", "delete", "erase", "rotate", "scale",
+                "layer", "color", "offset", "trim", "fillet", "hatch", "dim", "array", "align", "approve", "rollback"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "draw_entities", "modify_entities", "copy_entities", "delete_entities",
+                    "create_block", "convert_matching_shapes_to_block", "advanced_geometry_ops",
+                    "manage_layers", "measure_and_compare", "approve_or_rollback_preview", "duplicate_drawing", "execute_template");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "تنظيف", "تكرار", "مقارنة", "طباعة", "مكتبة", "اكسل", "إكسل", "استيراد", "تصدير",
+                "clean", "purge", "overkill", "audit", "duplicate", "compare", "layout", "viewport",
+                "plot", "pdf", "library", "excel", "xlsx", "import", "export"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "drawing_qa_cleanup", "layout_and_plot_tools", "manage_block_library",
+                    "measure_and_compare", "duplicate_drawing", "export_to_excel", "import_excel_table");
+            }
+
+            if (!matchedDomain) return allSpecs;
+
+            List<Dictionary<string, object>> filtered = new List<Dictionary<string, object>>();
+            for (int i = 0; i < allSpecs.Count; i++)
+            {
+                string tName = Convert.ToString(allSpecs[i]["name"], CultureInfo.InvariantCulture);
+                if (allowed.Contains(tName)) filtered.Add(allSpecs[i]);
+            }
+            return filtered.Count > 0 ? filtered : allSpecs;
+        }
 
         public static List<Dictionary<string, object>> BuildToolSpecs()
         {
@@ -2215,8 +2335,9 @@ namespace AIEngineer.AutoCAD
                     { "connect_gaps", Prop("boolean", "Bridge near-rim wire gaps at fixture blocks and collinear crossing-cut gaps ('كوبري / قطع') along the same wire color/direction (default true).") },
                     { "strict_color", Prop("boolean", "Require effective wire color (ACI, TrueColor RGB, or resolved ByLayer color) to match strictly so differently-colored nearby circuits (e.g. blue vs purple) never merge (default true).") },
                     { "strict_layer", Prop("boolean", "Restrict tracing strictly to the seed wire's layer even if dashed/solid wires of the same color use sub-layers (default false).") },
-                    { "learn_sample", Prop("boolean", "Learn circuit wire layer, wire color, and fixture size from this single sample circuit for subsequent tracing in the same drawing (default false).") },
+                    { "learn_sample", Prop("boolean", "Learn circuit wire layer, wire color, and fixture size from the selected sample circuit strictly without expanding into adjacent circuits (default false).") },
                     { "reset_sample", Prop("boolean", "Clear any previously learned circuit profile for this drawing before tracing (default false).") },
+                    { "max_circuit_blocks", Prop("integer", "Sanity guard cap on maximum fixtures per single circuit to prevent merging neighboring circuits (default 35; pass 0 to disable).") },
                     { "position", Prop("string", "'outside_right' (default), 'outside_left', 'outside_top', or 'outside_bottom'.") },
                     { "clear_layers", ArrProp("string", "Optional non-0 layers of old/unwanted tables (e.g. ['_AI_BOQ_TABLE']) to erase before drawing the clean legend.") },
                     { "replace_existing", Prop("boolean", "Replace previous _AI_BLOCK_LEGEND before drawing (default true).") },
@@ -2226,6 +2347,31 @@ namespace AIEngineer.AutoCAD
                     { "excel_path", Prop("string", "Optional destination .xlsx path.") },
                     { "zoom", Prop("boolean", "Zoom viewport after execution (default true).") },
                     { "zoom_mode", Prop("string", "'auto' (default: 'legend' if draw_legend=true else 'selected'), 'selected' (focus on selected blocks/wires), 'legend' (focus on table), or 'both'.") }
+                })));
+
+            tools.Add(Tool("trace_all_circuits",
+                "Automatically detect, separate, and schedule ALL individual lighting/MEP circuits across the active AutoCAD drawing (disjoint circuit components partitioned by color, layer, fixture bridging, and Home-Run ARROW/Panel terminators) into one unified Circuit Schedule Table (_AI_CIRCUIT_SCHEDULE) and optional RTL Excel (.xlsx) workbook with per-circuit length, fixture counts, circuit_name, panel_name, and estimated VA load.",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "layer_filter", Prop("string", "Optional wire layer pattern filter (omit to use selected wires, learned sample layers, or auto-detected lighting/power wire layers).") },
+                    { "color_filter", Prop("string", "Optional ACI/color key filter (e.g. 'ACI:6').") },
+                    { "visible_only", Prop("boolean", "Only inspect visible entities on On/Thawed layers (default true).") },
+                    { "strict_color", Prop("boolean", "Strictly keep each circuit isolated by effective wire color (default true).") },
+                    { "strict_layer", Prop("boolean", "Keep each circuit strictly on one wire layer (default false).") },
+                    { "connect_gaps", Prop("boolean", "Bridge fixture-rim gaps and collinear crossing cuts per circuit (default true).") },
+                    { "bridge_through_blocks", Prop("boolean", "Bridge wires across fixture blocks while stopping at ARROW/Panel terminators (default true).") },
+                    { "max_circuit_blocks", Prop("integer", "Maximum fixtures allowed per single circuit guard (default 35; pass 0 for unlimited).") },
+                    { "max_circuits", Prop("integer", "Maximum circuits to list (default 200).") },
+                    { "include_empty", Prop("boolean", "Include wire paths with 0 matched fixture blocks (default false).") },
+                    { "fixture_va", Prop("number", "Nominal VA per fixture used for estimated circuit load column (default 40.0).") },
+                    { "draw_table", Prop("boolean", "Draw formatted Arabic/English Circuit Schedule table on _AI_CIRCUIT_SCHEDULE in AutoCAD (default true).") },
+                    { "table_position", Prop("string", "'outside_right' (default), 'outside_left', 'outside_top', or 'outside_bottom'.") },
+                    { "table_gap", Prop("number", "Optional gap from main drawing extents.") },
+                    { "title", Prop("string", "Optional table header title.") },
+                    { "replace_existing", Prop("boolean", "Replace previous _AI_CIRCUIT_SCHEDULE before drawing (default true).") },
+                    { "export_excel", Prop("boolean", "Export full batch circuit schedule to RTL Excel .xlsx (default false).") },
+                    { "excel_path", Prop("string", "Optional destination .xlsx path.") },
+                    { "zoom", Prop("boolean", "Zoom viewport onto drawn schedule (default true).") }
                 })));
 
             Dictionary<string, object> entityItemProps = new Dictionary<string, object>

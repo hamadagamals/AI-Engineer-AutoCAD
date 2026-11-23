@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-23 - Phase 1 Precision Circuit Tracing, Intent Tool Routing & Gemini 3.5 Flash Upgrade
+
+- **Circuit Tracing Accuracy & Scale Inference (`integrations/autocad_context_plugin/CadMepAndTakeoffTools.cs`):**
+  - Added `ResolveEffectiveUnitsPerMeter` to infer actual drawing scale (`1.0` units/m on Meter drawings mistagged with `INSUNITS=Inches`) from fixture bounding spans when `INSUNITS` reports imperial/cm/mm mismatch, emitting a bilingual Arabic/English `unit_scale_warning` and accurate `total_path_length_m`.
+  - Fixed `SeedCurvesFromSelectedBlocks` (`seedTol`), tightened `ExpandConnectedPathCurves` collinear/crossing gap thresholds (`breakGapMax <= 0.90 * medianFixtureSpan`, `breakLateralTol`, `tightSnapTol`), enforced strict `max_circuit_blocks` (default `35`) circuit boundary sanity guard, and scaled `tagSearchRadius` proportional to fixture span (`refSpan * 4.5`) so nearby circuits never merge into 263-block clusters.
+  - Enforced strict `learn_sample` locking (`effectiveFollowConnected = false` on selected sample circuits) and added `TraceAllCircuits` (`trace_all_circuits`) batch detector/scheduler generating `_AI_CIRCUIT_SCHEDULE` in AutoCAD and optional RTL Excel workbooks.
+- **Intent Tool Router & Model Upgrade (`integrations/autocad_context_plugin/DirectCadAgent.cs`, `CadToolExecutor.cs`):**
+  - Added `SelectRelevantToolSpecs` Intent-Based Tool Router across Gemini, Claude, OpenAI Responses, and OpenAI Chat loops (cutting 35 AutoCAD tools down to a focused task subset, e.g. 15 circuit/takeoff tools), registered `trace_all_circuits` and `max_circuit_blocks`, and upgraded the default C# Gemini model from `gemini-3.5-flash-lite` to `gemini-3.5-flash`.
+- **Verification:**
+  - Verified clean C# build against AutoCAD 2021 (`AIEngineer.AutoCAD.Context.dll`, `1,100,288` bytes, `35` tools registered with `0` tool/type/array-`items` schema errors; 4 pre-existing `modify_entities` object properties omit optional `description`) and passed live `accoreconsole.exe` tests on a Meter drawing mistagged as `INSUNITS=Inches` (single circuit `LP-B3.2/1` = 3 `F1` / `6.15m`, strict `learn_sample` lock = 3 `F1` / `4.8m`, and `trace_all_circuits` = 3 circuits / 9 blocks / `20.15m` / `_AI_CIRCUIT_SCHEDULE`).
+
 ## 2026-11-23 - Audited Multi-Version AutoCAD + Revit Direct Copilot, IEC/ECP LV Calculator & DIALux STFF 1.0.5 Release
 
 - Applied the authoritative audited `AI-Engineer-AutoCAD-fixes` bundle (36 files updated/added, 6 obsolete files removed: `agent/scheduler.py`, `integrations/browser.py`, `integrations/excel.py`, and legacy `0.1.3`–`0.1.5` `.vsix` bundles).

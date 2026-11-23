@@ -315,6 +315,8 @@ namespace AIEngineer.AutoCAD
                         return QuantityTakeoff(doc, args);
                     case "find_blocks_along_path":
                         return FindBlocksAlongPath(doc, args);
+                    case "trace_all_circuits":
+                        return TraceAllCircuits(doc, args);
                     case "manage_attributes":
                         return ManageAttributes(doc, args);
                     case "text_tools":
