@@ -506,6 +506,8 @@ namespace AIEngineer.AutoCAD
         public string ProviderUsed;
         public string ModelUsed;
         public string FallbackNotice;
+        public bool VisualCaptureAttached;
+        public string VisualCaptureInfo;
     }
 
     internal sealed class ApiCallException : InvalidOperationException
@@ -554,7 +556,7 @@ namespace AIEngineer.AutoCAD
 
         public int TurnCount { get { return _history.Count; } }
 
-        public async Task<DirectAgentReply> SendAsync(
+        public Task<DirectAgentReply> SendAsync(
             Control uiControl,
             DirectAiConfig config,
             string provider,
@@ -562,6 +564,19 @@ namespace AIEngineer.AutoCAD
             string userMessage,
             bool isArabic,
             Action<string> onProgress)
+        {
+            return SendAsync(uiControl, config, provider, model, userMessage, isArabic, onProgress, false);
+        }
+
+        public async Task<DirectAgentReply> SendAsync(
+            Control uiControl,
+            DirectAiConfig config,
+            string provider,
+            string model,
+            string userMessage,
+            bool isArabic,
+            Action<string> onProgress,
+            bool attachVisualCapture)
         {
             if (config == null) config = DirectAiConfig.Load();
             string apiKey = config.GetApiKey(provider);
@@ -586,11 +601,18 @@ namespace AIEngineer.AutoCAD
 
             List<string> initialSelectedHandles = new List<string>();
             int initialCmdActive = 0;
+            string initialImageB64 = null;
+            string initialImageMime = null;
+            string initialVisualInfo = null;
+            string effectiveUserMessage = userMessage;
+            bool shouldPreCapture = attachVisualCapture || UserRequestsVisualInspection(userMessage);
+
             MarshalUi(uiControl, delegate
             {
+                Document activeDoc = null;
                 try
                 {
-                    Document activeDoc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+                    activeDoc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
                     if (activeDoc != null)
                     {
                         initialSelectedHandles = CadToolExecutor.GetSelectedHandleStrings(activeDoc);
@@ -605,6 +627,42 @@ namespace AIEngineer.AutoCAD
                     if (rawCmd != null) initialCmdActive = Convert.ToInt32(rawCmd, CultureInfo.InvariantCulture);
                 }
                 catch { }
+
+                if (activeDoc != null && shouldPreCapture && (attachVisualCapture || initialSelectedHandles.Count > 0))
+                {
+                    if (onProgress != null)
+                    {
+                        onProgress(isArabic
+                            ? "يلتقط صورة بصرية عالية الدقة للجزء المحدد من المخطط..."
+                            : "Capturing high-res visual snapshot of selected CAD region...");
+                    }
+                    try
+                    {
+                        string visScope = initialSelectedHandles.Count > 0 ? "selection" : "auto";
+                        Dictionary<string, object> visRes = CadToolExecutor.ExecuteTool(
+                            activeDoc, "capture_visual_view",
+                            new Dictionary<string, object> { { "scope", visScope }, { "annotate_block_names", true } });
+                        ExtractAndStripVisionImage(visRes, out initialImageB64, out initialImageMime);
+                        if (!string.IsNullOrEmpty(initialImageB64))
+                        {
+                            executedTools.Add(SummarizeToolCall("capture_visual_view", visRes));
+                            string scUsed = visRes.ContainsKey("scope_used") && visRes["scope_used"] != null ? visRes["scope_used"].ToString() : visScope;
+                            string wPx = visRes.ContainsKey("width_px") ? visRes["width_px"].ToString() : "?";
+                            string hPx = visRes.ContainsKey("height_px") ? visRes["height_px"].ToString() : "?";
+                            string blocksJson = visRes.ContainsKey("blocks_in_view") ? _json.Serialize(visRes["blocks_in_view"]) : "{}";
+                            string boundsJson = visRes.ContainsKey("bounds") ? _json.Serialize(visRes["bounds"]) : "[]";
+                            initialVisualInfo = scUsed + " (" + wPx + "x" + hPx + ", sel=" + initialSelectedHandles.Count + ")";
+                            effectiveUserMessage = (userMessage ?? "") +
+                                "\n\n[Attached High-Res CAD Visual Snapshot — scope=" + scUsed +
+                                ", size=" + wPx + "x" + hPx +
+                                ", selected_entities=" + initialSelectedHandles.Count +
+                                ", bounds=" + boundsJson +
+                                ", blocks_in_view=" + blocksJson +
+                                ". Cyan dashed boxes show selected items and dark-cyan [BlockName] badges label CAD block definitions.]";
+                        }
+                    }
+                    catch { }
+                }
             });
             bool aiModifiedSelectionInTurn = false;
 
@@ -690,14 +748,15 @@ namespace AIEngineer.AutoCAD
                 if (provider == DirectAiConfig.ProviderGemini)
                 {
                     return RunGeminiLoop(
-                        apiKey, resolvedModel, systemPrompt, historySnapshot, userMessage,
+                        apiKey, resolvedModel, systemPrompt, historySnapshot, effectiveUserMessage,
+                        initialImageB64, initialImageMime,
                         execToolOnUiThread, onProgress, uiControl, isArabic, executedTools,
                         out actualModelUsed, out fallbackNotice);
                 }
                 if (provider == DirectAiConfig.ProviderClaude)
-                    return RunClaudeLoop(apiKey, resolvedModel, systemPrompt, historySnapshot, userMessage, execToolOnUiThread, onProgress, uiControl, isArabic);
+                    return RunClaudeLoop(apiKey, resolvedModel, systemPrompt, historySnapshot, effectiveUserMessage, initialImageB64, initialImageMime, execToolOnUiThread, onProgress, uiControl, isArabic);
                 if (provider == DirectAiConfig.ProviderOpenAI)
-                    return RunOpenAILoop(apiKey, resolvedModel, config.OpenAIBaseUrl, config.OpenAIApiMode, systemPrompt, historySnapshot, userMessage, execToolOnUiThread, onProgress, uiControl, isArabic);
+                    return RunOpenAILoop(apiKey, resolvedModel, config.OpenAIBaseUrl, config.OpenAIApiMode, systemPrompt, historySnapshot, effectiveUserMessage, initialImageB64, initialImageMime, execToolOnUiThread, onProgress, uiControl, isArabic);
                 throw new InvalidOperationException("Unsupported direct provider: " + provider);
             });
 
@@ -717,7 +776,45 @@ namespace AIEngineer.AutoCAD
             reply.ProviderUsed = provider;
             reply.ModelUsed = actualModelUsed;
             reply.FallbackNotice = fallbackNotice;
+            reply.VisualCaptureAttached = !string.IsNullOrEmpty(initialImageB64);
+            reply.VisualCaptureInfo = initialVisualInfo ?? "";
             return reply;
+        }
+
+        private static bool UserRequestsVisualInspection(string userMsg)
+        {
+            if (string.IsNullOrWhiteSpace(userMsg)) return false;
+            string low = userMsg.ToLowerInvariant();
+            return userMsg.Contains("بصري") || userMsg.Contains("بصريا") || userMsg.Contains("بصرياً") ||
+                   userMsg.Contains("شوف") || userMsg.Contains("انظر") || userMsg.Contains("صورة المحدد") ||
+                   userMsg.Contains("لقطة") || userMsg.Contains("بالعين") ||
+                   low.Contains("visual") || low.Contains("look at") || low.Contains("see what") ||
+                   low.Contains("screenshot") || low.Contains("snapshot") || low.Contains("vision");
+        }
+
+        private static bool ExtractAndStripVisionImage(
+            Dictionary<string, object> toolResult,
+            out string base64Png,
+            out string mimeType)
+        {
+            base64Png = null;
+            mimeType = "image/png";
+            if (toolResult == null) return false;
+            object rawB64;
+            if (toolResult.TryGetValue("_vision_png_base64", out rawB64) && rawB64 != null)
+            {
+                string s = rawB64.ToString();
+                if (!string.IsNullOrWhiteSpace(s))
+                {
+                    base64Png = s;
+                    object rawMime;
+                    if (toolResult.TryGetValue("_vision_mime_type", out rawMime) && rawMime != null && !string.IsNullOrWhiteSpace(rawMime.ToString()))
+                        mimeType = rawMime.ToString().Trim();
+                }
+                toolResult.Remove("_vision_png_base64");
+            }
+            toolResult.Remove("_vision_mime_type");
+            return !string.IsNullOrEmpty(base64Png);
         }
 
         private static string FormatUserTextWithPendingAudit(string userText, ref string pendingAudit)
@@ -784,6 +881,8 @@ namespace AIEngineer.AutoCAD
             if (res.ContainsKey("definition_entities") && res.ContainsKey("block_name")) return toolName + "(" + res["block_name"] + ",def:" + res["definition_entities"] + ")";
             if (res.ContainsKey("items_count") && toolName == "manage_project_legend_db")
                 return toolName + "(" + res["action"] + ":" + res["items_count"] + ")";
+            if (res.ContainsKey("width_px") && toolName == "capture_visual_view")
+                return toolName + "(" + res["width_px"] + "x" + (res.ContainsKey("height_px") ? res["height_px"] : "?") + ",sel:" + (res.ContainsKey("selection_count") ? res["selection_count"] : 0) + ")";
             if (res.ContainsKey("created_count")) return toolName + "(+" + res["created_count"] + ")";
             if (res.ContainsKey("modified_count")) return toolName + "(mod:" + res["modified_count"] + ")";
             if (res.ContainsKey("copied_count")) return toolName + "(copy:" + res["copied_count"] + ")";
@@ -1183,6 +1282,8 @@ namespace AIEngineer.AutoCAD
             string systemPrompt,
             List<DirectTurnRecord> history,
             string userMessage,
+            string initialImageB64,
+            string initialImageMime,
             Func<string, Dictionary<string, object>, Dictionary<string, object>> execTool,
             Action<string> onProgress,
             Control uiControl,
@@ -1236,10 +1337,24 @@ namespace AIEngineer.AutoCAD
                 }
             }
             string currentUserText = FormatUserTextWithPendingAudit(userMessage, ref pendingAudit);
+            List<object> firstUserParts = new List<object>();
+            if (!string.IsNullOrEmpty(initialImageB64))
+            {
+                firstUserParts.Add(new Dictionary<string, object>
+                {
+                    { "inlineData", new Dictionary<string, object>
+                        {
+                            { "mimeType", string.IsNullOrEmpty(initialImageMime) ? "image/png" : initialImageMime },
+                            { "data", initialImageB64 }
+                        }
+                    }
+                });
+            }
+            firstUserParts.Add(new Dictionary<string, object> { { "text", currentUserText } });
             baseContents.Add(new Dictionary<string, object>
             {
                 { "role", "user" },
-                { "parts", new object[] { new Dictionary<string, object> { { "text", currentUserText } } } }
+                { "parts", firstUserParts }
             });
 
             ApiCallException lastApiError = null;
@@ -1380,20 +1495,44 @@ namespace AIEngineer.AutoCAD
                         contents.Add(contentObj);
 
                         List<object> fnResponseParts = new List<object>();
+                        bool usedMultimodalFnResp = false;
                         foreach (Dictionary<string, object> fc in functionCalls)
                         {
                             string fnName = GetStr(fc, "name", "");
                             Dictionary<string, object> fnArgs = AsDict(GetObj(fc, "args")) ?? new Dictionary<string, object>();
                             Dictionary<string, object> toolResult = execTool(fnName, fnArgs);
+                            string visB64, visMime;
+                            bool hasVisImg = ExtractAndStripVisionImage(toolResult, out visB64, out visMime);
+
+                            Dictionary<string, object> fnRespBody = new Dictionary<string, object>
+                            {
+                                { "name", fnName },
+                                { "response", new Dictionary<string, object> { { "result", toolResult } } }
+                            };
+                            if (hasVisImg)
+                            {
+                                usedMultimodalFnResp = true;
+                                fnRespBody["parts"] = new object[]
+                                {
+                                    new Dictionary<string, object>
+                                    {
+                                        { "inlineData", new Dictionary<string, object>
+                                            {
+                                                { "mimeType", visMime },
+                                                { "data", visB64 }
+                                            }
+                                        }
+                                    }
+                                };
+                            }
                             fnResponseParts.Add(new Dictionary<string, object>
                             {
-                                { "functionResponse", new Dictionary<string, object>
-                                    {
-                                        { "name", fnName },
-                                        { "response", new Dictionary<string, object> { { "result", toolResult } } }
-                                    }
-                                }
+                                { "functionResponse", fnRespBody }
                             });
+                        }
+                        if (usedMultimodalFnResp && !string.IsNullOrEmpty(initialImageB64))
+                        {
+                            // initialImageB64 already sent in turn 1; keep tool response clean
                         }
                         contents.Add(new Dictionary<string, object>
                         {
@@ -1464,6 +1603,8 @@ namespace AIEngineer.AutoCAD
             string systemPrompt,
             List<DirectTurnRecord> history,
             string userMessage,
+            string initialImageB64,
+            string initialImageMime,
             Func<string, Dictionary<string, object>, Dictionary<string, object>> execTool,
             Action<string> onProgress,
             Control uiControl,
@@ -1493,11 +1634,38 @@ namespace AIEngineer.AutoCAD
                     });
                 }
             }
-            messages.Add(new Dictionary<string, object>
+            string formattedFirstUser = FormatUserTextWithPendingAudit(userMessage, ref pendingAudit);
+            if (!string.IsNullOrEmpty(initialImageB64))
             {
-                { "role", "user" },
-                { "content", FormatUserTextWithPendingAudit(userMessage, ref pendingAudit) }
-            });
+                messages.Add(new Dictionary<string, object>
+                {
+                    { "role", "user" },
+                    { "content", new object[]
+                        {
+                            new Dictionary<string, object>
+                            {
+                                { "type", "image" },
+                                { "source", new Dictionary<string, object>
+                                    {
+                                        { "type", "base64" },
+                                        { "media_type", string.IsNullOrEmpty(initialImageMime) ? "image/png" : initialImageMime },
+                                        { "data", initialImageB64 }
+                                    }
+                                }
+                            },
+                            new Dictionary<string, object> { { "type", "text" }, { "text", formattedFirstUser } }
+                        }
+                    }
+                });
+            }
+            else
+            {
+                messages.Add(new Dictionary<string, object>
+                {
+                    { "role", "user" },
+                    { "content", formattedFirstUser }
+                });
+            }
 
             List<object> claudeTools = new List<object>();
             foreach (Dictionary<string, object> spec in SelectRelevantToolSpecs(userMessage))
@@ -1603,11 +1771,35 @@ namespace AIEngineer.AutoCAD
                     bool ok = res.ContainsKey("ok") && res["ok"] is bool && (bool)res["ok"];
                     if (ok && IsActionTool(tuName)) hasMutated = true;
                     if (ok && string.Equals(tuName, "undo_last_action", StringComparison.OrdinalIgnoreCase) && res.ContainsKey("undone_steps")) hasUndone = true;
+                    string cVisB64, cVisMime;
+                    object toolContentPayload;
+                    if (ExtractAndStripVisionImage(res, out cVisB64, out cVisMime))
+                    {
+                        toolContentPayload = new object[]
+                        {
+                            new Dictionary<string, object> { { "type", "text" }, { "text", _json.Serialize(res) } },
+                            new Dictionary<string, object>
+                            {
+                                { "type", "image" },
+                                { "source", new Dictionary<string, object>
+                                    {
+                                        { "type", "base64" },
+                                        { "media_type", cVisMime },
+                                        { "data", cVisB64 }
+                                    }
+                                }
+                            }
+                        };
+                    }
+                    else
+                    {
+                        toolContentPayload = _json.Serialize(res);
+                    }
                     toolResults.Add(new Dictionary<string, object>
                     {
                         { "type", "tool_result" },
                         { "tool_use_id", tuId },
-                        { "content", _json.Serialize(res) },
+                        { "content", toolContentPayload },
                         { "is_error", !ok }
                     });
                 }
@@ -1633,6 +1825,8 @@ namespace AIEngineer.AutoCAD
             string systemPrompt,
             List<DirectTurnRecord> history,
             string userMessage,
+            string initialImageB64,
+            string initialImageMime,
             Func<string, Dictionary<string, object>, Dictionary<string, object>> execTool,
             Action<string> onProgress,
             Control uiControl,
@@ -1647,9 +1841,9 @@ namespace AIEngineer.AutoCAD
             };
 
             if (useChat)
-                return RunOpenAIChatCompletionsLoop(cleanBase + "/chat/completions", headers, model, systemPrompt, history, userMessage, execTool, onProgress, uiControl, isArabic);
+                return RunOpenAIChatCompletionsLoop(cleanBase + "/chat/completions", headers, model, systemPrompt, history, userMessage, initialImageB64, initialImageMime, execTool, onProgress, uiControl, isArabic);
 
-            return RunOpenAIResponsesLoop(cleanBase + "/responses", headers, model, systemPrompt, history, userMessage, execTool, onProgress, uiControl, isArabic);
+            return RunOpenAIResponsesLoop(cleanBase + "/responses", headers, model, systemPrompt, history, userMessage, initialImageB64, initialImageMime, execTool, onProgress, uiControl, isArabic);
         }
 
         private string RunOpenAIResponsesLoop(
@@ -1659,6 +1853,8 @@ namespace AIEngineer.AutoCAD
             string systemPrompt,
             List<DirectTurnRecord> history,
             string userMessage,
+            string initialImageB64,
+            string initialImageMime,
             Func<string, Dictionary<string, object>, Dictionary<string, object>> execTool,
             Action<string> onProgress,
             Control uiControl,
@@ -1687,11 +1883,29 @@ namespace AIEngineer.AutoCAD
                     });
                 }
             }
-            inputItems.Add(new Dictionary<string, object>
+            string formattedOaiFirst = FormatUserTextWithPendingAudit(userMessage, ref pendingAudit);
+            if (!string.IsNullOrEmpty(initialImageB64))
             {
-                { "role", "user" },
-                { "content", FormatUserTextWithPendingAudit(userMessage, ref pendingAudit) }
-            });
+                string dataUrl = "data:" + (string.IsNullOrEmpty(initialImageMime) ? "image/png" : initialImageMime) + ";base64," + initialImageB64;
+                inputItems.Add(new Dictionary<string, object>
+                {
+                    { "role", "user" },
+                    { "content", new object[]
+                        {
+                            new Dictionary<string, object> { { "type", "input_text" }, { "text", formattedOaiFirst } },
+                            new Dictionary<string, object> { { "type", "input_image" }, { "image_url", dataUrl } }
+                        }
+                    }
+                });
+            }
+            else
+            {
+                inputItems.Add(new Dictionary<string, object>
+                {
+                    { "role", "user" },
+                    { "content", formattedOaiFirst }
+                });
+            }
 
             List<object> tools = new List<object>();
             foreach (Dictionary<string, object> spec in SelectRelevantToolSpecs(userMessage))
@@ -1788,6 +2002,7 @@ namespace AIEngineer.AutoCAD
                 // Append raw model output items (including reasoning/encrypted_content & function_call)
                 foreach (object outItem in output) inputItems.Add(outItem);
 
+                List<object> oaiRespImages = new List<object>();
                 foreach (Dictionary<string, object> fc in fnCalls)
                 {
                     string callId = GetStr(fc, "call_id", "");
@@ -1801,11 +2016,31 @@ namespace AIEngineer.AutoCAD
                     bool ok = res != null && res.ContainsKey("ok") && res["ok"] is bool && (bool)res["ok"];
                     if (ok && IsActionTool(fnName)) hasMutated = true;
                     if (ok && string.Equals(fnName, "undo_last_action", StringComparison.OrdinalIgnoreCase) && res.ContainsKey("undone_steps")) hasUndone = true;
+                    string rVisB64, rVisMime;
+                    if (ExtractAndStripVisionImage(res, out rVisB64, out rVisMime))
+                    {
+                        oaiRespImages.Add(new Dictionary<string, object>
+                        {
+                            { "type", "input_image" },
+                            { "image_url", "data:" + rVisMime + ";base64," + rVisB64 }
+                        });
+                    }
                     inputItems.Add(new Dictionary<string, object>
                     {
                         { "type", "function_call_output" },
                         { "call_id", callId },
                         { "output", _json.Serialize(res) }
+                    });
+                }
+                if (oaiRespImages.Count > 0)
+                {
+                    List<object> visContent = new List<object>();
+                    visContent.Add(new Dictionary<string, object> { { "type", "input_text" }, { "text", "[Attached visual CAD PNG snapshot(s) from capture_visual_view]" } });
+                    visContent.AddRange(oaiRespImages);
+                    inputItems.Add(new Dictionary<string, object>
+                    {
+                        { "role", "user" },
+                        { "content", visContent }
                     });
                 }
             }
@@ -1822,6 +2057,8 @@ namespace AIEngineer.AutoCAD
             string systemPrompt,
             List<DirectTurnRecord> history,
             string userMessage,
+            string initialImageB64,
+            string initialImageMime,
             Func<string, Dictionary<string, object>, Dictionary<string, object>> execTool,
             Action<string> onProgress,
             Control uiControl,
@@ -1851,7 +2088,25 @@ namespace AIEngineer.AutoCAD
                     });
                 }
             }
-            messages.Add(new Dictionary<string, object> { { "role", "user" }, { "content", FormatUserTextWithPendingAudit(userMessage, ref pendingAudit) } });
+            string formattedChatFirst = FormatUserTextWithPendingAudit(userMessage, ref pendingAudit);
+            if (!string.IsNullOrEmpty(initialImageB64))
+            {
+                string dataUrl = "data:" + (string.IsNullOrEmpty(initialImageMime) ? "image/png" : initialImageMime) + ";base64," + initialImageB64;
+                messages.Add(new Dictionary<string, object>
+                {
+                    { "role", "user" },
+                    { "content", new object[]
+                        {
+                            new Dictionary<string, object> { { "type", "text" }, { "text", formattedChatFirst } },
+                            new Dictionary<string, object> { { "type", "image_url" }, { "image_url", new Dictionary<string, object> { { "url", dataUrl } } } }
+                        }
+                    }
+                });
+            }
+            else
+            {
+                messages.Add(new Dictionary<string, object> { { "role", "user" }, { "content", formattedChatFirst } });
+            }
 
             List<object> tools = new List<object>();
             foreach (Dictionary<string, object> spec in SelectRelevantToolSpecs(userMessage))
@@ -1931,6 +2186,7 @@ namespace AIEngineer.AutoCAD
                 }
 
                 messages.Add(msg);
+                List<object> chatVisImages = new List<object>();
                 foreach (object tcObj in toolCalls)
                 {
                     Dictionary<string, object> tc = AsDict(tcObj);
@@ -1947,11 +2203,32 @@ namespace AIEngineer.AutoCAD
                     bool ok = res != null && res.ContainsKey("ok") && res["ok"] is bool && (bool)res["ok"];
                     if (ok && IsActionTool(fnName)) hasMutated = true;
                     if (ok && string.Equals(fnName, "undo_last_action", StringComparison.OrdinalIgnoreCase) && res.ContainsKey("undone_steps")) hasUndone = true;
+                    string cVisB64, cVisMime;
+                    if (ExtractAndStripVisionImage(res, out cVisB64, out cVisMime))
+                    {
+                        string dataUrl = "data:" + cVisMime + ";base64," + cVisB64;
+                        chatVisImages.Add(new Dictionary<string, object>
+                        {
+                            { "type", "image_url" },
+                            { "image_url", new Dictionary<string, object> { { "url", dataUrl } } }
+                        });
+                    }
                     messages.Add(new Dictionary<string, object>
                     {
                         { "role", "tool" },
                         { "tool_call_id", tcId },
                         { "content", _json.Serialize(res) }
+                    });
+                }
+                if (chatVisImages.Count > 0)
+                {
+                    List<object> visContent = new List<object>();
+                    visContent.Add(new Dictionary<string, object> { { "type", "text" }, { "text", "[Attached visual CAD PNG snapshot(s) from capture_visual_view]" } });
+                    visContent.AddRange(chatVisImages);
+                    messages.Add(new Dictionary<string, object>
+                    {
+                        { "role", "user" },
+                        { "content", visContent }
                     });
                 }
             }
@@ -2096,7 +2373,7 @@ namespace AIEngineer.AutoCAD
                 "1. NEVER say 'I cannot draw', 'I am read-only', 'Switch to Project Agent', or 'I lack drawing access'. You HAVE full read/write/select CAD tools right here!\n" +
                 "2. CHECK UNITS & REAL DRAWING SPACE FIRST: Before drawing, selecting, or answering questions about an existing drawing, call `inspect_drawing` to read `insunits`, `units_per_cm`, `units_per_m`, `current_space`, `named_blocks_total`, `named_visible_blocks_total`, `anonymous_system_blocks_total`, `named_block_counts`, `anonymous_or_system_block_counts`, `paperspace_layouts`, `recent_tail_layer_counts`, `recent_tail_entities`, and `extents`. Convert metric units cleanly (`value_in_drawing_units = cm * units_per_cm` = `m * units_per_m`). Note: when `insunits` is `Undefined` (unitless, `code=0`), check existing extents/entities and mention the scale used!\n" +
                 "3. ACCURATE BLOCK COUNTING IN REAL DRAWINGS: In real AutoCAD files, ModelSpace often contains BOTH user-named blocks (`named_blocks_total`, e.g., lamps/panels/PLC/connectors) AND internal anonymous/system blocks (`*X...` dimensions/tables, `AVE_RENDER`, `AVE_GLOBAL` in `anonymous_or_system_block_counts`), plus blocks inside PaperSpace Layouts (`paperspace_layouts`) or hidden Off/Frozen layers. ALWAYS state the **real user-named visible blocks count FIRST** and list anonymous/system/hidden/PaperSpace counts separately so the count matches what the engineer sees on screen! When querying/selecting/copying all user blocks, pass `entity_type: \"BlockReference\", exclude_anonymous: true, exclude_system: true` (omit `block_name` unless filtering a specific block).\n" +
-                "4. MANDATORY BLOCK LEGEND TOOL (`draw_block_legend`): Whenever the engineer asks for a Block Legend / Schedule / Key Table ('جدول البلوكات', 'مفاتيح البلوكات', 'شكل البلوك والوصف والعدد', 'block legend', 'separating table from drawing'), NEVER hand-craft lines and SHX `text` via `draw_entities`! ALWAYS call `draw_block_legend` with clear `descriptions` for every named block (e.g. `{block_name, description}` entries). `draw_block_legend` automatically uses TrueType Arial Unicode MText (NO `????` boxes), scales real centered block symbol thumbnails inside `شكل البلوك` while preserving each block's ModelSpace color (Red, Cyan, etc.), sizes grid rows cleanly without merged-header divider glitches, separates the table cleanly outside the drawing bounds, and zooms onto it!\n" +
+                "4. MANDATORY BLOCK LEGEND TOOL (`draw_block_legend`): Whenever the engineer asks for a Block Legend / Schedule / Key Table ('جدول البلوكات', 'مفاتيح البلوكات', 'شكل البلوك والوصف والعدد', 'block legend', 'separating table from drawing'), NEVER hand-craft lines and SHX `text` via `draw_entities`! ALWAYS call `draw_block_legend`! By default `draw_block_legend` automatically pulls verified specs from the Project Legend DB (`use_project_db: true`), so extract/verify the Legend via `manage_project_legend_db` first instead of guessing descriptions from thin air. `draw_block_legend` uses TrueType Arial Unicode MText, scales real centered block symbol thumbnails preserving colors, separates the table outside drawing bounds, and zooms onto it!\n" +
                 "5. REMOVING OLD/BROKEN TABLES ON LARGE DRAWINGS (`query_entities` with `order: 'newest_first'`): On drawings with thousands of entities (like 15,000+), recently drawn or broken overlapping AI tables sit at the TAIL of ModelSpace. Inspect `inspect_drawing.recent_tail_entities` / `recent_tail_layer_counts` AND call `query_entities(order: 'newest_first', limit: 200)` or `query_entities(layer: ..., order: 'newest_first')` to find old table lines/polylines/texts, pass their handles to `delete_entities` or `draw_block_legend(clear_handles: [...], clear_layers: [...])` BEFORE drawing the clean separated legend!\n" +
                 "6. REAL ON-SCREEN SELECTION (`select_entities`): Whenever the engineer asks to **select** or **highlight** items in the drawing ('حدد', 'اعمل تحديد', 'select', 'تظليل'), DO NOT just run `query_entities`! Call `select_entities` (with `entity_type: \"BlockReference\"` or handles, `zoom: true`). **NEVER pass `highlight_box: true` on `select_entities` unless the engineer explicitly asks to draw a box/frame ('مربع'/'إطار')!** NEVER call `select_entities` as a substitute when the engineer asked to convert/draw/modify entities — run the real conversion/drawing tool directly!\n" +
                 "6b. SAFE TARGETED BLOCK RECOLORING, RENAMING & LEGEND SYNC (`modify_entities`): NEVER pass `layer_filter: \"0\"` to `modify_entities` when changing a specific block — blocks normally reside on Layer `0` alongside thousands of unrelated lines! Always pass `block_name` (or `handles`/`selected_only`) directly (e.g. `modify_entities(block_name: \"connector\", color_index: 4, new_block_name: \"terminals\")`). To genuinely rename a CAD block definition (`BlockTableRecord`), pass `new_block_name` inside `modify_entities` (NEVER hack legend MText to fake a block rename!). `modify_entities` automatically syncs matching thumbnails and block names in any existing `_AI_BLOCK_LEGEND` and focuses zoom cleanly — so do NOT call `draw_block_legend` right after `modify_entities` unless no legend exists yet or descriptions changed! Never pass `confirm_bulk_layer: true` unless the user literally asked to alter an entire layer.\n" +
@@ -2157,6 +2434,7 @@ namespace AIEngineer.AutoCAD
                 "   - First call `manage_project_legend_db(action: 'get_catalog')` or `manage_project_legend_db(action: 'extract_from_drawing')` (or ask the engineer to select the Legend schedule and call `action: 'extract_from_selection'`) to extract every block type's Watt/VA/voltage/emergency spec (automatically resolving 'AS ABOVE' rows).\n" +
                 "   - When the engineer states or corrects a block's spec (e.g. '60x60 = 45W', 'APPE = 22W'), immediately persist it via `manage_project_legend_db(action: 'set_item', block_name: '...', watt: ..., description: '...')` — NEVER pretend you saved an 'internal DB' in chat text without calling the tool!\n" +
                 "   - `project_database.json` and `circuit_memory` persist PERMANENTLY ON DISK across AutoCAD & PC restarts (for saved `.dwg` files) and are readable by external tools; also when tracing circuits with `find_blocks_along_path(include_electrical_calc: true)`, mixed fixtures auto-read exact Wattages from the DB and circuit tables stack cleanly by panel column (`stack_by_panel: true` by default — circuits of the SAME panel stack vertically underneath, and a NEW panel starts a column to the right). To build a full Panel Schedule, Cable/Breaker Sizing, and Total Panel Load from verified saved circuits, call `generate_panel_schedule_and_sld(source: 'saved_memory', ...)`!\n" +
+                "6p. VISUAL INSPECTION OF SELECTION / VIEWPORT (`capture_visual_view`): Whenever the engineer selects any area (a Legend table, tangled circuit intersection, room, panel schedule) and asks you to LOOK / SEE / ANALYZE IT VISUALLY ('شوف الجزء المحدد بصرياً', 'اقرأ الصورة', 'look visually'), OR when automatic text/geometry extraction looks ambiguous: call `capture_visual_view(scope: 'selection' | 'viewport' | 'bbox', annotate_block_names: true)` to render and visually inspect a high-resolution PNG of the exact CAD entities, original text, and cyan `[BlockName]` badges! If you visually read a Legend table, immediately persist all verified block names, descriptions, and wattages into `manage_project_legend_db(action: 'set_items', ...)`!\n" +
                 "7. SAFE COPYING OUTSIDE LARGE DRAWINGS & FRAMING: Whenever asked to copy elements outside the drawing ('نسخة خارج المخطط') or put ONE frame/box around them ('مربع واحد'), use `copy_entities` with `entity_type: \"BlockReference\"` (or handles/filters), `auto_offset_outside: \"right\"`, `draw_frame: true` + concise `frame_label` if they want one bounding box around all copies, and `select_copied: true` / `zoom: true`.\n" +
                 "8. GEOMETRY PRECISION & SELF-VERIFICATION: When placing shapes side-by-side at a clear distance, inspect the exact `bounds` returned by `draw_entities` and call `measure_and_compare` (mode='distance'); if ANY coordinate or gap differs from what the engineer requested, IMMEDIATELY correct it using `modify_entities` BEFORE giving your final answer!\n" +
                 "9. STRICT TRUTH & NO HALLUCINATION: NEVER claim you extracted coordinates/schedules/BOQ, calculated/distributed lighting, exported `.stf`/Excel/PDF files, cleaned/purged/compared drawings, added arrows/tables/clouds, deleted, aligned, arrayed, separated, selected, renamed, converted into a block, or drew anything unless the corresponding tool (`lighting_design_engine`, `export_dialux_stf`, `extract_load_schedule`, `quantity_takeoff`, `manage_attributes`, `text_tools`, `advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`, `export_to_excel`, `import_excel_table`, `annotate_block_coordinates`, `draw_block_legend`, `draw_entities`, `delete_entities`, `copy_entities`, `modify_entities`, `create_block`, `convert_matching_shapes_to_block`, `select_entities`, `zoom_view`) ACTUALLY ran and returned `ok: true` in this turn! NEVER copy or write bracketed logs like `[Executed tools in AutoCAD: ...]` in your reply!\n" +
@@ -2196,7 +2474,7 @@ namespace AIEngineer.AutoCAD
             string low = userMessage.ToLowerInvariant();
             HashSet<string> allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             AddToolNames(allowed,
-                "inspect_drawing", "query_entities", "select_entities",
+                "inspect_drawing", "query_entities", "select_entities", "capture_visual_view",
                 "zoom_view", "undo_last_action", "get_plugin_diagnostics");
 
             bool matchedDomain = false;
@@ -2535,6 +2813,8 @@ namespace AIEngineer.AutoCAD
                     { "clear_layers", ArrProp("string", "Optional non-0 layer names of old tables to erase BEFORE measuring drawing bounds.") },
                     { "visible_only", Prop("boolean", "Only count visible block insertions on On/Thawed layers (default false).") },
                     { "include_system_blocks", Prop("boolean", "Include internal AVE_* / ASHADE system blocks (default false).") },
+                    { "use_project_db", Prop("boolean", "Automatically pull verified fixture descriptions & wattages from the Project Legend Database (default true).") },
+                    { "override_db_descriptions", Prop("boolean", "Prefer explicit chat descriptions over stored Project Legend DB entries (default false).") },
                     { "export_excel", Prop("boolean", "Also save this Block Legend schedule directly to an Excel .xlsx file cleanly.") },
                     { "excel_path", Prop("string", "Optional destination .xlsx file path when export_excel=true.") },
                     { "zoom", Prop("boolean", "Zoom viewport directly onto the completed legend (default true).") },
@@ -3297,6 +3577,21 @@ namespace AIEngineer.AutoCAD
                     { "export_excel", Prop("boolean", "Also export the Project Legend DB catalog to RTL Excel .xlsx (default false).") },
                     { "excel_path", Prop("string", "Optional Excel .xlsx path for export_excel or import_excel.") },
                     { "sheet_name", Prop("string", "Optional Excel worksheet name for import_excel.") }
+                })));
+
+            tools.Add(Tool("capture_visual_view",
+                "Render a crisp high-resolution vector PNG image directly from AutoCAD entities (currently selected area, active viewport, explicit bbox, or whole drawing) preserving colors, block geometry, exact DBText/MText/Attributes, dashed cyan selection frames, and non-overlapping [BlockName] badges, and attach the image visually for multimodal inspection.",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "scope", Prop("string", "Capture region: 'auto' (selection if non-empty, else active viewport, else extents), 'selection', 'viewport', 'bbox', or 'extents'.") },
+                    { "bbox", ArrProp("number", "Explicit 2D capture box [minX, minY, maxX, maxY] when scope='bbox'.") },
+                    { "handles", ArrProp("string", "Optional explicit entity hex handles to frame.") },
+                    { "padding_ratio", Prop("number", "Margin padding ratio around target region, 0.02..0.50 (default 0.12).") },
+                    { "max_dimension_px", Prop("integer", "Longest image side in pixels, 640..2400 (default 1600).") },
+                    { "include_surrounding", Prop("boolean", "Render surrounding visible text/geometry inside the padded box around selected entities (default true, essential when inspecting partial Legend selections).") },
+                    { "highlight_selection", Prop("boolean", "Draw subtle dashed cyan boxes around explicitly selected entities (default true).") },
+                    { "annotate_block_names", Prop("boolean", "Overlay compact non-overlapping [BlockName] pill badges next to visible named blocks (default true).") },
+                    { "save_path", Prop("string", "Optional destination PNG file path (defaults to %LOCALAPPDATA%\\AI-Engineer\\visual_captures).") }
                 })));
 
             return tools;

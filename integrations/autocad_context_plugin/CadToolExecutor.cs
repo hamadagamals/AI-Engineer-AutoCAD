@@ -328,6 +328,8 @@ namespace AIEngineer.AutoCAD
                         return AuditElectricalDrawing(doc, args);
                     case "manage_project_legend_db":
                         return ManageProjectLegendDb(doc, args);
+                    case "capture_visual_view":
+                        return CaptureVisualView(doc, args);
                     case "manage_attributes":
                         return ManageAttributes(doc, args);
                     case "text_tools":
@@ -1533,6 +1535,8 @@ namespace AIEngineer.AutoCAD
             bool vdPass = GetBool(args, "vd_pass", true);
             bool stackByPanel = GetBool(args, "stack_by_panel", false);
             bool replaceAllLegends = GetBool(args, "replace_all_legends", false);
+            bool useProjectDb = GetBool(args, "use_project_db", true);
+            bool overrideDbDescriptions = GetBool(args, "override_db_descriptions", false);
             string panelTableKey = (GetStr(args, "panel_table_key") ?? "").Trim().ToUpperInvariant();
             string circuitTableKey = (GetStr(args, "circuit_table_key") ?? "").Trim().ToUpperInvariant();
             string xdataTag = (!string.IsNullOrEmpty(panelTableKey) && !string.IsNullOrEmpty(circuitTableKey))
@@ -1853,10 +1857,36 @@ namespace AIEngineer.AutoCAD
                         }
 
                         string desc;
-                        if (descMap.TryGetValue(item.Name, out desc) && !string.IsNullOrWhiteSpace(desc))
+                        ProjectLegendSpecItem dbSpec;
+                        bool hasChatDesc = descMap.TryGetValue(item.Name, out desc) && !string.IsNullOrWhiteSpace(desc);
+                        if (overrideDbDescriptions && hasChatDesc)
+                        {
                             item.Description = desc;
+                        }
+                        else if (useProjectDb && TryGetProjectLegendSpec(doc, item.Name, out dbSpec) && dbSpec != null &&
+                                 !string.IsNullOrWhiteSpace(dbSpec.Description) && !IsCircuitTagOrFloorNoteNoise(dbSpec.Description))
+                        {
+                            string tagPrefix = (!string.IsNullOrWhiteSpace(dbSpec.LegendTag) &&
+                                                !string.Equals(dbSpec.LegendTag.Trim(), item.Name.Trim(), StringComparison.OrdinalIgnoreCase))
+                                ? ("[" + dbSpec.LegendTag.Trim() + "] ")
+                                : "";
+                            string dbDescText = dbSpec.Description.Trim();
+                            string wattSuffix = "";
+                            if (dbSpec.Watt.HasValue && dbSpec.Watt.Value > 0 &&
+                                !Regex.IsMatch(dbDescText, @"(?:\d\s*(?:W|WATT|WATTS|KW)|واط|وات)", RegexOptions.IgnoreCase))
+                            {
+                                wattSuffix = " (" + Math.Round(dbSpec.Watt.Value, 1).ToString("0.#", CultureInfo.InvariantCulture) + "W)";
+                            }
+                            item.Description = tagPrefix + dbDescText + wattSuffix;
+                        }
+                        else if (hasChatDesc)
+                        {
+                            item.Description = desc;
+                        }
                         else
+                        {
                             item.Description = "بلوك هندسي: " + item.Name;
+                        }
                         totalBlocksRepresented += chosenCount;
                         entries.Add(item);
                     }

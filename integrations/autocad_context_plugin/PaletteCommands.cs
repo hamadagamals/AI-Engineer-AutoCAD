@@ -658,6 +658,7 @@ namespace AIEngineer.AutoCAD
         private readonly ComboBox _coordSortCombo = new ComboBox();
         private readonly FlowLayoutPanel _sortRow = new FlowLayoutPanel();
         private readonly FlowLayoutPanel _quickBar = new FlowLayoutPanel();
+        private readonly Button _qVisual = new Button();
         private readonly Button _qLighting = new Button();
         private readonly Button _qTakeoff = new Button();
         private readonly Button _qLvCalc = new Button();
@@ -674,6 +675,7 @@ namespace AIEngineer.AutoCAD
         private readonly Button _voiceMic = new Button();
         private readonly CheckBox _voiceAutoSend = new CheckBox();
         private readonly CheckBox _voiceSpeakReply = new CheckBox();
+        private readonly CheckBox _attachVisualSelection = new CheckBox();
         private readonly Button _cancel = new Button();
         private readonly Button _commitDrawing = new Button();
         private readonly Button _rollbackDrawing = new Button();
@@ -898,6 +900,9 @@ namespace AIEngineer.AutoCAD
                 _directConfig.Save();
                 if (!_voiceSpeakReply.Checked) VoiceSpeechOutput.Stop();
             };
+            _attachVisualSelection.AutoSize = true;
+            _attachVisualSelection.Margin = new Padding(4, 5, 2, 2);
+            _attachVisualSelection.Checked = false;
             _voiceTimer.Interval = 300;
             _voiceTimer.Tick += async delegate
             {
@@ -934,6 +939,7 @@ namespace AIEngineer.AutoCAD
             actionButtons.Controls.Add(_voiceMic);
             actionButtons.Controls.Add(_voiceAutoSend);
             actionButtons.Controls.Add(_voiceSpeakReply);
+            actionButtons.Controls.Add(_attachVisualSelection);
             actionButtons.Controls.Add(_commitDrawing);
             actionButtons.Controls.Add(_rollbackDrawing);
             actionButtons.Controls.Add(_cancel);
@@ -943,7 +949,7 @@ namespace AIEngineer.AutoCAD
             _quickBar.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             _quickBar.WrapContents = true;
             _quickBar.Margin = new Padding(0, 3, 0, 2);
-            Button[] quickButtons = new Button[] { _qLighting, _qTakeoff, _qLvCalc, _qLegend, _qLoads, _qQa };
+            Button[] quickButtons = new Button[] { _qVisual, _qLighting, _qTakeoff, _qLvCalc, _qLegend, _qLoads, _qQa };
             foreach (Button qb in quickButtons)
             {
                 qb.AutoSize = true;
@@ -954,6 +960,13 @@ namespace AIEngineer.AutoCAD
                 qb.Cursor = Cursors.Hand;
                 _quickBar.Controls.Add(qb);
             }
+            _qVisual.Click += delegate
+            {
+                _attachVisualSelection.Checked = true;
+                InsertEditablePrompt(
+                    "شوف الجزء اللي أنا محدده بصرياً وحلله بدقة (ولو ليجند استخرج مواصفات وقدرات كل بلوك واحفظها في قاعدة البيانات)",
+                    "Visually inspect my selected CAD area and analyze it accurately (if it's a Legend, extract every block's specs/wattage and save to Project DB)");
+            };
             _qLighting.Click += delegate
             {
                 InsertEditablePrompt(
@@ -1242,6 +1255,7 @@ namespace AIEngineer.AutoCAD
             _includeDrawingContext.ForeColor = fgMain;
             _voiceAutoSend.ForeColor = fgMain;
             _voiceSpeakReply.ForeColor = fgMain;
+            _attachVisualSelection.ForeColor = Color.FromArgb(125, 249, 255);
 
             Button[] stdBtns = new Button[] { _apiSettings, _refresh, _start, _cancel, _voiceMic };
             foreach (Button b in stdBtns)
@@ -1259,7 +1273,7 @@ namespace AIEngineer.AutoCAD
             _send.FlatAppearance.BorderColor = Color.FromArgb(59, 130, 246);
             _send.Cursor = Cursors.Hand;
 
-            Button[] chips = new Button[] { _qLighting, _qTakeoff, _qLvCalc, _qLegend, _qLoads, _qQa };
+            Button[] chips = new Button[] { _qVisual, _qLighting, _qTakeoff, _qLvCalc, _qLegend, _qLoads, _qQa };
             foreach (Button qb in chips)
             {
                 qb.BackColor = chipBg;
@@ -1278,6 +1292,8 @@ namespace AIEngineer.AutoCAD
             PopulateSortOrderCombo();
             _sortRow.Visible = IsDirectMode;
             _quickBar.Visible = IsDirectMode;
+            _attachVisualSelection.Visible = IsDirectMode;
+            _qVisual.Text = IsArabic ? "👁️ رؤية بصرياً" : "👁️ Visual Check";
             _qLighting.Text = IsArabic ? "💡 إنارة" : "💡 Lighting";
             _qTakeoff.Text = IsArabic ? "📐 حصر كميات" : "📐 BOQ";
             _qLvCalc.Text = IsArabic ? "⚡ كابل/قاطع" : "⚡ LV Calc";
@@ -1288,6 +1304,7 @@ namespace AIEngineer.AutoCAD
             _send.Text = IsArabic ? "اسأل AI" : "Ask AI";
             _voiceAutoSend.Text = IsArabic ? "إرسال تلقائي" : "Auto-send";
             _voiceSpeakReply.Text = IsArabic ? "🔊 نطق الرد" : "🔊 Speak";
+            _attachVisualSelection.Text = IsArabic ? "👁️ رؤية المحدد" : "👁️ See Selection";
             UpdateVoiceMicVisuals();
             _commitDrawing.Text = IsArabic ? "✅ اعتماد الرسم (تمام)" : "✅ Commit (تمام)";
             _rollbackDrawing.Text = IsArabic ? "❌ تراجع" : "❌ Rollback";
@@ -1917,13 +1934,19 @@ namespace AIEngineer.AutoCAD
                 _transcript.ScrollToCaret();
 
                 DirectAgentReply reply = await _directSession.SendAsync(
-                    this, _directConfig, provider, model, content.Trim(), IsArabic, SetStatus);
+                    this, _directConfig, provider, model, content.Trim(), IsArabic, SetStatus, _attachVisualSelection.Checked);
 
                 if (!string.IsNullOrEmpty(reply.FallbackNotice))
                 {
                     _transcript.AppendText(
                         (IsArabic ? "ℹ️ [تنبيه/تحويل تلقائي]: " : "ℹ️ [Auto fallback]: ") +
                         reply.FallbackNotice + Environment.NewLine);
+                }
+                if (reply.VisualCaptureAttached && !string.IsNullOrEmpty(reply.VisualCaptureInfo))
+                {
+                    _transcript.AppendText(
+                        (IsArabic ? "👁️ [رؤية بصرية مرفقة]: " : "👁️ [Visual capture attached]: ") +
+                        reply.VisualCaptureInfo + Environment.NewLine);
                 }
                 if (reply.ExecutedTools != null && reply.ExecutedTools.Count > 0)
                 {
@@ -2188,6 +2211,7 @@ namespace AIEngineer.AutoCAD
             _voiceMic.Enabled = !voiceBlocked || _voiceRecorder.IsRecording;
             _voiceAutoSend.Enabled = !voiceBlocked;
             _voiceSpeakReply.Enabled = true;
+            _attachVisualSelection.Enabled = !voiceBlocked;
 
             if (IsDirectMode)
             {

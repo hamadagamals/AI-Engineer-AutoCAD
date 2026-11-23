@@ -136,7 +136,7 @@ namespace AcCoreRegressionHarness
                 int coreSchemaErrors = 0;
                 int newToolDescErrors = 0;
                 HashSet<string> strictTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-                    "find_blocks_along_path", "trace_all_circuits", "generate_panel_schedule_and_sld", "audit_electrical_drawing", "manage_project_legend_db"
+                    "find_blocks_along_path", "trace_all_circuits", "generate_panel_schedule_and_sld", "audit_electrical_drawing", "manage_project_legend_db", "capture_visual_view"
                 };
 
                 foreach (Dictionary<string, object> s in specs)
@@ -168,7 +168,7 @@ namespace AcCoreRegressionHarness
                     }
                 }
                 ed.WriteMessage("\nAUTOCAD_TOOLS=" + specs.Count + "|SCHEMA_ERRORS=" + (coreSchemaErrors + newToolDescErrors) + "\n");
-                AssertTrue(specs.Count == 38, "Expected 38 tools, got " + specs.Count);
+                AssertTrue(specs.Count == 39, "Expected 39 tools, got " + specs.Count);
                 AssertTrue(coreSchemaErrors == 0 && newToolDescErrors == 0, "Schema errors found");
 
                 MethodInfo selectSpecs = agentType.GetMethod("SelectRelevantToolSpecs", flags);
@@ -196,7 +196,7 @@ namespace AcCoreRegressionHarness
                     "TraceAllCircuits", "ScanAllCircuitsInternal", "ComputeDrawingFixtureMetrics",
                     "CollectAllCircuitCandidateCurveIds", "TraceSingleCircuitComponentCached", "BuildCircuitScheduleSheet",
                     "GeneratePanelScheduleAndSld", "AuditElectricalDrawing", "DrawSingleLineDiagram", "BuildBalancedPanelSchedule",
-                    "ManageProjectLegendDb"
+                    "ManageProjectLegendDb", "CaptureVisualView"
                 };
                 foreach (string jm in jitMethods)
                 {
@@ -785,6 +785,140 @@ namespace AcCoreRegressionHarness
                         }
                     }
                     trDel11.Commit();
+                }
+
+                // 4j. Test 12: Multi-Column Legend Extraction + DB-Driven draw_block_legend + Visual PNG Capture
+                List<ObjectId> t12TempIds = new List<ObjectId>();
+                ObjectId t12F1 = ObjectId.Null, t12F1e = ObjectId.Null, t12D1 = ObjectId.Null, t12D2 = ObjectId.Null, t12D2e = ObjectId.Null;
+                using (Transaction tr12 = db.TransactionManager.StartTransaction())
+                {
+                    BlockTable bt = (BlockTable)tr12.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    t12F1 = EnsureRectBlock(tr12, bt, "F1", 0.30, 0.10, 2);
+                    t12F1e = EnsureRectBlock(tr12, bt, "F1E", 0.30, 0.10, 1);
+                    t12D1 = EnsureRectBlock(tr12, bt, "D1", 0.25, 0.25, 4);
+                    t12D2 = EnsureRectBlock(tr12, bt, "D2", 0.25, 0.25, 6);
+                    t12D2e = EnsureRectBlock(tr12, bt, "D2E", 0.25, 0.25, 1);
+                    BlockTableRecord ms = (BlockTableRecord)tr12.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                    // Left Legend Column (Cx=-60.0): D1 (15W), D3-skipped? No, D1 + F1? Left col: D1=15W, D2=23W, D2E overlapping D2 at row 2? Put D2 & D2E in right col!
+                    // Headers above left column
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-60.2, 23.0, 0), "LEGEND:", 0.25, "0"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-60.2, 22.0, 0), "SYMBOL", 0.20, "0"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-57.5, 22.0, 0), "DESCRIPTION", 0.20, "0"));
+
+                    // Left col (X=-60.0): D1=15W, F1=36W (make Left col have MORE text lines than Right col!)
+                    t12TempIds.Add(InsertBlock(ms, tr12, t12D1, new Point3d(-60.0, 20.5, 0), "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-59.3, 20.5, 0), "D1", 0.18, "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-58.5, 20.7, 0), "WEATHER PROOF LED LIGHTING FIXTURE 15 WATT, DOWNLIGHT", 0.16, "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-58.5, 20.4, 0), "SURFACE MOUNTED 230V IP54", 0.16, "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-58.5, 20.1, 0), "4000K 2200LM", 0.16, "E-FIXTURES"));
+
+                    t12TempIds.Add(InsertBlock(ms, tr12, t12D2, new Point3d(-60.0, 19.0, 0), "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-59.3, 19.0, 0), "D2", 0.18, "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-58.5, 19.2, 0), "LED LIGHTING FIXTURE 23 WATT, DOWNLIGHT RECESSED", 0.16, "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-58.5, 18.9, 0), "230V IP54 IK02 2100LM", 0.16, "E-FIXTURES"));
+
+                    // Right col (X=-51.0): F1=36W, F1E=AS ABOVE, plus overlapping D2+D2E with D2E tag -> picks D2E!
+                    t12TempIds.Add(InsertBlock(ms, tr12, t12F1, new Point3d(-51.0, 20.5, 0), "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-50.2, 20.5, 0), "F1", 0.18, "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-49.5, 20.6, 0), "WEATHER PROOF LED LIGHTING FIXTURE 36 WATT, SURFACE", 0.16, "E-FIXTURES"));
+
+                    t12TempIds.Add(InsertBlock(ms, tr12, t12F1e, new Point3d(-51.0, 19.0, 0), "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-50.2, 19.0, 0), "F1E", 0.18, "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-49.5, 19.0, 0), "AS ABOVE BUT WITH EMERGENCY BACKUP BATTERY FOR 1.5 Hrs", 0.16, "E-FIXTURES"));
+
+                    t12TempIds.Add(InsertBlock(ms, tr12, t12D2, new Point3d(-51.0, 17.5, 0), "E-FIXTURES"));
+                    t12TempIds.Add(InsertBlock(ms, tr12, t12D2e, new Point3d(-51.0, 17.5, 0), "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-50.2, 17.5, 0), "D2E", 0.18, "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-49.5, 17.5, 0), "AS ABOVE 23W EMERGENCY BACKUP", 0.16, "E-FIXTURES"));
+
+                    // Far-away floor-plan circuit tag noise aligned vertically at X=-60.0 (Y=-25..-28)
+                    t12TempIds.Add(InsertBlock(ms, tr12, t12D1, new Point3d(-60.0, -25.0, 0), "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-58.5, -25.0, 0), "ELP-B1.2/1", 0.18, "E-LIGHTING"));
+                    t12TempIds.Add(InsertBlock(ms, tr12, t12F1, new Point3d(-60.0, -27.0, 0), "E-FIXTURES"));
+                    t12TempIds.Add(AddText(ms, tr12, new Point3d(-58.5, -27.0, 0), "UP TO NEXT FLOOR", 0.18, "E-LIGHTING"));
+                    tr12.Commit();
+                }
+
+                Dictionary<string, object> r12a = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "manage_project_legend_db",
+                    new Dictionary<string, object> { { "action", "extract_from_drawing" } }
+                });
+                ed.WriteMessage("\nTEST12A=" + jss.Serialize(r12a) + "\n");
+                AssertTrue(GetBoolVal(r12a, "ok") && GetIntVal(r12a, "items_count") == 5, "Test 12A expected exact 5 clean multi-col Legend items");
+                Dictionary<string, Dictionary<string, object>> db12 = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+                ArrayList items12a = r12a["items"] as ArrayList;
+                if (items12a == null) { List<object> il12 = r12a["items"] as List<object>; items12a = il12 != null ? new ArrayList(il12) : null; }
+                AssertTrue(items12a != null, "Test 12A items missing");
+                foreach (object io in items12a)
+                {
+                    Dictionary<string, object> idict = io as Dictionary<string, object>;
+                    if (idict != null) db12[GetStrVal(idict, "block_name")] = idict;
+                }
+                AssertTrue(db12.ContainsKey("D1") && Math.Abs(GetDblVal(db12["D1"], "watt") - 15.0) < 0.1, "Test 12A D1 expected 15W");
+                AssertTrue(db12.ContainsKey("D2") && Math.Abs(GetDblVal(db12["D2"], "watt") - 23.0) < 0.1, "Test 12A D2 expected 23W");
+                AssertTrue(db12.ContainsKey("F1") && Math.Abs(GetDblVal(db12["F1"], "watt") - 36.0) < 0.1, "Test 12A F1 expected 36W (must NOT read Left col 15W!)");
+                AssertTrue(db12.ContainsKey("F1E") && Math.Abs(GetDblVal(db12["F1E"], "watt") - 36.0) < 0.1 && GetBoolVal(db12["F1E"], "is_emergency"), "Test 12A F1E expected 36W inherited from F1");
+                AssertTrue(db12.ContainsKey("D2E") && !GetStrVal(db12["D2E"], "description").Contains("ELP-"), "Test 12A D2E overlapping deduction failed");
+
+                // 12B: draw_block_legend WITHOUT explicit descriptions must auto-pull from Project Legend DB
+                Dictionary<string, object> r12b = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "draw_block_legend",
+                    new Dictionary<string, object> { { "block_names", new string[] { "F1", "F1E" } }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST12B=" + jss.Serialize(r12b) + "\n");
+                AssertTrue(GetBoolVal(r12b, "ok") && GetIntVal(r12b, "row_count") >= 2, "Test 12B draw_block_legend failed");
+                ArrayList rows12b = r12b["rows"] as ArrayList;
+                if (rows12b == null) { List<object> rl12 = r12b["rows"] as List<object>; rows12b = rl12 != null ? new ArrayList(rl12) : null; }
+                bool foundF1DbDesc = false;
+                if (rows12b != null)
+                {
+                    foreach (object ro in rows12b)
+                    {
+                        Dictionary<string, object> rd = ro as Dictionary<string, object>;
+                        if (rd != null && GetStrVal(rd, "block_name") == "F1" && GetStrVal(rd, "description").Contains("36 WATT"))
+                            foundF1DbDesc = true;
+                    }
+                }
+                AssertTrue(foundF1DbDesc, "Test 12B draw_block_legend did not auto-pull 36 WATT F1 description from Project Legend DB");
+
+                // 12C: capture_visual_view PNG rendering verification on Test 12 Legend selection
+                ed.SetImpliedSelection(t12TempIds.ToArray());
+                string capTestPng = Path.Combine(Path.GetTempPath(), "accore_vis_test12c.png");
+                if (File.Exists(capTestPng)) File.Delete(capTestPng);
+                Dictionary<string, object> r12c = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "capture_visual_view",
+                    new Dictionary<string, object> { { "scope", "selection" }, { "annotate_block_names", true }, { "save_path", capTestPng } }
+                });
+                AssertTrue(GetBoolVal(r12c, "ok") && File.Exists(capTestPng), "Test 12C capture_visual_view failed to write PNG");
+                string visB64 = GetStrVal(r12c, "_vision_png_base64");
+                AssertTrue(!string.IsNullOrEmpty(visB64) && visB64.Length > 1000, "Test 12C _vision_png_base64 too small");
+                byte[] pngHdr = File.ReadAllBytes(capTestPng);
+                AssertTrue(pngHdr.Length > 8 && pngHdr[0] == 0x89 && pngHdr[1] == 0x50 && pngHdr[2] == 0x4E && pngHdr[3] == 0x47, "Test 12C invalid PNG magic bytes");
+                ed.WriteMessage("\nTEST12C=OK|W=" + GetIntVal(r12c, "width_px") + "|H=" + GetIntVal(r12c, "height_px") + "|BYTES=" + pngHdr.Length + "\n");
+                ed.SetImpliedSelection(new ObjectId[0]);
+
+                // Cleanup Test 12 temporary entities and files
+                try { if (File.Exists(capTestPng)) File.Delete(capTestPng); } catch { }
+                execTool.Invoke(null, new object[] { doc, "manage_project_legend_db", new Dictionary<string, object> { { "action", "clear_catalog" } } });
+                using (Transaction trDel12 = db.TransactionManager.StartTransaction())
+                {
+                    for (int di = 0; di < t12TempIds.Count; di++)
+                    {
+                        Entity de = trDel12.GetObject(t12TempIds[di], OpenMode.ForWrite, false, true) as Entity;
+                        if (de != null && !de.IsErased) de.Erase(true);
+                    }
+                    BlockTableRecord ms = (BlockTableRecord)trDel12.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
+                    foreach (ObjectId oid in ms)
+                    {
+                        Entity ee = trDel12.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ee != null && !ee.IsErased && string.Equals(ee.Layer ?? "", "_AI_BLOCK_LEGEND", StringComparison.OrdinalIgnoreCase))
+                        {
+                            ee.UpgradeOpen();
+                            ee.Erase(true);
+                        }
+                    }
+                    trDel12.Commit();
                 }
 
                 // 5. Test 3: AuditElectricalDrawing (Orphan + Duplicate + Overload + VD>3% + Unit Mismatch)

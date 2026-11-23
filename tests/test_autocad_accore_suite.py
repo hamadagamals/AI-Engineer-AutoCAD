@@ -32,6 +32,7 @@ def test_accore_regression_harness_and_build_wired() -> None:
     assert "CadSpatialIndex.cs" in build_text
     assert "CadPanelAndQaTools.cs" in build_text
     assert "CadProjectLegendDb.cs" in build_text
+    assert "CadVisualCaptureTools.cs" in build_text
 
 
 def test_live_accoreconsole_regression_suite() -> None:
