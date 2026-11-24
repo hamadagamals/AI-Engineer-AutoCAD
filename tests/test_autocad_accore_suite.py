@@ -14,7 +14,19 @@ ROOT = Path(__file__).resolve().parent.parent
 HARNESS_CS = ROOT / "tests" / "autocad_accore_harness" / "AcCoreRegressionVerifier.cs"
 RUNNER_PS1 = ROOT / "scripts" / "run_autocad_accore_tests.ps1"
 BUILD_PS1 = ROOT / "integrations" / "autocad_context_plugin" / "build.ps1"
-ACCORE_EXE = Path(r"C:\Program Files\Autodesk\AutoCAD 2021\accoreconsole.exe")
+
+
+def _find_accore_exe() -> Path | None:
+    env_root = os.environ.get("AUTOCAD_ROOT", "").strip()
+    if env_root:
+        cand = Path(env_root) / "accoreconsole.exe"
+        if cand.is_file():
+            return cand
+    for yr in range(2030, 2014, -1):
+        cand = Path(rf"C:\Program Files\Autodesk\AutoCAD {yr}\accoreconsole.exe")
+        if cand.is_file():
+            return cand
+    return None
 
 
 def test_accore_regression_harness_and_build_wired() -> None:
@@ -31,15 +43,17 @@ def test_accore_regression_harness_and_build_wired() -> None:
     build_text = BUILD_PS1.read_text(encoding="utf-8")
     assert "CadSpatialIndex.cs" in build_text
     assert "CadPanelAndQaTools.cs" in build_text
+    assert "CadPanelManufacturingTools.cs" in build_text
     assert "CadProjectLegendDb.cs" in build_text
     assert "CadVisualCaptureTools.cs" in build_text
 
 
 def test_live_accoreconsole_regression_suite() -> None:
     if os.environ.get("RUN_ACCORE_TESTS") != "1":
-        pytest.skip("Set RUN_ACCORE_TESTS=1 on Windows with AutoCAD 2021+ installed to run live accoreconsole tests.")
-    if sys.platform != "win32" or not ACCORE_EXE.is_file():
-        pytest.skip("AutoCAD 2021 accoreconsole.exe is not available on this host.")
+        pytest.skip("Set RUN_ACCORE_TESTS=1 on Windows with AutoCAD 2015-2030 installed to run live accoreconsole tests.")
+    accore_exe = _find_accore_exe() if sys.platform == "win32" else None
+    if accore_exe is None:
+        pytest.skip("AutoCAD (2015-2030) accoreconsole.exe is not available on this host.")
 
     proc = subprocess.run(
         [
@@ -49,6 +63,8 @@ def test_live_accoreconsole_regression_suite() -> None:
             "Bypass",
             "-File",
             str(RUNNER_PS1),
+            "-AutoCADRoot",
+            str(accore_exe.parent),
         ],
         cwd=str(ROOT),
         capture_output=True,

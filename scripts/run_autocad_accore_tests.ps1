@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$AutoCADRoot = "C:\Program Files\Autodesk\AutoCAD 2021",
+    [string]$AutoCADRoot = "",
     [string]$PluginDll = ""
 )
 
@@ -14,6 +14,31 @@ if ([string]::IsNullOrWhiteSpace($PluginDll)) {
 $PluginDll = [System.IO.Path]::GetFullPath($PluginDll)
 if (-not (Test-Path -LiteralPath $PluginDll -PathType Leaf)) {
     throw "Plugin DLL not found: $PluginDll"
+}
+
+if ([string]::IsNullOrWhiteSpace($AutoCADRoot) -and -not [string]::IsNullOrWhiteSpace($env:AUTOCAD_ROOT)) {
+    $AutoCADRoot = $env:AUTOCAD_ROOT
+}
+if ([string]::IsNullOrWhiteSpace($AutoCADRoot)) {
+    $candidates = @()
+    for ($yr = 2030; $yr -ge 2015; $yr--) {
+        $candidates += "C:\Program Files\Autodesk\AutoCAD $yr"
+    }
+    $autodeskDir = "C:\Program Files\Autodesk"
+    if (Test-Path -LiteralPath $autodeskDir -PathType Container) {
+        Get-ChildItem -LiteralPath $autodeskDir -Directory -Filter "AutoCAD *" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { $candidates += $_.FullName }
+    }
+    foreach ($cand in $candidates) {
+        if (Test-Path -LiteralPath (Join-Path $cand "accoreconsole.exe") -PathType Leaf) {
+            $AutoCADRoot = $cand
+            break
+        }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($AutoCADRoot)) {
+    throw "AutoCAD installation (accoreconsole.exe) not found for AutoCAD 2015-2030. Pass -AutoCADRoot."
 }
 
 $accore = Join-Path $AutoCADRoot "accoreconsole.exe"
@@ -39,7 +64,7 @@ $prevEnv = $env:AI_ENG_PLUGIN_DLL
 $env:AI_ENG_PLUGIN_DLL = $PluginDll
 
 try {
-    & $compiler /nologo /utf8output /target:library /platform:x64 "/out:$harnessDll" `
+    & $compiler /nologo /utf8output /codepage:65001 /target:library /platform:x64 "/out:$harnessDll" `
         "/reference:$(Join-Path $AutoCADRoot 'acdbmgd.dll')" `
         "/reference:$(Join-Path $AutoCADRoot 'acmgd.dll')" `
         "/reference:$(Join-Path $AutoCADRoot 'accoremgd.dll')" `
@@ -61,7 +86,7 @@ _QUIT _Y
     $cleanLines = $rawLines | ForEach-Object { $_ -replace "\0", "" }
     $cleanText = $cleanLines -join "`n"
 
-    $cleanLines | Select-String -Pattern "AUTOCAD_TOOLS|ROUTER_COUNTS|JIT_PHASE2_OK|TEST1A|TEST1C|TEST2|TEST3|TEST5|TEST6|TEST7|TEST8|TEST9|TEST10|TEST11|TEST12|BENCHMARK_30C_300F_MS|ACCORE_REGRESSION_" | ForEach-Object {
+    $cleanLines | Select-String -Pattern "AUTOCAD_TOOLS|ROUTER_COUNTS|JIT_PHASE2_OK|TEST1A|TEST1C|TEST2|TEST3|TEST5|TEST6|TEST7|TEST8|TEST9|TEST10|TEST11|TEST12|TEST13|BENCHMARK_30C_300F_MS|ACCORE_REGRESSION_" | ForEach-Object {
         Write-Host $_.Line
     }
 

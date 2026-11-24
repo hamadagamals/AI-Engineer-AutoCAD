@@ -3280,6 +3280,7 @@ namespace AIEngineer.AutoCAD
                 : Math.Max(1e-3, 0.05 * unitsPerM);
             if (prof.CircuitLayers.Count > 0)
             {
+                EnsureDocDestroyedHook();
                 lock (s_lastCoordLock) { s_circuitProfileByDb[db.UnmanagedObject] = prof; }
                 return prof;
             }
@@ -3818,6 +3819,7 @@ namespace AIEngineer.AutoCAD
 
         private static void EnsureSidecarLoadedLocked(Document doc, Database db)
         {
+            EnsureDocDestroyedHook();
             if (db == null || db.UnmanagedObject == IntPtr.Zero) return;
             IntPtr dbPtr = db.UnmanagedObject;
             if (s_loadedSidecarForDb.Contains(dbPtr)) return;

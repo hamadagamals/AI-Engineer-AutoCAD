@@ -717,16 +717,19 @@ namespace AIEngineer.Revit.Direct
                 { "export_excel", Prop("boolean", "Export formatted RTL Excel (.xlsx)") },
                 { "excel_path", Prop("string", "Optional destination .xlsx path") }
             })));
-            t.Add(Tool("calculate_lv_electrical", "Deterministic IEC 60364 / ECP LV calculator: design current Ib, breaker In/Icu, derating Ca*Cg, Cu/Al XLPE/PVC cable sizing + parallel runs, AC voltage drop %, PE size, short-circuit Isc + adiabatic check. Supports single load, batch circuits[], OR `from_model_panel` to pull real Revit panel circuits directly!", Obj(new Dictionary<string, object> {
+            t.Add(Tool("calculate_lv_electrical", "Deterministic IEC 60364 / ECP LV calculator: design current Ib, breaker In/Icu, derating Ca*Cg, Cu/Al XLPE/PVC cable sizing + parallel runs, AC voltage drop %, PE size, short-circuit Isc + adiabatic check. Supports single load, fixture_count x fixture_watt/fixture_va, batch circuits[], OR `from_model_panel` to pull real Revit panel circuits directly!", Obj(new Dictionary<string, object> {
                 { "from_model_panel", Prop("string", "Optional Revit panel name (or '*' for all) to automatically calculate every PowerCircuit on that panel") },
                 { "name", Prop("string", "Circuit name") },
-                { "load_type", Prop("string", "power, lighting, socket, motor, or feeder") },
-                { "phases", Prop("integer", "1 or 3") },
+                { "load_type", Prop("string", "power, lighting (defaults 1P 220V), socket (defaults 1P 220V), motor, or feeder") },
+                { "phases", Prop("integer", "1 or 3 (defaults 1 for lighting/socket, 3 otherwise)") },
                 { "voltage_v", Prop("number", "Nominal voltage (220/230 for 1P, 380/400 for 3P)") },
                 { "load_kw", Prop("number", "Load in kW") },
                 { "load_kva", Prop("number", "Load in kVA") },
                 { "load_hp", Prop("number", "Motor HP") },
                 { "load_amps", Prop("number", "Load current in Amps") },
+                { "fixture_count", Prop("number", "Optional luminaire/fixture count (used with fixture_watt or fixture_va)") },
+                { "fixture_watt", Prop("number", "Optional Watts per luminaire/fixture (e.g. 28, 40)") },
+                { "fixture_va", Prop("number", "Optional VA per luminaire/fixture") },
                 { "length_m", Prop("number", "Cable route length in meters") },
                 { "material", Prop("string", "Cu (default) or Al") },
                 { "insulation", Prop("string", "XLPE (default) or PVC") },
@@ -739,10 +742,14 @@ namespace AIEngineer.Revit.Direct
                 { "transformer_uk_percent", Prop("number", "Optional transformer uk% (default 6)") },
                 { "circuits", ArrObjProp("Optional batch array of circuit objects", new Dictionary<string, object> {
                     { "name", Prop("string", "Circuit name") },
+                    { "load_type", Prop("string", "lighting, socket, power, motor, or feeder") },
                     { "load_kw", Prop("number", "Load in kW") },
                     { "load_kva", Prop("number", "Load in kVA") },
                     { "load_hp", Prop("number", "Motor HP") },
                     { "load_amps", Prop("number", "Load current in Amps") },
+                    { "fixture_count", Prop("number", "Luminaire/fixture count") },
+                    { "fixture_watt", Prop("number", "Watts per fixture") },
+                    { "fixture_va", Prop("number", "VA per fixture") },
                     { "phases", Prop("integer", "1 or 3") },
                     { "length_m", Prop("number", "Route length in meters") }
                 }) },

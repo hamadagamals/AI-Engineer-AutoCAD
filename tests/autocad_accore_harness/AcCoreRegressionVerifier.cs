@@ -136,7 +136,7 @@ namespace AcCoreRegressionHarness
                 int coreSchemaErrors = 0;
                 int newToolDescErrors = 0;
                 HashSet<string> strictTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-                    "find_blocks_along_path", "trace_all_circuits", "generate_panel_schedule_and_sld", "audit_electrical_drawing", "manage_project_legend_db", "capture_visual_view"
+                    "find_blocks_along_path", "trace_all_circuits", "generate_panel_schedule_and_sld", "audit_electrical_drawing", "manage_project_legend_db", "capture_visual_view", "design_panel_manufacturing_layout"
                 };
 
                 foreach (Dictionary<string, object> s in specs)
@@ -168,7 +168,7 @@ namespace AcCoreRegressionHarness
                     }
                 }
                 ed.WriteMessage("\nAUTOCAD_TOOLS=" + specs.Count + "|SCHEMA_ERRORS=" + (coreSchemaErrors + newToolDescErrors) + "\n");
-                AssertTrue(specs.Count == 39, "Expected 39 tools, got " + specs.Count);
+                AssertTrue(specs.Count == 40, "Expected 40 tools, got " + specs.Count);
                 AssertTrue(coreSchemaErrors == 0 && newToolDescErrors == 0, "Schema errors found");
 
                 MethodInfo selectSpecs = agentType.GetMethod("SelectRelevantToolSpecs", flags);
@@ -181,11 +181,15 @@ namespace AcCoreRegressionHarness
                 List<string> rQa = new List<string>();
                 foreach (Dictionary<string, object> rs in (List<Dictionary<string, object>>)selectSpecs.Invoke(null, new object[] { "\u0627\u0639\u0645\u0644 \u0641\u062d\u0635 \u0641\u0646\u064a \u0643\u0647\u0631\u0628\u0627\u0626\u064a \u0644\u0644\u0645\u062e\u0637\u0637 \u0648\u0643\u0634\u0641 \u0627\u0644\u0643\u0634\u0627\u0641\u0627\u062a \u0627\u0644\u063a\u064a\u0631 \u0645\u0648\u0635\u0644\u0629 \u0648\u0647\u0628\u0648\u0637 \u0627\u0644\u062c\u0647\u062f" }))
                     rQa.Add(GetStrVal(rs, "name"));
+                List<string> rMfg = new List<string>();
+                foreach (Dictionary<string, object> rs in (List<Dictionary<string, object>>)selectSpecs.Invoke(null, new object[] { "\u062a\u0635\u0646\u064a\u0639 \u062f\u0648\u0644\u0627\u0628 \u0644\u0648\u062d\u0629 \u0643\u0647\u0631\u0628\u0627\u0621 3d \u0645\u0639 \u0628\u0627\u0631\u0627\u062a \u0646\u062d\u0627\u0633 \u0648\u062a\u0648\u0632\u064a\u0639 \u062d\u0631\u0627\u0631\u064a" }))
+                    rMfg.Add(GetStrVal(rs, "name"));
 
-                ed.WriteMessage("\nROUTER_COUNTS=" + rCirc.Count + "," + rPanel.Count + "," + rQa.Count + "\n");
+                ed.WriteMessage("\nROUTER_COUNTS=" + rCirc.Count + "," + rPanel.Count + "," + rQa.Count + "," + rMfg.Count + "\n");
                 AssertTrue(rCirc.Contains("find_blocks_along_path") && rCirc.Contains("trace_all_circuits") && rCirc.Contains("manage_project_legend_db"), "Circuit router missing tools");
                 AssertTrue(rPanel.Contains("generate_panel_schedule_and_sld") && rPanel.Contains("calculate_lv_electrical"), "Panel router missing tools");
                 AssertTrue(rQa.Contains("audit_electrical_drawing"), "QA router missing tool");
+                AssertTrue(rMfg.Contains("design_panel_manufacturing_layout"), "Panel Mfg router missing tool");
 
                 // 2. JIT Method Preparation
                 Type execType = ctxAsm.GetType("AIEngineer.AutoCAD.CadToolExecutor");
@@ -196,7 +200,7 @@ namespace AcCoreRegressionHarness
                     "TraceAllCircuits", "ScanAllCircuitsInternal", "ComputeDrawingFixtureMetrics",
                     "CollectAllCircuitCandidateCurveIds", "TraceSingleCircuitComponentCached", "BuildCircuitScheduleSheet",
                     "GeneratePanelScheduleAndSld", "AuditElectricalDrawing", "DrawSingleLineDiagram", "BuildBalancedPanelSchedule",
-                    "ManageProjectLegendDb", "CaptureVisualView"
+                    "ManageProjectLegendDb", "CaptureVisualView", "DesignPanelManufacturingLayout"
                 };
                 foreach (string jm in jitMethods)
                 {
@@ -1018,6 +1022,103 @@ namespace AcCoreRegressionHarness
 
                 try { if (File.Exists(panelXl)) File.Delete(panelXl); } catch { }
                 try { if (File.Exists(qaXl)) File.Delete(qaXl); } catch { }
+
+                // 7. Test 13: Phase 5 Switchgear & 2D/3D Panel Manufacturing (Auto 2D+3D + ACADE + Thermal + Busbar + 3D-from-2D)
+                string mfgXl = Path.Combine(Path.GetTempPath(), "phase5_panel_mfg.xlsx");
+                if (File.Exists(mfgXl)) File.Delete(mfgXl);
+                Dictionary<string, object> r13a = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "design_panel_manufacturing_layout",
+                    new Dictionary<string, object>
+                    {
+                        { "mode", "auto_2d_and_3d" },
+                        { "panel_name", "MCC-01" },
+                        { "manufacturer", "Schneider Electric" },
+                        { "cable_entry", "bottom" },
+                        { "ambient_temp_c", 40.0 },
+                        { "components", new object[]
+                            {
+                                new Dictionary<string, object> { { "tag", "QFMAIN" }, { "part_number", "LV429630" }, { "category", "mccb" }, { "poles", 3 }, { "rating_a", 100.0 } },
+                                new Dictionary<string, object> { { "tag", "VFD1" }, { "part_number", "ATV320U22N4C" }, { "category", "vfd" }, { "poles", 3 }, { "rating_a", 5.6 }, { "circuit_name", "PUMP-1" } },
+                                new Dictionary<string, object> { { "tag", "QF1" }, { "part_number", "A9F74116" }, { "category", "mcb" }, { "poles", 1 }, { "rating_a", 16.0 }, { "circuit_name", "L1" }, { "phase", "R" } },
+                                new Dictionary<string, object> { { "tag", "QF2" }, { "part_number", "A9F74332" }, { "category", "mcb" }, { "poles", 3 }, { "rating_a", 32.0 }, { "circuit_name", "M1" }, { "phase", "RYB" }, { "connected_to", "KM1" } },
+                                new Dictionary<string, object> { { "tag", "KM1" }, { "part_number", "LC1D32M7" }, { "category", "contactor" }, { "poles", 3 }, { "rating_a", 32.0 }, { "circuit_name", "M1" }, { "phase", "RYB" } }
+                            }
+                        },
+                        { "export_excel", true },
+                        { "excel_path", mfgXl },
+                        { "zoom", false }
+                    }
+                });
+                ed.WriteMessage("\nTEST13A=OK|COMP=" + GetIntVal(r13a, "components_count") + "|WIRES=" + GetIntVal(r13a, "wires_count") + "|CNC=" + GetIntVal(r13a, "cnc_holes_count") + "\n");
+                AssertTrue(GetBoolVal(r13a, "ok") && GetBoolVal(r13a, "layout_2d_drawn") && GetBoolVal(r13a, "assembly_3d_drawn"), "Test 13A failed 2D/3D draw");
+                AssertTrue(GetBoolVal(r13a, "zero_collision_verified") && GetBoolVal(r13a, "side_section_drawn") && GetIntVal(r13a, "cnc_holes_count") > 0, "Test 13A failed zero-collision / side section / CNC");
+                AssertTrue(GetBoolVal(r13a, "excel_exported") && File.Exists(mfgXl), "Test 13A missing BOM Excel");
+                AssertTrue(GetIntVal(r13a, "components_count") >= 5 && GetIntVal(r13a, "wires_count") >= 5, "Test 13A missing components/wires");
+
+                Dictionary<string, object> r13b = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "design_panel_manufacturing_layout",
+                    new Dictionary<string, object>
+                    {
+                        { "mode", "3d_from_2d" },
+                        { "panel_name", "MCC-01" },
+                        { "draw_bom_table", false },
+                        { "zoom", false }
+                    }
+                });
+                ed.WriteMessage("\nTEST13B=OK|3D=" + GetBoolVal(r13b, "assembly_3d_drawn") + "\n");
+                AssertTrue(GetBoolVal(r13b, "ok") && GetBoolVal(r13b, "assembly_3d_drawn") && !GetBoolVal(r13b, "layout_2d_drawn"), "Test 13B failed 3d_from_2d");
+
+                Dictionary<string, object> r13c = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "design_panel_manufacturing_layout",
+                    new Dictionary<string, object> { { "mode", "trace_connections" }, { "trace_target", "KM1" } }
+                });
+                ed.WriteMessage("\nTEST13C=OK|IN=" + GetIntVal(r13c, "incoming_count") + "|OUT=" + GetIntVal(r13c, "outgoing_count") + "\n");
+                AssertTrue(GetBoolVal(r13c, "ok") && GetIntVal(r13c, "incoming_count") >= 1 && GetIntVal(r13c, "outgoing_count") >= 1, "Test 13C failed trace_connections");
+
+                Dictionary<string, object> r13d = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "design_panel_manufacturing_layout",
+                    new Dictionary<string, object> { { "mode", "resize_busbar" }, { "target_busbar_size", "28x6" } }
+                });
+                ed.WriteMessage("\nTEST13D=OK|STD=" + GetStrVal(r13d, "selected_standard_busbar") + "\n");
+                AssertTrue(GetBoolVal(r13d, "ok") && GetStrVal(r13d, "selected_standard_busbar") == "30x5 Cu", "Test 13D failed resize_busbar");
+
+                Dictionary<string, object> r13e = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "design_panel_manufacturing_layout",
+                    new Dictionary<string, object> { { "mode", "snap_and_reroute" }, { "panel_name", "MCC-01" }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST13E=OK|ZCOL=" + GetBoolVal(r13e, "zero_collision_verified") + "\n");
+                AssertTrue(GetBoolVal(r13e, "ok") && GetBoolVal(r13e, "zero_collision_verified"), "Test 13E failed snap_and_reroute");
+
+                Dictionary<string, object> r13f = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "design_panel_manufacturing_layout",
+                    new Dictionary<string, object> { { "mode", "sld_from_panel" }, { "panel_name", "MCC-01" } }
+                });
+                AssertTrue(GetBoolVal(r13f, "ok") && GetBoolVal(r13f, "sld_drawn"), "Test 13F sld_from_panel failed");
+
+                Dictionary<string, object> r13g = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "design_panel_manufacturing_layout",
+                    new Dictionary<string, object> { { "mode", "panel_from_sld" }, { "draw_bom_table", false }, { "zoom", false } }
+                });
+                ed.WriteMessage("\nTEST13F=OK|SLD=" + GetBoolVal(r13f, "sld_drawn") + "|PANEL_FROM_SLD=" + GetBoolVal(r13g, "ok") + "\n");
+                AssertTrue(GetBoolVal(r13g, "ok") && GetBoolVal(r13g, "layout_2d_drawn") && GetBoolVal(r13g, "assembly_3d_drawn"), "Test 13F panel_from_sld failed");
+                try { if (File.Exists(mfgXl)) File.Delete(mfgXl); } catch { }
+
+                // Test 13G: Dedicated Panel Manufacturing Commands + All 8 Z-Depth View Presets
+                Type pmCmdType = execType.Assembly.GetType("AIEngineer.AutoCAD.PanelManufacturingCommands");
+                AssertTrue(pmCmdType != null && pmCmdType.GetMethod("ShowPanelManufacturingPalette") != null, "Test 13G missing AIENGPANEL command class");
+                string[] allPresets = new string[] {
+                    "full_assembly", "busbars_only", "wiring_uncovered", "no_door",
+                    "cnc_drilling_only", "components_only", "2d_only", "3d_only"
+                };
+                for (int pi = 0; pi < allPresets.Length; pi++)
+                {
+                    Dictionary<string, object> rPre = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                        doc, "design_panel_manufacturing_layout",
+                        new Dictionary<string, object> { { "mode", "set_view_preset" }, { "view_preset", allPresets[pi] } }
+                    });
+                    AssertTrue(GetBoolVal(rPre, "ok"), "Test 13G set_view_preset failed for " + allPresets[pi]);
+                }
+                ed.WriteMessage("\nTEST13G=OK|AIENGPANEL_PRESETS=8\n");
 
                 ed.WriteMessage("\nACCORE_REGRESSION_PASS\n");
             }

@@ -352,13 +352,18 @@ namespace AIEngineer.AutoCAD
             panel.ConnectedKw = Math.Round(sumKwAll, 3);
             panel.DemandKw = Math.Round(panel.ConnectedKw * demandFactor, 3);
 
+            // Size the 3-phase main feeder for the worse of total balanced demand kVA and 3x heaviest loaded phase
+            // so severe single-phase imbalance never undersizes the main breaker/cable on the loaded phase.
+            double maxPhaseEquivalent3PKva = Math.Round((3.0 * maxP / 1000.0) * demandFactor, 3);
+            double effectiveFeederDemandKva = Math.Max(0.5, Math.Max(panel.DemandKva, maxPhaseEquivalent3PKva));
+
             Dictionary<string, object> mainArgs = new Dictionary<string, object>
             {
                 { "name", panelName + "-MAIN" },
                 { "load_type", "feeder" },
                 { "phases", 3 },
                 { "voltage_v", voltageLlV },
-                { "load_kva", Math.Max(0.5, panel.DemandKva) },
+                { "load_kva", effectiveFeederDemandKva },
                 { "power_factor", powerFactor },
                 { "length_m", Math.Max(5.0, feederLengthM) },
                 { "max_vd_percent", 2.0 },
@@ -368,6 +373,13 @@ namespace AIEngineer.AutoCAD
                 { "ambient_temp_c", ambientTempC }
             };
             panel.MainFeeder = ComputeSingleLvCircuit(mainArgs, baseDefaults, 0);
+            if (panel.ImbalancePercent > 15.0 && panel.MainFeeder != null && panel.MainFeeder.Notes != null)
+            {
+                panel.MainFeeder.Notes.Add(
+                    "Phase imbalance is " + panel.ImbalancePercent.ToString("0.##", CultureInfo.InvariantCulture) +
+                    "% (>15% IEC/ECP guideline); main feeder sized conservatively for heaviest phase (" +
+                    effectiveFeederDemandKva.ToString("0.###", CultureInfo.InvariantCulture) + " kVA eq).");
+            }
             return panel;
         }
 
@@ -1094,7 +1106,7 @@ namespace AIEngineer.AutoCAD
                         });
                     }
 
-                    panelDicts.Add(new Dictionary<string, object>
+                    Dictionary<string, object> pDict = new Dictionary<string, object>
                     {
                         { "panel_name", p.PanelName },
                         { "active_ways", p.ActiveWaysCount },
@@ -1111,7 +1123,15 @@ namespace AIEngineer.AutoCAD
                         { "main_cable", p.MainFeeder.CableDesignation },
                         { "main_vd_percent", p.MainFeeder.VoltageDropPercent },
                         { "circuits", cRows }
-                    });
+                    };
+                    if (p.ImbalancePercent > 15.0)
+                    {
+                        pDict["imbalance_warning"] = "تحذير هندسي: نسبة عدم اتزان الفازات (" +
+                            p.ImbalancePercent.ToString("0.##", CultureInfo.InvariantCulture) +
+                            "%) تتجاوز الحد التوجيهي 15%؛ تم تحجيم القاطع والكابل الرئيسي بناءً على الفاز الأعلى تحميلاً (" +
+                            Math.Round(Math.Max(p.TotalRVa, Math.Max(p.TotalYVa, p.TotalBVa)), 1).ToString("0.#", CultureInfo.InvariantCulture) + " VA).";
+                    }
+                    panelDicts.Add(pDict);
                 }
 
                 Dictionary<string, object> res = new Dictionary<string, object>

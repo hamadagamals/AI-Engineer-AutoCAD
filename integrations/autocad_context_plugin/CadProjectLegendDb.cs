@@ -181,6 +181,7 @@ namespace AIEngineer.AutoCAD
 
         private static void EnsureProjectLegendDbLoadedLocked(Document doc, Database db)
         {
+            EnsureDocDestroyedHook();
             if (db == null || db.UnmanagedObject == IntPtr.Zero) return;
             IntPtr dbPtr = db.UnmanagedObject;
             if (s_legendLoadedForDb.Contains(dbPtr)) return;

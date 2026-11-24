@@ -114,10 +114,18 @@ namespace AIEngineer.Revit.Direct
         internal static Dictionary<string, object> ComputeSingleLv(Dictionary<string, object> item, Dictionary<string, object> defs, int seq)
         {
             string name = GetStr(item, "name") ?? GetStr(item, "circuit") ?? ("C-" + seq.ToString(CultureInfo.InvariantCulture));
-            string loadType = (GetStr(item, "load_type") ?? GetStr(defs, "load_type") ?? "power").Trim().ToLowerInvariant();
-            bool isLighting = loadType == "lighting" || loadType == "إنارة";
-            int phases = GetInt(item, "phases", GetInt(defs, "phases", 3));
-            if (phases != 1 && phases != 3) phases = 3;
+            string rawLoadType = (GetStr(item, "load_type") ?? GetStr(defs, "load_type") ?? "power").Trim().ToLowerInvariant();
+            string loadType = rawLoadType;
+            if (rawLoadType == "lighting" || rawLoadType == "light" || rawLoadType == "luminaire" ||
+                rawLoadType == "إنارة" || rawLoadType == "انارة" || rawLoadType == "اضاءة" || rawLoadType == "إضاءة")
+                loadType = "lighting";
+            else if (rawLoadType == "socket" || rawLoadType == "sockets" || rawLoadType == "receptacle" ||
+                     rawLoadType == "بريزة" || rawLoadType == "برايز" || rawLoadType == "أفياش" || rawLoadType == "افياش")
+                loadType = "socket";
+            bool isLighting = loadType == "lighting";
+            int defaultPhases = (loadType == "lighting" || loadType == "socket") ? 1 : 3;
+            int phases = GetInt(item, "phases", GetInt(defs, "phases", defaultPhases));
+            if (phases != 1 && phases != 3) phases = defaultPhases;
             double voltage = GetDouble(item, "voltage_v", GetDouble(defs, "voltage_v", phases == 1 ? 220.0 : 380.0));
             if (voltage <= 10.0) voltage = phases == 1 ? 220.0 : 380.0;
             double pf = Math.Max(0.4, Math.Min(1.0, GetDouble(item, "power_factor", GetDouble(defs, "power_factor", isLighting ? 0.90 : 0.85))));
@@ -129,6 +137,10 @@ namespace AIEngineer.Revit.Direct
             double? kvaOpt = GetNullableDouble(item, "load_kva");
             double? hpOpt = GetNullableDouble(item, "load_hp");
             double? aOpt = GetNullableDouble(item, "load_amps");
+            double? fixtureCountOpt = GetNullableDouble(item, "fixture_count") ?? GetNullableDouble(defs, "fixture_count");
+            double? fixtureWattOpt = GetNullableDouble(item, "fixture_watt") ?? GetNullableDouble(defs, "fixture_watt");
+            double? fixtureVaOpt = GetNullableDouble(item, "fixture_va") ?? GetNullableDouble(defs, "fixture_va");
+            string fixtureCalcNote = null;
 
             double kw, kva, ib;
             if (aOpt.HasValue && aOpt.Value > 0)
@@ -157,9 +169,31 @@ namespace AIEngineer.Revit.Direct
                 kva = kw / (pf * mEff);
                 ib = (kva * 1000.0) / ((phases == 3 ? Math.Sqrt(3.0) : 1.0) * voltage);
             }
+            else if (fixtureCountOpt.HasValue && fixtureCountOpt.Value > 0 && fixtureWattOpt.HasValue && fixtureWattOpt.Value > 0)
+            {
+                double rawKw = (fixtureCountOpt.Value * fixtureWattOpt.Value) / 1000.0;
+                kw = rawKw * df;
+                kva = kw / (pf * eff);
+                ib = (kva * 1000.0) / ((phases == 3 ? Math.Sqrt(3.0) : 1.0) * voltage);
+                fixtureCalcNote = "Fixture load: " + Math.Round(fixtureCountOpt.Value, 2).ToString(CultureInfo.InvariantCulture) +
+                    " x " + Math.Round(fixtureWattOpt.Value, 2).ToString(CultureInfo.InvariantCulture) +
+                    " W = " + Math.Round(rawKw * 1000.0, 1).ToString(CultureInfo.InvariantCulture) +
+                    " W (" + Math.Round(kw, 3).ToString(CultureInfo.InvariantCulture) + " kW).";
+            }
+            else if (fixtureCountOpt.HasValue && fixtureCountOpt.Value > 0 && fixtureVaOpt.HasValue && fixtureVaOpt.Value > 0)
+            {
+                double rawKva = (fixtureCountOpt.Value * fixtureVaOpt.Value) / 1000.0;
+                kva = rawKva * df;
+                kw = kva * pf;
+                ib = (kva * 1000.0) / ((phases == 3 ? Math.Sqrt(3.0) : 1.0) * voltage);
+                fixtureCalcNote = "Fixture load: " + Math.Round(fixtureCountOpt.Value, 2).ToString(CultureInfo.InvariantCulture) +
+                    " x " + Math.Round(fixtureVaOpt.Value, 2).ToString(CultureInfo.InvariantCulture) +
+                    " VA = " + Math.Round(rawKva * 1000.0, 1).ToString(CultureInfo.InvariantCulture) +
+                    " VA (" + Math.Round(kva, 3).ToString(CultureInfo.InvariantCulture) + " kVA).";
+            }
             else
             {
-                throw new InvalidOperationException("Circuit '" + name + "' requires positive load_kw, load_kva, load_hp, or load_amps.");
+                throw new InvalidOperationException("Circuit '" + name + "' requires one positive load input: load_kw, load_kva, load_hp, load_amps, or fixture_count with fixture_watt/fixture_va.");
             }
 
             double lenM = Math.Max(0.0, GetDouble(item, "length_m", GetDouble(defs, "length_m", 25.0)));
@@ -277,10 +311,10 @@ namespace AIEngineer.Revit.Direct
                 { "load_type", loadType },
                 { "phases", phases },
                 { "voltage_v", voltage },
-                { "load_kw", Math.Round(kw, 2) },
-                { "load_kva", Math.Round(kva, 2) },
+                { "load_kw", Math.Round(kw, 3) },
+                { "load_kva", Math.Round(kva, 3) },
                 { "power_factor", pf },
-                { "length_m", Math.Round(lenM, 1) },
+                { "length_m", Math.Round(lenM, 2) },
                 { "design_current_ib_a", Math.Round(ib, 2) },
                 { "breaker_in_a", inA },
                 { "breaker_type", brkType },
@@ -307,6 +341,7 @@ namespace AIEngineer.Revit.Direct
                 d["min_adiabatic_cable_mm2"] = Math.Round(minScMm2, 2);
             }
             List<object> notes = new List<object>();
+            if (!string.IsNullOrEmpty(fixtureCalcNote)) notes.Add(fixtureCalcNote);
             if (upVd) notes.Add("Cable upsized to satisfy voltage drop limit (" + maxVd.ToString("0.#", CultureInfo.InvariantCulture) + "%).");
             if (upSc) notes.Add("Cable upsized for short-circuit thermal withstand (k*S/sqrt(t)).");
             if (chosenRuns > 1) notes.Add("Parallel runs selected (" + chosenRuns.ToString(CultureInfo.InvariantCulture) + "x" + mm2.ToString("0.#", CultureInfo.InvariantCulture) + "mm2); ensure identical lengths & phase symmetry.");

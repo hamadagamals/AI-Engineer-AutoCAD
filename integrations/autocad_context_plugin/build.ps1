@@ -93,6 +93,7 @@ $assembly = Join-Path $resolvedOutput "AIEngineer.AutoCAD.Context.dll"
     (Join-Path $pluginRoot "CadSpatialIndex.cs") `
     (Join-Path $pluginRoot "CadMepAndTakeoffTools.cs") `
     (Join-Path $pluginRoot "CadPanelAndQaTools.cs") `
+    (Join-Path $pluginRoot "CadPanelManufacturingTools.cs") `
     (Join-Path $pluginRoot "CadProjectLegendDb.cs") `
     (Join-Path $pluginRoot "CadVisualCaptureTools.cs") `
     (Join-Path $pluginRoot "CadTextAndAttributesTools.cs") `
@@ -125,4 +126,34 @@ $settings = [ordered]@{
 }
 $settingsPath = Join-Path $resolvedOutput "settings.json"
 $settings | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
+
+# Also emit standalone dedicated Panel Manufacturing 2D/3D Studio DLL (`AIENGPANEL` / `PANELAI`)
+$panelAssembly = Join-Path $resolvedOutput "AIEngineer.AutoCAD.PanelManufacturing.dll"
+& $compiler /nologo /utf8output /codepage:65001 /define:PANEL_MFG_STANDALONE /target:library /platform:x64 "/out:$panelAssembly" `
+    "/reference:$($references[0])" "/reference:$($references[1])" `
+    "/reference:$($references[2])" `
+    "/reference:$acWindows" `
+    /reference:System.Web.Extensions.dll /reference:System.Net.Http.dll /reference:System.Security.dll /reference:Microsoft.CSharp.dll `
+    /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
+    /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:System.Xml.dll `
+    "/reference:$presentationCore" "/reference:$windowsBase" `
+    (Join-Path $pluginRoot "DrawingExecutionCommands.cs") `
+    (Join-Path $pluginRoot "ExcelTableInterop.cs") `
+    (Join-Path $pluginRoot "CadToolExecutor.cs") `
+    (Join-Path $pluginRoot "CadSpatialIndex.cs") `
+    (Join-Path $pluginRoot "CadMepAndTakeoffTools.cs") `
+    (Join-Path $pluginRoot "CadPanelAndQaTools.cs") `
+    (Join-Path $pluginRoot "CadPanelManufacturingTools.cs") `
+    (Join-Path $pluginRoot "CadProjectLegendDb.cs") `
+    (Join-Path $pluginRoot "CadVisualCaptureTools.cs") `
+    (Join-Path $pluginRoot "CadTextAndAttributesTools.cs") `
+    (Join-Path $pluginRoot "CadGeometryQaAndLayoutTools.cs") `
+    (Join-Path $pluginRoot "CadLightingAndDialuxTools.cs") `
+    (Join-Path $pluginRoot "CadLvCalculationsTools.cs") `
+    (Join-Path $pluginRoot "VoiceAssistant.cs") `
+    (Join-Path $pluginRoot "DirectCadAgent.cs")
+if ($LASTEXITCODE -ne 0) {
+    throw "AutoCAD Panel Manufacturing plugin compilation failed with exit code $LASTEXITCODE."
+}
+
 Write-Output $assembly

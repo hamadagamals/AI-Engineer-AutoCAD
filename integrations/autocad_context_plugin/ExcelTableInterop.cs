@@ -141,7 +141,7 @@ namespace AIEngineer.AutoCAD
             return chosen;
         }
 
-        private static string ResolveWritableExportDirectory()
+        internal static string ResolveWritableExportDirectory()
         {
             string[] bases = new string[]
             {
@@ -167,7 +167,7 @@ namespace AIEngineer.AutoCAD
             return fallback;
         }
 
-        private static bool IsProtectedSystemDirectoryPath(string fullPath)
+        internal static bool IsProtectedSystemDirectoryPath(string fullPath)
         {
             if (string.IsNullOrWhiteSpace(fullPath)) return false;
             string[] blockedRoots = new string[]
@@ -188,6 +188,53 @@ namespace AIEngineer.AutoCAD
             return false;
         }
 
+        internal static string ResolveSafeOutputPath(string targetPath, string[] allowedExtensions, string defaultExt, string fallbackStem)
+        {
+            string trimmed = (targetPath ?? "").Trim();
+            string fallback = string.IsNullOrWhiteSpace(fallbackStem) ? "output" : fallbackStem;
+            string safeDefaultExt = string.IsNullOrWhiteSpace(defaultExt) ? ".xlsx" : defaultExt;
+            bool redirect = !Path.IsPathRooted(trimmed);
+            string fullPath = redirect ? "" : Path.GetFullPath(trimmed);
+            if (!redirect && IsProtectedSystemDirectoryPath(fullPath))
+                redirect = true;
+
+            if (redirect)
+            {
+                string safeName = SanitizeFilePart(Path.GetFileNameWithoutExtension(trimmed));
+                if (string.IsNullOrWhiteSpace(safeName)) safeName = fallback;
+                string rawExt = Path.GetExtension(trimmed).ToLowerInvariant();
+                string chosenExt = safeDefaultExt;
+                if (allowedExtensions != null)
+                {
+                    for (int i = 0; i < allowedExtensions.Length; i++)
+                    {
+                        if (string.Equals(rawExt, allowedExtensions[i], StringComparison.OrdinalIgnoreCase))
+                        {
+                            chosenExt = allowedExtensions[i];
+                            break;
+                        }
+                    }
+                }
+                fullPath = Path.Combine(ResolveWritableExportDirectory(), safeName + chosenExt);
+            }
+
+            string ext = Path.GetExtension(fullPath).ToLowerInvariant();
+            bool validExt = false;
+            if (allowedExtensions != null)
+            {
+                for (int i = 0; i < allowedExtensions.Length; i++)
+                {
+                    if (string.Equals(ext, allowedExtensions[i], StringComparison.OrdinalIgnoreCase))
+                    {
+                        validExt = true;
+                        break;
+                    }
+                }
+            }
+            if (!validExt) fullPath += safeDefaultExt;
+            return fullPath;
+        }
+
         public static string WriteSpreadsheet(string targetPath, ExcelSheetData data)
         {
             if (string.IsNullOrWhiteSpace(targetPath))
@@ -195,38 +242,12 @@ namespace AIEngineer.AutoCAD
             if (data == null)
                 throw new ArgumentNullException("data");
 
-            string trimmedTarget = targetPath.Trim();
-            string fullPath;
-            if (!Path.IsPathRooted(trimmedTarget))
-            {
-                string safeName = SanitizeFilePart(Path.GetFileNameWithoutExtension(trimmedTarget));
-                if (string.IsNullOrWhiteSpace(safeName)) safeName = "table";
-                string rawExt = Path.GetExtension(trimmedTarget).ToLowerInvariant();
-                if (rawExt != ".xlsx" && rawExt != ".csv") rawExt = ".xlsx";
-                fullPath = Path.Combine(ResolveWritableExportDirectory(), safeName + rawExt);
-            }
-            else
-            {
-                fullPath = Path.GetFullPath(trimmedTarget);
-                if (IsProtectedSystemDirectoryPath(fullPath))
-                {
-                    string safeName = SanitizeFilePart(Path.GetFileNameWithoutExtension(fullPath));
-                    if (string.IsNullOrWhiteSpace(safeName)) safeName = "table";
-                    string rawExt = Path.GetExtension(fullPath).ToLowerInvariant();
-                    if (rawExt != ".xlsx" && rawExt != ".csv") rawExt = ".xlsx";
-                    fullPath = Path.Combine(ResolveWritableExportDirectory(), safeName + rawExt);
-                }
-            }
+            string fullPath = ResolveSafeOutputPath(targetPath, new string[] { ".xlsx", ".csv" }, ".xlsx", "table");
 
             string dir = Path.GetDirectoryName(fullPath);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
             string ext = Path.GetExtension(fullPath).ToLowerInvariant();
-            if (ext != ".xlsx" && ext != ".csv")
-            {
-                fullPath += ".xlsx";
-                ext = ".xlsx";
-            }
 
             string finalPath = fullPath;
             string tmpPath = fullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";

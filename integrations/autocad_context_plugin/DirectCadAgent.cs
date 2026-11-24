@@ -929,7 +929,8 @@ namespace AIEngineer.AutoCAD
                    n == "import_excel_table" ||
                    n == "lighting_design_engine" ||
                    n == "export_dialux_stf" ||
-                   n == "calculate_lv_electrical";
+                   n == "calculate_lv_electrical" ||
+                   n == "design_panel_manufacturing_layout";
         }
 
         private static bool ContainsFakeToolLog(string reply)
@@ -2435,6 +2436,15 @@ namespace AIEngineer.AutoCAD
                 "   - When the engineer states or corrects a block's spec (e.g. '60x60 = 45W', 'APPE = 22W'), immediately persist it via `manage_project_legend_db(action: 'set_item', block_name: '...', watt: ..., description: '...')` — NEVER pretend you saved an 'internal DB' in chat text without calling the tool!\n" +
                 "   - `project_database.json` and `circuit_memory` persist PERMANENTLY ON DISK across AutoCAD & PC restarts (for saved `.dwg` files) and are readable by external tools; also when tracing circuits with `find_blocks_along_path(include_electrical_calc: true)`, mixed fixtures auto-read exact Wattages from the DB and circuit tables stack cleanly by panel column (`stack_by_panel: true` by default — circuits of the SAME panel stack vertically underneath, and a NEW panel starts a column to the right). To build a full Panel Schedule, Cable/Breaker Sizing, and Total Panel Load from verified saved circuits, call `generate_panel_schedule_and_sld(source: 'saved_memory', ...)`!\n" +
                 "6p. VISUAL INSPECTION OF SELECTION / VIEWPORT (`capture_visual_view`): Whenever the engineer selects any area (a Legend table, tangled circuit intersection, room, panel schedule) and asks you to LOOK / SEE / ANALYZE IT VISUALLY ('شوف الجزء المحدد بصرياً', 'اقرأ الصورة', 'look visually'), OR when automatic text/geometry extraction looks ambiguous: call `capture_visual_view(scope: 'selection' | 'viewport' | 'bbox', annotate_block_names: true)` to render and visually inspect a high-resolution PNG of the exact CAD entities, original text, and cyan `[BlockName]` badges! If you visually read a Legend table, immediately persist all verified block names, descriptions, and wattages into `manage_project_legend_db(action: 'set_items', ...)`!\n" +
+                "6q. INDUSTRIAL SWITCHGEAR & 2D/3D PANEL MANUFACTURING (`design_panel_manufacturing_layout`): Whenever the engineer asks to build/manufacture a physical **2D/3D Electrical Panel Assembly**, resize a copper busbar (`Standard DIN 43671`), snap/align components onto a DIN rail, trace wires/device connections, toggle Z-depth layers, OR convert between **Single Line Diagram (`SLD`)** and **2D/3D Panel**: ALWAYS call `design_panel_manufacturing_layout`!\n" +
+                "   - Zero-Collision + IEC 61439 Thermal + DIN 43671 Busbars: Guarantees zero component/busbar overlap (`zero_collision_verified`), extracts `QFMAIN` phase droppers (`DROP-R/Y/B`) + bolt joints directly from terminal ports, adds 1P/3P Comb Busbars (`use_comb_busbar: true`), checks wire duct fill % (`max_duct_fill_percent`), draws 2D Side Cross-Section (`door_clearance_mm`) + CNC Mounting Plate drill holes (`_AI_CNC_DRILLING`), and organizes 3D `Solid3d` parts across 8 ordered Z-depth layers (`_AI_3D_00_ENCLOSURE` .. `_AI_3D_07_DOOR_DEADFRONT`).\n" +
+                "   - Interactive Modes:\n" +
+                "     * `mode: 'auto_2d_and_3d'` / `'2d_only'` / `'3d_from_2d'` (converts user-edited 2D ACADE blocks AND grip-stretched/90-deg bent copper busbars directly into 3D).\n" +
+                "     * `mode: 'snap_and_reroute'` (magnetically snaps displaced breakers onto nearest DIN rail centerline, resolves overlaps, and re-routes 2D/3D wires & droppers).\n" +
+                "     * `mode: 'resize_busbar'` (`target_busbar_size`: matches nearest standard Cu busbar e.g. '28x6' -> '30x5 Cu' and updates width/rating).\n" +
+                "     * `mode: 'trace_connections'` (`trace_target` or current selection: highlights incoming/outgoing wires and prints exact From -> To device/terminal chain).\n" +
+                "     * `mode: 'sld_from_panel'` / `'panel_from_sld'` (bidirectional Two-Way Sync between `_AI_SLD` and `_AI_PANEL_2D_LAYOUT` + 3D).\n" +
+                "     * `mode: 'set_view_preset'` (`view_preset`: `'full_assembly'`, `'busbars_only'`, `'wiring_uncovered'`, `'cnc_drilling_only'`, `'no_door'`).\n" +
                 "7. SAFE COPYING OUTSIDE LARGE DRAWINGS & FRAMING: Whenever asked to copy elements outside the drawing ('نسخة خارج المخطط') or put ONE frame/box around them ('مربع واحد'), use `copy_entities` with `entity_type: \"BlockReference\"` (or handles/filters), `auto_offset_outside: \"right\"`, `draw_frame: true` + concise `frame_label` if they want one bounding box around all copies, and `select_copied: true` / `zoom: true`.\n" +
                 "8. GEOMETRY PRECISION & SELF-VERIFICATION: When placing shapes side-by-side at a clear distance, inspect the exact `bounds` returned by `draw_entities` and call `measure_and_compare` (mode='distance'); if ANY coordinate or gap differs from what the engineer requested, IMMEDIATELY correct it using `modify_entities` BEFORE giving your final answer!\n" +
                 "9. STRICT TRUTH & NO HALLUCINATION: NEVER claim you extracted coordinates/schedules/BOQ, calculated/distributed lighting, exported `.stf`/Excel/PDF files, cleaned/purged/compared drawings, added arrows/tables/clouds, deleted, aligned, arrayed, separated, selected, renamed, converted into a block, or drew anything unless the corresponding tool (`lighting_design_engine`, `export_dialux_stf`, `extract_load_schedule`, `quantity_takeoff`, `manage_attributes`, `text_tools`, `advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`, `export_to_excel`, `import_excel_table`, `annotate_block_coordinates`, `draw_block_legend`, `draw_entities`, `delete_entities`, `copy_entities`, `modify_entities`, `create_block`, `convert_matching_shapes_to_block`, `select_entities`, `zoom_view`) ACTUALLY ran and returned `ok: true` in this turn! NEVER copy or write bracketed logs like `[Executed tools in AutoCAD: ...]` in your reply!\n" +
@@ -2505,8 +2515,19 @@ namespace AIEngineer.AutoCAD
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "generate_panel_schedule_and_sld", "calculate_lv_electrical", "extract_load_schedule",
+                    "generate_panel_schedule_and_sld", "design_panel_manufacturing_layout", "calculate_lv_electrical", "extract_load_schedule",
                     "trace_all_circuits", "manage_project_legend_db", "export_to_excel", "approve_or_rollback_preview");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "تصنيع", "دولاب", "بارات", "بارة", "نحاس", "توزيع حراري", "حرارة", "ثري دي", "3d",
+                "traceparts", "part number", "din rail", "busbar", "enclosure", "switchgear", "acade", "ferrule", "mounting plate",
+                "بليتة", "تخريم", "cnc", "مسقط جانبي", "محاذاة", "تتبع سلك", "مشط", "كباري", "side section", "snap", "comb"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "design_panel_manufacturing_layout", "generate_panel_schedule_and_sld", "calculate_lv_electrical",
+                    "manage_attributes", "export_to_excel", "approve_or_rollback_preview");
             }
 
             if (ContainsAnyKeyword(low,
@@ -3592,6 +3613,77 @@ namespace AIEngineer.AutoCAD
                     { "highlight_selection", Prop("boolean", "Draw subtle dashed cyan boxes around explicitly selected entities (default true).") },
                     { "annotate_block_names", Prop("boolean", "Overlay compact non-overlapping [BlockName] pill badges next to visible named blocks (default true).") },
                     { "save_path", Prop("string", "Optional destination PNG file path (defaults to %LOCALAPPDATA%\\AI-Engineer\\visual_captures).") }
+                })));
+
+            tools.Add(Tool("design_panel_manufacturing_layout",
+                "Design, snap, resize, trace, inspect depth layers, and draw a complete IEC 61439 industrial panel manufacturing assembly in 2D (GA + Side Cross-Section + CNC Mounting Plate Drilling + ACADE attributes), 8 ordered Z-depth 3D Solid3d layers (_AI_3D_00_ENCLOSURE .. _AI_3D_07_DOOR_DEADFRONT), dynamic grip-stretchable Cu busbars + Z-bend droppers + Comb busbars, interactive wire/device tracer, and bidirectional SLD <-> 2D/3D Panel synchronization.",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "mode", Prop("string", "Mode: 'auto_2d_and_3d' (default), '2d_only', '3d_from_2d', 'snap_and_reroute', 'resize_busbar', 'trace_connections', 'sld_from_panel', 'panel_from_sld', or 'set_view_preset'.") },
+                    { "panel_name", Prop("string", "Panel tag/name (e.g. 'MDB-01', 'MCC-1').") },
+                    { "manufacturer", Prop("string", "Preferred switchgear vendor: 'Schneider Electric' (default), 'ABB', or 'Siemens'.") },
+                    { "cable_entry", Prop("string", "Field cable entry side: 'bottom' (default) or 'top'.") },
+                    { "source", Prop("string", "Input source when components[] is omitted: 'auto', 'saved_memory', 'circuits_only', or 'from_2d_layout'.") },
+                    { "trace_target", Prop("string", "Wire number (e.g. 'W-02') or device tag (e.g. 'QF2', 'KM1') for mode='trace_connections' (uses active selection if omitted).") },
+                    { "target_busbar_size", Prop("string", "Requested Cu busbar size (e.g. '28x6', '30x5', '40x10') for mode='resize_busbar' — snapped to nearest standard DIN 43671 size.") },
+                    { "target_amps", Prop("number", "Optional target Amps for mode='resize_busbar' when dimension string is omitted.") },
+                    { "view_preset", Prop("string", "Depth visibility preset for mode='set_view_preset': 'full_assembly', 'busbars_only', 'wiring_uncovered', 'cnc_drilling_only', or 'no_door'.") },
+                    { "use_comb_busbar", Prop("boolean", "Add 1P/3P Cu Comb Busbar bridge across contiguous DIN-rail MCB rows (default true).") },
+                    { "draw_side_section", Prop("boolean", "Draw 2D Side Cross-Section View with Z-depth stack & Door Clearance mm (default true).") },
+                    { "draw_cnc_drilling", Prop("boolean", "Draw workshop CNC Mounting Plate M4/M5/M6 drill holes on _AI_CNC_DRILLING (default true).") },
+                    { "ambient_temp_c", Prop("number", "Panel installation ambient temperature in C (default 35.0).") },
+                    { "max_internal_temp_c", Prop("number", "Maximum permissible top internal panel temperature in C per IEC 61439 (default 55.0).") },
+                    { "spare_percent", Prop("number", "Reserved spare DIN rail capacity percentage 10..50 (default 20.0).") },
+                    { "incomer_amps", Prop("number", "Optional explicit main incomer rated current in Amps.") },
+                    { "fault_ka", Prop("number", "Design short-circuit withstand rating in kA (default 25.0).") },
+                    { "vault_dir", Prop("string", "Optional custom directory containing <part_number>.dwg / .step 3D CAD models from TraceParts or vendor libraries.") },
+                    { "units_scale", Prop("number", "Optional mm-to-drawing-unit scale override (auto-detected from INSUNITS; defaults to 1.0 for mm panel drawings or 0.001 for Meter plans).") },
+                    { "components", new Dictionary<string, object>
+                        {
+                            { "type", "array" },
+                            { "description", "Optional explicit list of panel switchgear components with optional Part Numbers, custom dimensions, and series connected_to targets." },
+                            { "items", ObjSchema(new Dictionary<string, object>
+                                {
+                                    { "tag", Prop("string", "Device tag such as 'QFMAIN', 'QF1', 'KM1', 'VFD1'.") },
+                                    { "part_number", Prop("string", "Catalog part number (e.g. 'LV429630', 'A9F74116', 'ATV320U22N4C', 'LC1D18M7').") },
+                                    { "manufacturer", Prop("string", "Component vendor override.") },
+                                    { "category", Prop("string", "One of: 'acb', 'mccb', 'mcb', 'contactor', 'vfd', 'psu', 'terminal'.") },
+                                    { "poles", Prop("integer", "Pole count: 1 or 3.") },
+                                    { "rating_a", Prop("number", "Rated current in Amps.") },
+                                    { "qty", Prop("integer", "Quantity (default 1).") },
+                                    { "width_mm", Prop("number", "Optional custom width override in mm.") },
+                                    { "height_mm", Prop("number", "Optional custom height override in mm.") },
+                                    { "depth_mm", Prop("number", "Optional custom depth override in mm.") },
+                                    { "heat_loss_w", Prop("number", "Optional power heat dissipation in Watts.") },
+                                    { "circuit_name", Prop("string", "Associated circuit tag.") },
+                                    { "phase", Prop("string", "Phase assignment: 'R', 'Y', 'B', or 'RYB'.") },
+                                    { "cable_mm2", Prop("number", "Outgoing conductor cross-section in mm2.") },
+                                    { "wire_no", Prop("string", "Optional explicit wire ferrule number.") },
+                                    { "connected_to", Prop("string", "Optional downstream device tag for series chains (e.g. QF2 -> 'KM1', KM1 -> 'VFD1').") }
+                                })
+                            }
+                        }
+                    },
+                    { "circuits", new Dictionary<string, object>
+                        {
+                            { "type", "array" },
+                            { "description", "Optional circuit load definitions to auto-balance and convert into switchgear parts when components[] is omitted." },
+                            { "items", ObjSchema(new Dictionary<string, object>
+                                {
+                                    { "name", Prop("string", "Circuit name.") },
+                                    { "load_kw", Prop("number", "Connected load in kW.") },
+                                    { "load_va", Prop("number", "Connected load in VA.") },
+                                    { "phases", Prop("integer", "1 or 3.") },
+                                    { "length_m", Prop("number", "Route length in meters.") }
+                                })
+                            }
+                        }
+                    },
+                    { "draw_bom_table", Prop("boolean", "Draw formatted BOM & From-To Wire schedule on _AI_PANEL_BOM_TABLE (default true).") },
+                    { "export_excel", Prop("boolean", "Export BOM + From-To Wire & Ferrule Cut List to RTL Excel .xlsx (default false).") },
+                    { "excel_path", Prop("string", "Optional destination .xlsx file path.") },
+                    { "replace_existing", Prop("boolean", "Erase previous _AI_PANEL_2D_LAYOUT and _AI_3D_* entities before drawing (default true).") },
+                    { "zoom", Prop("boolean", "Zoom AutoCAD viewport onto generated 2D/3D panel assembly (default true).") }
                 })));
 
             return tools;

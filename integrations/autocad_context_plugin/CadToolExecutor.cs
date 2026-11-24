@@ -132,6 +132,26 @@ namespace AIEngineer.AutoCAD
                 {
                     _undoStacks.Remove(key);
                 }
+                lock (s_lastCoordLock)
+                {
+                    s_lastCoordSortOrderByDb.Remove(key);
+                    s_lastCoordBlockNameByDb.Remove(key);
+                    s_lastMultiPointModeByDb.Remove(key);
+                    s_lastBlockSamplePointsByDb.Remove(key);
+                    s_lastCoordTableByDb.Remove(key);
+                    s_lastLegendTableByDb.Remove(key);
+                    s_lastPanelScheduleByDb.Remove(key);
+                    s_lastBoqTableByDb.Remove(key);
+                    s_lastLightingTableByDb.Remove(key);
+                    s_lastGeneratedTableKindByDb.Remove(key);
+                    s_lastUserCurveHandlesByDb.Remove(key);
+                    s_circuitProfileByDb.Remove(key);
+                    s_savedCircuitsByDb.Remove(key);
+                    s_lastActiveCircuitNameByDb.Remove(key);
+                    s_loadedSidecarForDb.Remove(key);
+                    s_legendCatalogByDb.Remove(key);
+                    s_legendLoadedForDb.Remove(key);
+                }
             }
             catch { }
         }
@@ -324,6 +344,8 @@ namespace AIEngineer.AutoCAD
                         return TraceAllCircuits(doc, args);
                     case "generate_panel_schedule_and_sld":
                         return GeneratePanelScheduleAndSld(doc, args);
+                    case "design_panel_manufacturing_layout":
+                        return DesignPanelManufacturingLayout(doc, args);
                     case "audit_electrical_drawing":
                         return AuditElectricalDrawing(doc, args);
                     case "manage_project_legend_db":
@@ -8097,6 +8119,7 @@ namespace AIEngineer.AutoCAD
                 }
                 if (curveHandles.Count > 0)
                 {
+                    EnsureDocDestroyedHook();
                     lock (s_lastCoordLock)
                     {
                         s_lastUserCurveHandlesByDb[db.UnmanagedObject] = curveHandles;

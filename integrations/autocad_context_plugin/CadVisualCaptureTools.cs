@@ -1016,7 +1016,7 @@ namespace AIEngineer.AutoCAD
 
                     if (!string.IsNullOrWhiteSpace(savePathArg))
                     {
-                        outPath = Path.GetFullPath(savePathArg);
+                        outPath = ExcelTableInterop.ResolveSafeOutputPath(savePathArg, new string[] { ".png" }, ".png", "cad_view");
                     }
                     else
                     {

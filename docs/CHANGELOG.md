@@ -1,5 +1,51 @@
 # Changelog
 
+## 2026-11-24 - Phase 5.1 Zero-Collision Z-Depth Stack-Up, Magnetic DIN-Rail Auto-Snap, Wire Tracer & Bidirectional SLD ↔ Panel Sync
+
+- **8 Ordered Z-Depth 3D Layers, Side Cross-Section & CNC Drilling (`integrations/autocad_context_plugin/CadPanelManufacturingTools.cs`):**
+  - Replaced flat 3D layering with physical back-to-front depth layers (`_AI_3D_00_ENCLOSURE`, `_AI_3D_01_MOUNTING_PLATE`, `_AI_3D_02_RAILS_INSULATORS`, `_AI_3D_03_DUCTS_BODY`, `_AI_3D_03_DUCTS_COVER`, `_AI_3D_04_COMPONENTS`, `_AI_3D_05_BUSBARS_COPPER`, `_AI_3D_06_WIRING`, `_AI_3D_07_DOOR_DEADFRONT`) so duct covers, cabinet doors, copper busbars, or wires toggle cleanly (`mode: "set_view_preset"`).
+  - Added 2D Side Cross-Section View (`_AI_PANEL_SIDE_SECTION`) displaying Z-depth stacking and `min_door_clearance_mm`, plus workshop CNC Mounting Plate drill templates (`_AI_CNC_DRILLING` with M4/M5/M6 mounting hole coordinates) and `AIENG_PANEL_RAIL` alignment guides (`_AI_GUIDE_ALIGNMENT`).
+- **Anti-Hallucination Collision Solver, Exact Terminal Droppers & Comb Busbars:**
+  - Enforced `VerifyAndResolvePanelCollisions` (checking component-component, component-busbar, boundary margins, and door clearance), exact per-phase `QFMAIN` Z-bend copper droppers (`DROP-R/Y/B`) with bolt joints (`BoltJointsMm`), 1P/3P `Comb Busbars` (`use_comb_busbar: true`), series device chains (`connected_to`), and IEC 61439 wire duct fill-ratio checking/upsizing (`max_duct_fill_percent`).
+- **Interactive Panel Editing, Tracer, Standard Busbar Sizer & Bidirectional SLD Sync (`PanelManufacturingCommands`, `PanelManufacturingPaletteControl`):**
+  - Added dedicated standalone command **`AIENGPANEL`** (`PANELAI` / `AIENGPANELMFG`) opening a dedicated Copper/Dark-Theme `PaletteSet` (`"AI-Engineer — Panel Manufacturing 2D/3D"`, separated cleanly from the MEP Engineering Drawing palette **`AIENGPALETTE`**) featuring one-click fabrication buttons (Magnetic DIN-Rail Snap `snap_and_reroute` / `AIENGPANELSNAP`, DIN 43671 Cu Standard Busbar Sizer `resize_busbar` / `AIENGBUSBARSIZE`, Interactive Netlist Wire/Device Tracer `trace_connections` / `AIENGWIRETRACE`, `2D -> 3D` rebuild, Bidirectional `SLD <-> Panel` sync `AIENGPANELSLD`, and all 8 Z-depth View Presets `full_assembly`, `busbars_only`, `wiring_uncovered`, `no_door`, `cnc_drilling_only`, `components_only`, `2d_only`, `3d_only` via `AIENGPANELVIEW`).
+  - Updated `integrations/autocad_context_plugin/build.ps1` to also emit a standalone `NETLOAD`-able **`AIEngineer.AutoCAD.PanelManufacturing.dll`** alongside `AIEngineer.AutoCAD.Context.dll`, using distinct `EdCommandStack` command groups (`AIENG_PANELMFG_DLL` vs `AIENG_PANELMFG_CTX`) so both can be loaded together without command collisions.
+  - Updated `DirectCadAgent.cs` Rule `6q`, intent triggers, and schema, plus `TEST13A`–`TEST13G` in `AcCoreRegressionVerifier.cs`.
+
+## 2026-11-23 - Phase 5 Industrial Switchgear & 2D/3D Panel Manufacturing Engine
+
+- **Switchgear & 3D Component Catalog (`data/switchgear_3d_catalog.json`):**
+  - Added catalog specifications for Schneider Electric (`LV429630`, `LV431630`, `LV432693`, `NW08H1`, `A9F74110..A9F74363`, `LC1D18M7/32M7`, `ATV320U22N4C`, `ABL8REM24050`, `NSYTRV42/162`), ABB (`XT1N160`, `S201-C16`, `S203-C32`), and Siemens (`3VA1110`, `5SY4116-7`, `5SY4332-7`), plus IEC 61439 / DIN 43671 flat Cu busbars (`15x3` .. `2x(80x10)` mm), enclosures (`NSYCRN`, `AE`, `NSYSF`, `VX25`), and ClimaSys filter fans (`38..300 m3/h`).
+- **2D/3D Panel Manufacturing Engine (`integrations/autocad_context_plugin/CadPanelManufacturingTools.cs`, `build.ps1`):**
+  - Added `design_panel_manufacturing_layout` (`mode`: `auto_2d_and_3d`, `2d_only`, `3d_from_2d`) implementing IEC 61439-1 / IEC 60890 thermal temperature rise calculation + automatic filter fan sizing, Cu `R/Y/B/N/PE` busbar sizing, and thermal/ergonomic zoning (`cable_entry`: `bottom` | `top`, top-zone VFD convection exhaust, modular DIN rails + slotted ducts + spare reserve, incomer arc clearance, and `XT1` terminal strip).
+  - Draws 2D panel General Arrangement blocks on `_AI_PANEL_2D_LAYOUT` with AutoCAD Electrical (`ACADE`) attributes (`TAG1`, `MFG`, `CAT`, `RATING1`, `LOC`, `INST`, `TERM01`, `TERM02`, `WIRENO`) + `AIENG_PANEL_COMP` XData, constructs 3D `Solid3d` enclosures/rails/ducts/busbars/components/routed 3D wiring across `_AI_3D_*` layers (importing `<part_number>.dwg` from the local/TraceParts 3D vault when present or generating parametric 3D solids), converts live user-edited 2D layouts to 3D (`3d_from_2d`), and exports RTL Excel `.xlsx` BOM + From–To Wire & Ferrule cut-list schedules.
+- **Agent Wiring & Regression (`CadToolExecutor.cs`, `DirectCadAgent.cs`, `AcCoreRegressionVerifier.cs`, `run_autocad_accore_tests.ps1`, `test_autocad_accore_suite.py`):**
+  - Registered `design_panel_manufacturing_layout` (`AUTOCAD_TOOLS=40`), Rule `6q`, intent triggers, `TEST13A`/`TEST13B` in `AcCoreRegressionVerifier.cs`, and `CadPanelManufacturingTools.cs` build check in `test_autocad_accore_suite.py`.
+
+## 2026-11-23 - Phase 4.1 Post-Phase-4 Audit Hotfixes & Revit LV Parity
+
+- **Per-Database Cache Eviction & Hook Registration (`integrations/autocad_context_plugin/CadToolExecutor.cs`, `CadMepAndTakeoffTools.cs`, `CadProjectLegendDb.cs`):**
+  - Extended `OnDocumentToBeDestroyed` to evict closing `Database.UnmanagedObject` keys from all per-database static caches across partial class files (`_undoStacks`, `s_last*` coordinate/table/selection caches, `s_circuitProfileByDb`, `s_savedCircuitsByDb`, `s_lastActiveCircuitNameByDb`, `s_loadedSidecarForDb`, `s_legendCatalogByDb`, and `s_legendLoadedForDb`) without nested locking.
+  - Added `EnsureDocDestroyedHook()` calls inside `EnsureProjectLegendDbLoadedLocked`, `EnsureSidecarLoadedLocked`, `LearnCircuitSampleProfile`, and `RecordUserSelectionSnapshot` so cleanup stays armed regardless of which tool runs first.
+- **Unbalanced Panel Main Feeder Protection (`integrations/autocad_context_plugin/CadPanelAndQaTools.cs`):**
+  - Updated `BuildBalancedPanelSchedule` to size `panel.MainFeeder` conservatively using `Math.Max(panel.DemandKva, maxPhaseEquivalent3PKva)` (`3 * heaviest_phase_kVA * demand_factor`) so heavy single-phase imbalance cannot undersize the main breaker or feeder cable, while keeping `ConnectedKva`, `DemandKva`, `ConnectedKw`, and `DemandKw` panel totals exact.
+  - Added `imbalance_warning` to `GeneratePanelScheduleAndSld` output and `panel.MainFeeder.Notes` whenever `ImbalancePercent > 15.0%`.
+- **Visual Capture Path Hardening (`integrations/autocad_context_plugin/ExcelTableInterop.cs`, `CadVisualCaptureTools.cs`):**
+  - Extracted shared `ExcelTableInterop.ResolveSafeOutputPath` helper reusing `IsProtectedSystemDirectoryPath` and `ResolveWritableExportDirectory`, and wired `CaptureVisualView` `save_path` handling through it so relative paths and Windows/`Program Files` system paths redirect safely and enforce `.png`.
+- **Portable AutoCAD AcCore Test Runner (`scripts/run_autocad_accore_tests.ps1`, `tests/test_autocad_accore_suite.py`):**
+  - Replaced hardcoded AutoCAD 2021 paths with `AUTOCAD_ROOT` override + automatic AutoCAD `2015–2030` `accoreconsole.exe` discovery and added `/codepage:65001` UTF-8 flag to `csc.exe` harness compilation.
+- **Revit Direct AI LV Calculation Parity (`integrations/revit_direct_plugin/RevitLvCalculationsTools.cs`, `DirectRevitAgent.cs`):**
+  - Synced `lighting`/`socket` (English + Arabic alias) `1P / 220V` default rules, `fixture_count` + `fixture_watt`/`fixture_va` deterministic load inputs, and 3-decimal `load_kw`/`load_kva` rounding (`2`-decimal `length_m`) plus schema fields in `BuildToolCatalog`.
+
+## 2026-11-23 - Phase 4 High-Resolution Vector Visual Capture & Multimodal Vision Loop
+
+- **Vector Visual Capture Tool (`integrations/autocad_context_plugin/CadVisualCaptureTools.cs`, `CadToolExecutor.cs`, `build.ps1`):**
+  - Added `capture_cad_view` (`CaptureVisualView`) GDI+ vector capture engine supporting `auto`, `viewport`, `extents`, `selection`, and `bbox` scopes with layer visibility filtering, curve/arc/polyline/hatch/text rendering, anti-overlap block badge annotations, and rolling PNG capture output under `%LOCALAPPDATA%\AI-Engineer\visual_captures`.
+- **Multimodal Vision Feedback (`integrations/autocad_context_plugin/DirectCadAgent.cs`):**
+  - Wired initial viewport/extents PNG pre-capture, `ExtractAndStripVisionImage`, `BuildGeminiCandidates` `inlineData` attachment, action-tool classification, and visual routing triggers (`AUTOCAD_TOOLS=39|SCHEMA_ERRORS=0`).
+- **AcCore Visual Regression Tests (`tests/autocad_accore_harness/AcCoreRegressionVerifier.cs`):**
+  - Added `TEST12A`–`TEST12C` verifying vector capture extents, bbox targeting, selection highlights, and custom PNG `save_path` output.
+
 ## 2026-11-23 - Phase 3 Persistent Project Legend Spec Database, Per-Panel Stacked Circuit Board & Saved-Memory Panel Schedules
 
 - **Persistent Project Legend Specification Database (`integrations/autocad_context_plugin/CadProjectLegendDb.cs`, `build.ps1`):**
