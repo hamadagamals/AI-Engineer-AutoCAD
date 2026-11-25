@@ -1524,6 +1524,258 @@ namespace AcCoreRegressionHarness
                 AssertTrue(dialuxCmdType != null && dialuxCmdType.GetMethod("RunDialuxExportWizard") != null, "Test 15E missing AIENGDIALUX command class");
                 ed.WriteMessage("\nTEST15E=OK|AIENGDIALUX=PRESENT\n");
 
+                // TEST16A: Multi-column gridded Legend extraction + block-name wattage fallback (upligh9w -> 9W) + strict extracted_items
+                execTool.Invoke(null, new object[] {
+                    doc, "manage_project_legend_db",
+                    new Dictionary<string, object> { { "action", "set_item" }, { "block_name", "STALE_OLD_BLOCK" }, { "watt", 99.0 }, { "description", "Stale from another DWG" } }
+                });
+                List<string> handles16a = new List<string>();
+                using (Transaction tr16a = db.TransactionManager.StartTransaction())
+                {
+                    LayerTable lt16 = (LayerTable)tr16a.GetObject(db.LayerTableId, OpenMode.ForRead);
+                    EnsureLayer(tr16a, lt16, "E-LEGEND-16A", 7);
+                    BlockTable bt16 = (BlockTable)tr16a.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    ObjectId up9Btr = EnsureRectBlock(tr16a, bt16, "upligh9w", 0.4, 0.4, 3);
+                    ObjectId spot16Btr = EnsureRectBlock(tr16a, bt16, "SPOT16A", 0.4, 0.4, 2);
+                    BlockTableRecord ms16a = (BlockTableRecord)tr16a.GetObject(bt16[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                    double[] yGrid = new double[] { 15.0, 11.0, 7.0, 3.0 };
+                    for (int yi = 0; yi < yGrid.Length; yi++)
+                    {
+                        ObjectId hl = AddLine(ms16a, tr16a, new Point3d(120.0, yGrid[yi], 0), new Point3d(162.0, yGrid[yi], 0), "E-LEGEND-16A", 7);
+                        handles16a.Add(hl.Handle.ToString());
+                    }
+                    double[] xGrid = new double[] { 120.0, 123.0, 128.0, 144.0, 150.0, 155.0, 162.0 };
+                    for (int xi = 0; xi < xGrid.Length; xi++)
+                    {
+                        ObjectId vl = AddLine(ms16a, tr16a, new Point3d(xGrid[xi], 3.0, 0), new Point3d(xGrid[xi], 15.0, 0), "E-LEGEND-16A", 7);
+                        handles16a.Add(vl.Handle.ToString());
+                    }
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(120.5, 12.5, 0), "TAG", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(123.5, 12.5, 0), "SYMBOL", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(129.0, 12.5, 0), "DESCRIPTION", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(145.0, 12.5, 0), "QTY1", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(151.0, 12.5, 0), "QTY2", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(156.0, 12.5, 0), "PHOTO", 0.35, "E-LEGEND-16A").Handle.ToString());
+
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, 9.0, 0), "A", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(InsertBlock(ms16a, tr16a, up9Btr, new Point3d(125.5, 9.0, 0), "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(129.0, 9.0, 0), "LED UP-LIGHT IN-GROUND", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(145.0, 9.0, 0), "17 PCS", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(151.0, 9.0, 0), "244 PCS", 0.35, "E-LEGEND-16A").Handle.ToString());
+
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, 5.0, 0), "B", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(InsertBlock(ms16a, tr16a, spot16Btr, new Point3d(125.5, 5.0, 0), "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(129.0, 5.0, 0), "RECESSED DOWNLIGHT 18W", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(145.0, 5.0, 0), "20 PCS", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(151.0, 5.0, 0), "18 PCS", 0.35, "E-LEGEND-16A").Handle.ToString());
+
+                    InsertBlock(ms16a, tr16a, up9Btr, new Point3d(170.0, 5.0, 0), "E-LEGEND-16A");
+                    InsertBlock(ms16a, tr16a, spot16Btr, new Point3d(172.0, 5.0, 0), "E-LEGEND-16A");
+                    tr16a.Commit();
+                }
+
+                Dictionary<string, object> r16a = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "manage_project_legend_db",
+                    new Dictionary<string, object> { { "action", "extract_from_selection" }, { "handles", handles16a.ToArray() } }
+                });
+                IList extItems16a = r16a.ContainsKey("extracted_items") ? r16a["extracted_items"] as IList : null;
+                AssertTrue(GetBoolVal(r16a, "ok") && extItems16a != null && extItems16a.Count == 2,
+                    "Test 16A expected strictly 2 extracted_items from gridded Legend");
+                double wUp9 = 0.0, wSpot16 = 0.0;
+                bool sawStale16a = false;
+                foreach (object itemObj in extItems16a)
+                {
+                    Dictionary<string, object> it = itemObj as Dictionary<string, object>;
+                    if (it == null) continue;
+                    string bn = GetStrVal(it, "block_name");
+                    if (bn == "upligh9w") wUp9 = GetDblVal(it, "watt");
+                    else if (bn == "SPOT16A") wSpot16 = GetDblVal(it, "watt");
+                    else if (bn == "STALE_OLD_BLOCK") sawStale16a = true;
+                }
+                AssertTrue(!sawStale16a && Math.Abs(wUp9 - 9.0) < 0.01 && Math.Abs(wSpot16 - 18.0) < 0.01,
+                    "Test 16A failed wattage fallback / strict extracted_items check (up9=" + wUp9 + ", spot=" + wSpot16 + ")");
+                ed.WriteMessage("\nTEST16A=OK|GRID_EXTRACTED=2|UPLIGH9W=" + wUp9 + "|SPOT16A=" + wSpot16 + "\n");
+
+                // TEST16B: Nearest-competing-wire fixture ownership arbitration
+                string wire16bA = "";
+                string wire16bB = "";
+                using (Transaction tr16b = db.TransactionManager.StartTransaction())
+                {
+                    LayerTable lt16b = (LayerTable)tr16b.GetObject(db.LayerTableId, OpenMode.ForRead);
+                    EnsureLayer(tr16b, lt16b, "E-LTG-16B-A", 1);
+                    EnsureLayer(tr16b, lt16b, "E-LTG-16B-B", 3);
+                    BlockTable bt16b = (BlockTable)tr16b.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    ObjectId fix16bBtr = EnsureRectBlock(tr16b, bt16b, "FIX16B", 0.6, 0.6, 7);
+                    BlockTableRecord ms16b = (BlockTableRecord)tr16b.GetObject(bt16b[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                    // Fixture 1 owned by Wire A (Wire A passes right through center (183,20))
+                    InsertBlock(ms16b, tr16b, fix16bBtr, new Point3d(183.0, 20.0, 0), "E-LTG-16B-A");
+                    // Fixture 2 edge touches Wire A tolerance (x=189.1 -> edge 189.4 dist 0.30, center dist 0.90), while Wire B passes dead-center x=190.0
+                    InsertBlock(ms16b, tr16b, fix16bBtr, new Point3d(190.0, 20.0, 0), "E-LTG-16B-B");
+                    wire16bA = AddLine(ms16b, tr16b, new Point3d(180.0, 20.0, 0), new Point3d(189.1, 20.0, 0), "E-LTG-16B-A", 1).Handle.ToString();
+                    wire16bB = AddLine(ms16b, tr16b, new Point3d(190.0, 17.0, 0), new Point3d(190.0, 25.0, 0), "E-LTG-16B-B", 3).Handle.ToString();
+                    tr16b.Commit();
+                }
+
+                Dictionary<string, object> r16bA = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object>
+                    {
+                        { "handles", new string[] { wire16bA } },
+                        { "draw_legend", false }, { "select_blocks", false }, { "select_paths", false }, { "zoom", false }
+                    }
+                });
+                Dictionary<string, object> r16bB = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object>
+                    {
+                        { "handles", new string[] { wire16bB } },
+                        { "draw_legend", false }, { "select_blocks", false }, { "select_paths", false }, { "zoom", false }
+                    }
+                });
+                AssertTrue(GetBoolVal(r16bA, "ok") && GetIntVal(r16bA, "matched_blocks_count") == 1 &&
+                           GetIntVal(r16bA, "skipped_closer_other_wire_count") >= 1 &&
+                           GetBoolVal(r16bB, "ok") && GetIntVal(r16bB, "matched_blocks_count") == 1,
+                    "Test 16B competing wire arbitration failed (A=" + GetIntVal(r16bA, "matched_blocks_count") +
+                    ", skipA=" + GetIntVal(r16bA, "skipped_closer_other_wire_count") + ", B=" + GetIntVal(r16bB, "matched_blocks_count") + ")");
+                ed.WriteMessage("\nTEST16B=OK|WIRE_A_MATCHED=1|SKIPPED_CLOSER=" + GetIntVal(r16bA, "skipped_closer_other_wire_count") + "|WIRE_B_MATCHED=1\n");
+
+                // TEST16C: 3-line feeder callout extraction + DB-LCP6(14,16,18) 3-phase propagation into Panel Schedule
+                string wire16c = "";
+                List<string> calloutHandles16c = new List<string>();
+                using (Transaction tr16c = db.TransactionManager.StartTransaction())
+                {
+                    LayerTable lt16c = (LayerTable)tr16c.GetObject(db.LayerTableId, OpenMode.ForRead);
+                    EnsureLayer(tr16c, lt16c, "E-PWR-16C", 6);
+                    BlockTable bt16c = (BlockTable)tr16c.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    ObjectId fix16cBtr = EnsureRectBlock(tr16c, bt16c, "FIX16C", 0.4, 0.4, 6);
+                    BlockTableRecord ms16c = (BlockTableRecord)tr16c.GetObject(bt16c[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                    InsertBlock(ms16c, tr16c, fix16cBtr, new Point3d(210.0, 5.0, 0), "E-PWR-16C");
+                    wire16c = AddLine(ms16c, tr16c, new Point3d(205.0, 5.0, 0), new Point3d(215.0, 5.0, 0), "E-PWR-16C", 6).Handle.ToString();
+                    calloutHandles16c.Add(AddText(ms16c, tr16c, new Point3d(206.0, 12.0, 0), "4X10mm2+6MM2 UPVC 50mm class4", 0.25, "E-PWR-16C").Handle.ToString());
+                    calloutHandles16c.Add(AddText(ms16c, tr16c, new Point3d(206.0, 11.5, 0), "under F.F.L 60cm DB-LCP6(14,16,18) V.D", 0.25, "E-PWR-16C").Handle.ToString());
+                    calloutHandles16c.Add(AddText(ms16c, tr16c, new Point3d(206.0, 11.0, 0), "0.54%", 0.25, "E-PWR-16C").Handle.ToString());
+                    tr16c.Commit();
+                }
+
+                Dictionary<string, object> r16cSeed = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object>
+                    {
+                        { "handles", new string[] { wire16c } },
+                        { "circuit_name", "TEMP-16C" },
+                        { "draw_legend", false }, { "select_blocks", false }, { "select_paths", false }, { "zoom", false }
+                    }
+                });
+                AssertTrue(GetBoolVal(r16cSeed, "ok"), "Test 16C seed trace failed");
+
+                Dictionary<string, object> r16cCallout = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object>
+                    {
+                        { "handles", calloutHandles16c.ToArray() },
+                        { "draw_legend", false }, { "select_blocks", false }, { "select_paths", false }, { "zoom", false }
+                    }
+                });
+                AssertTrue(GetBoolVal(r16cCallout, "ok") && GetBoolVal(r16cCallout, "callout_applied") &&
+                           GetStrVal(r16cCallout, "circuit_name") == "DB-LCP6(14,16,18)" &&
+                           GetStrVal(r16cCallout, "panel_name") == "DB-LCP6" &&
+                           GetIntVal(r16cCallout, "panel_ways_count") == 3 &&
+                           GetIntVal(r16cCallout, "cable_cores_count") == 4 &&
+                           GetIntVal(r16cCallout, "total_conductors_count") == 5 &&
+                           GetStrVal(r16cCallout, "conduit_spec").ToUpperInvariant().Contains("UPVC") &&
+                           Math.Abs(GetDblVal(r16cCallout, "annotated_vd_percent") - 0.54) < 0.01,
+                    "Test 16C callout extraction/application failed");
+
+                Dictionary<string, object> r16cPanel = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "generate_panel_schedule_and_sld",
+                    new Dictionary<string, object>
+                    {
+                        { "source", "saved_memory" },
+                        { "strict_legend_specs", false },
+                        { "draw_panel_schedule", false },
+                        { "draw_sld", false },
+                        { "export_excel", false }
+                    }
+                });
+                bool foundLcp6Way = false;
+                IList panels16c = r16cPanel.ContainsKey("panels") ? r16cPanel["panels"] as IList : null;
+                if (panels16c != null)
+                {
+                    foreach (object pObj in panels16c)
+                    {
+                        Dictionary<string, object> pd = pObj as Dictionary<string, object>;
+                        if (pd == null || GetStrVal(pd, "panel_name") != "DB-LCP6") continue;
+                        IList cList = pd.ContainsKey("circuits") ? pd["circuits"] as IList : null;
+                        if (cList == null) continue;
+                        foreach (object cObj in cList)
+                        {
+                            Dictionary<string, object> cd = cObj as Dictionary<string, object>;
+                            if (cd != null && GetStrVal(cd, "circuit_name") == "DB-LCP6(14,16,18)" &&
+                                GetStrVal(cd, "phase") == "RYB" &&
+                                GetStrVal(cd, "cable").ToUpperInvariant().Contains("4X10+6MM2"))
+                            {
+                                foundLcp6Way = true;
+                            }
+                        }
+                    }
+                }
+                AssertTrue(GetBoolVal(r16cPanel, "ok") && foundLcp6Way, "Test 16C panel schedule did not preserve DB-LCP6 3-phase way & annotated cable");
+                ed.WriteMessage("\nTEST16C=OK|CIRC=DB-LCP6(14,16,18)|CORES=4|COND=5|VD=0.54\n");
+
+                // TEST16D: lock_selection_as_circuit exact subset lock without wire blowup
+                string wire16dA = "", wire16dB = "", blk16d1 = "", blk16d2 = "";
+                using (Transaction tr16d = db.TransactionManager.StartTransaction())
+                {
+                    LayerTable lt16d = (LayerTable)tr16d.GetObject(db.LayerTableId, OpenMode.ForRead);
+                    EnsureLayer(tr16d, lt16d, "E-LTG-16D", 5);
+                    BlockTable bt16d = (BlockTable)tr16d.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    ObjectId fix16dBtr = EnsureRectBlock(tr16d, bt16d, "FIX16D", 0.35, 0.35, 5);
+                    BlockTableRecord ms16d = (BlockTableRecord)tr16d.GetObject(bt16d[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                    blk16d1 = InsertBlock(ms16d, tr16d, fix16dBtr, new Point3d(227.0, 5.0, 0), "E-LTG-16D").Handle.ToString();
+                    blk16d2 = InsertBlock(ms16d, tr16d, fix16dBtr, new Point3d(232.0, 5.0, 0), "E-LTG-16D").Handle.ToString();
+                    InsertBlock(ms16d, tr16d, fix16dBtr, new Point3d(234.5, 5.0, 0), "E-LTG-16D");
+                    wire16dA = AddLine(ms16d, tr16d, new Point3d(225.0, 5.0, 0), new Point3d(230.0, 5.0, 0), "E-LTG-16D", 5).Handle.ToString();
+                    wire16dB = AddLine(ms16d, tr16d, new Point3d(230.0, 5.0, 0), new Point3d(235.0, 5.0, 0), "E-LTG-16D", 5).Handle.ToString();
+                    AddLine(ms16d, tr16d, new Point3d(235.15, 5.0, 0), new Point3d(265.0, 5.0, 0), "E-LTG-16D", 5);
+                    tr16d.Commit();
+                }
+
+                Dictionary<string, object> r16dTrace = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object>
+                    {
+                        { "handles", new string[] { wire16dA, wire16dB } },
+                        { "circuit_name", "C16D-LOCK" },
+                        { "connect_gaps", false },
+                        { "follow_connected", true },
+                        { "draw_legend", false }, { "select_blocks", false }, { "select_paths", false }, { "zoom", false }
+                    }
+                });
+                AssertTrue(GetBoolVal(r16dTrace, "ok") && GetIntVal(r16dTrace, "matched_blocks_count") == 3 &&
+                           Math.Abs(GetDblVal(r16dTrace, "total_path_length_m") - 10.0) < 0.1,
+                    "Test 16D initial trace failed");
+
+                Dictionary<string, object> r16dLock = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object>
+                    {
+                        { "circuit_name", "C16D-LOCK" },
+                        { "lock_selection_as_circuit", true },
+                        { "handles", new string[] { blk16d1, blk16d2 } },
+                        { "draw_legend", false }, { "select_blocks", false }, { "select_paths", false }, { "zoom", false }
+                    }
+                });
+                AssertTrue(GetBoolVal(r16dLock, "ok") && GetBoolVal(r16dLock, "user_locked") &&
+                           GetIntVal(r16dLock, "matched_blocks_count") == 2 &&
+                           Math.Abs(GetDblVal(r16dLock, "total_path_length_m") - 10.0) < 0.1,
+                    "Test 16D exact lock failed (matched=" + GetIntVal(r16dLock, "matched_blocks_count") +
+                    ", len=" + GetDblVal(r16dLock, "total_path_length_m") + ")");
+                ed.WriteMessage("\nTEST16D=OK|LOCKED_BLOCKS=2|LEN_M=10\n");
+
                 ed.WriteMessage("\nACCORE_REGRESSION_PASS\n");
             }
             catch (System.Exception ex)

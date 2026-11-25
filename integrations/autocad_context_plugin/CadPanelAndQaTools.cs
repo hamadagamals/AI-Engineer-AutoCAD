@@ -28,6 +28,13 @@ namespace AIEngineer.AutoCAD
             public double BVa;
             public bool IsSpare;
             public LvCircuitCalcResult Calc;
+            public List<string> PanelWays = new List<string>();
+            public int PanelWaysCount;
+            public string AnnotatedCableDesignation = "";
+            public int TotalConductorsCount;
+            public string ConduitSpec = "";
+            public string InstallNote = "";
+            public double? AnnotatedVdPercent;
         }
 
         private sealed class BalancedPanelSchedule
@@ -71,6 +78,8 @@ namespace AIEngineer.AutoCAD
             {
                 int sep = circuitName.LastIndexOfAny(new char[] { '/', '\\' });
                 if (sep > 0) return circuitName.Substring(0, sep).Trim();
+                int paren = circuitName.IndexOf('(');
+                if (paren > 0) return circuitName.Substring(0, paren).Trim();
             }
             return "LP-MAIN";
         }
@@ -249,6 +258,8 @@ namespace AIEngineer.AutoCAD
                 }
                 if (c.CountsByBlock != null && c.CountsByBlock.ContainsKey("__PHASES__"))
                     circPhases = c.CountsByBlock["__PHASES__"] == 3 ? 3 : 1;
+                else if (c.PanelWaysCount >= 3 || c.CableCoresCount >= 3)
+                    circPhases = 3;
 
                 string disc = !string.IsNullOrWhiteSpace(c.Discipline)
                     ? c.Discipline.Trim().ToLowerInvariant()
@@ -295,7 +306,14 @@ namespace AIEngineer.AutoCAD
                     Phases = circPhases,
                     PhaseLabel = circPhases == 3 ? "RYB" : "R",
                     IsSpare = false,
-                    Calc = calc
+                    Calc = calc,
+                    PanelWays = c.PanelWays != null ? new List<string>(c.PanelWays) : new List<string>(),
+                    PanelWaysCount = c.PanelWaysCount,
+                    AnnotatedCableDesignation = c.CableDesignation ?? "",
+                    TotalConductorsCount = c.TotalConductorsCount,
+                    ConduitSpec = c.ConduitSpec ?? "",
+                    InstallNote = c.InstallNote ?? "",
+                    AnnotatedVdPercent = c.AnnotatedVdPercent
                 });
             }
 
@@ -601,7 +619,7 @@ namespace AIEngineer.AutoCAD
                             w.BVa.ToString("0.#", CultureInfo.InvariantCulture),
                             w.Calc.DesignCurrentA.ToString("0.00", CultureInfo.InvariantCulture),
                             w.Calc.BreakerRatingA.ToString("0", CultureInfo.InvariantCulture) + "A " + w.Calc.BreakerType,
-                            w.Calc.CableDesignation,
+                            !string.IsNullOrWhiteSpace(w.AnnotatedCableDesignation) ? w.AnnotatedCableDesignation : w.Calc.CableDesignation,
                             w.Calc.VoltageDropPercent.ToString("0.00", CultureInfo.InvariantCulture) + "%",
                             w.Calc.Status
                         });
@@ -970,7 +988,15 @@ namespace AIEngineer.AutoCAD
                             PathCurvesCount = sr.PathHandles != null ? sr.PathHandles.Count : 0,
                             LengthMeters = sr.LengthMeters,
                             MatchedBlocksCount = mCnt,
-                            CountsByBlock = new Dictionary<string, int>(sr.CountsByBlock ?? new Dictionary<string, int>(), StringComparer.OrdinalIgnoreCase)
+                            CountsByBlock = new Dictionary<string, int>(sr.CountsByBlock ?? new Dictionary<string, int>(), StringComparer.OrdinalIgnoreCase),
+                            PanelWays = sr.PanelWays != null ? new List<string>(sr.PanelWays) : new List<string>(),
+                            PanelWaysCount = sr.PanelWaysCount,
+                            CableDesignation = sr.CableDesignation ?? "",
+                            CableCoresCount = sr.CableCoresCount,
+                            TotalConductorsCount = sr.TotalConductorsCount,
+                            ConduitSpec = sr.ConduitSpec ?? "",
+                            InstallNote = sr.InstallNote ?? "",
+                            AnnotatedVdPercent = sr.AnnotatedVdPercent
                         });
                     }
                     using (Transaction trExt = db.TransactionManager.StartTransaction())
@@ -1199,7 +1225,10 @@ namespace AIEngineer.AutoCAD
                     for (int wi = 0; wi < p.Ways.Count; wi++)
                     {
                         BalancedCircuitWay w = p.Ways[wi];
-                        cRows.Add(new Dictionary<string, object>
+                        string dispCable = w.IsSpare
+                            ? "SPARE"
+                            : (!string.IsNullOrWhiteSpace(w.AnnotatedCableDesignation) ? w.AnnotatedCableDesignation : w.Calc.CableDesignation);
+                        Dictionary<string, object> rowDict = new Dictionary<string, object>
                         {
                             { "way", w.WayIndex },
                             { "circuit_name", w.CircuitName },
@@ -1214,9 +1243,21 @@ namespace AIEngineer.AutoCAD
                             { "b_va", w.BVa },
                             { "design_current_ib_a", w.Calc != null ? w.Calc.DesignCurrentA : 0.0 },
                             { "breaker", w.IsSpare ? "10A MCB" : (w.Calc.BreakerRatingA.ToString("0", CultureInfo.InvariantCulture) + "A " + w.Calc.BreakerType) },
-                            { "cable", w.IsSpare ? "SPARE" : w.Calc.CableDesignation },
+                            { "cable", dispCable },
                             { "voltage_drop_percent", w.Calc != null ? w.Calc.VoltageDropPercent : 0.0 }
-                        });
+                        };
+                        if (!w.IsSpare && w.Calc != null && !string.IsNullOrWhiteSpace(w.AnnotatedCableDesignation))
+                            rowDict["calculated_cable"] = w.Calc.CableDesignation;
+                        if (w.PanelWays != null && w.PanelWays.Count > 0)
+                        {
+                            rowDict["panel_ways"] = new List<string>(w.PanelWays);
+                            rowDict["panel_ways_count"] = w.PanelWaysCount;
+                        }
+                        if (w.TotalConductorsCount > 0) rowDict["total_conductors_count"] = w.TotalConductorsCount;
+                        if (!string.IsNullOrEmpty(w.ConduitSpec)) rowDict["conduit_spec"] = w.ConduitSpec;
+                        if (!string.IsNullOrEmpty(w.InstallNote)) rowDict["install_note"] = w.InstallNote;
+                        if (w.AnnotatedVdPercent.HasValue) rowDict["annotated_vd_percent"] = Math.Round(w.AnnotatedVdPercent.Value, 3);
+                        cRows.Add(rowDict);
                     }
 
                     Dictionary<string, object> pDict = new Dictionary<string, object>

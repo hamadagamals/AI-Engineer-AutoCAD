@@ -3196,6 +3196,7 @@ namespace AIEngineer.AutoCAD
                             continue;
 
                         bool matchesLearned = (learnedProfile != null && learnedProfile.CircuitLayers.Contains(cv.Layer ?? "0"));
+                        if (IsArchitecturalLayerName(cv.Layer ?? "") && !matchesLearned) continue;
                         string upperLayer = (cv.Layer ?? "").ToUpperInvariant();
                         bool looksWire = HasCurveBulges(cv) ||
                             (cv.ColorIndex != 256 && cv.ColorIndex != 0) ||
@@ -3456,6 +3457,133 @@ namespace AIEngineer.AutoCAD
             }
         }
 
+        internal sealed class ParsedCircuitCallout
+        {
+            public string RawText = "";
+            public string CircuitName = "";
+            public string PanelName = "";
+            public List<string> PanelWays = new List<string>();
+            public int PanelWaysCount;
+            public string CableSpec = "";
+            public int CableCoresCount;
+            public double CablePhaseSizeMm2;
+            public double CableEarthSizeMm2;
+            public int TotalConductorsCount;
+            public string CableType = "";
+            public string ConduitSpec = "";
+            public string InstallNote = "";
+            public double? AnnotatedVdPercent;
+        }
+
+        private static ParsedCircuitCallout ParseCircuitCalloutText(string raw)
+        {
+            ParsedCircuitCallout c = new ParsedCircuitCallout();
+            if (string.IsNullOrWhiteSpace(raw)) return c;
+            string clean = Regex.Replace(raw, @"\\P|\r|\n", " ");
+            clean = Regex.Replace(clean, @"\\[A-Za-z][^;]*;|[{}]", "");
+            clean = Regex.Replace(clean, @"\s+", " ").Trim();
+            c.RawText = clean;
+            if (clean.Length == 0) return c;
+
+            string pPref;
+            string tag = ExtractBestCircuitTagFromText(clean, out pPref);
+            if (!string.IsNullOrEmpty(tag))
+            {
+                c.CircuitName = tag;
+                c.PanelName = !string.IsNullOrEmpty(pPref) ? pPref : ExtractPanelNameFallback(tag, "");
+
+                Match mParen = Regex.Match(tag, @"\(\s*([^)]+)\s*\)\s*$");
+                if (mParen.Success)
+                {
+                    string[] rawWays = mParen.Groups[1].Value.Split(new char[] { ',', '/', '&', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    for (int i = 0; i < rawWays.Length; i++)
+                    {
+                        string w = rawWays[i].Trim();
+                        if (!string.IsNullOrEmpty(w)) c.PanelWays.Add(w);
+                    }
+                    c.PanelWaysCount = c.PanelWays.Count;
+                }
+                else
+                {
+                    int sl = tag.LastIndexOfAny(new char[] { '/', '\\' });
+                    if (sl >= 0 && sl + 1 < tag.Length)
+                    {
+                        string[] rawWays = tag.Substring(sl + 1).Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+                        for (int i = 0; i < rawWays.Length; i++)
+                        {
+                            string w = rawWays[i].Trim();
+                            if (!string.IsNullOrEmpty(w)) c.PanelWays.Add(w);
+                        }
+                        c.PanelWaysCount = c.PanelWays.Count;
+                    }
+                }
+            }
+
+            // Cable spec e.g. 4X10mm2+6MM2, 4C x 10mm2 + 6mm2 E, 3x4+4mm2, 2x2.5+2.5mm2
+            Match mCable = Regex.Match(
+                clean,
+                @"(\d+)\s*[cC]?\s*[xX×\*]\s*(\d+(?:\.\d+)?)\s*(?:mm2|mm²|mm)?(?:\s*\+\s*(?:(\d+)\s*[xX×\*]\s*)?(\d+(?:\.\d+)?)\s*(?:mm2|mm²|mm)?)?",
+                RegexOptions.IgnoreCase);
+            if (mCable.Success)
+            {
+                int cores;
+                double phSz;
+                if (int.TryParse(mCable.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out cores) &&
+                    double.TryParse(mCable.Groups[2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out phSz) &&
+                    cores >= 1 && cores <= 12 && phSz > 0.0)
+                {
+                    c.CableCoresCount = cores;
+                    c.CablePhaseSizeMm2 = phSz;
+                    int earthCnt = 0;
+                    double eSz = 0.0;
+                    if (mCable.Groups[4].Success &&
+                        double.TryParse(mCable.Groups[4].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out eSz) && eSz > 0.0)
+                    {
+                        earthCnt = 1;
+                        if (mCable.Groups[3].Success)
+                            int.TryParse(mCable.Groups[3].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out earthCnt);
+                        if (earthCnt < 1) earthCnt = 1;
+                        c.CableEarthSizeMm2 = eSz;
+                    }
+                    c.TotalConductorsCount = cores + earthCnt;
+                    string cType = "";
+                    Match mType = Regex.Match(clean, @"\b(CU/XLPE/SWA/PVC|CU/XLPE/PVC|CU/XLPE|XLPE/SWA|XLPE|SWA|PVC|LSZH)\b", RegexOptions.IgnoreCase);
+                    if (mType.Success) cType = " " + mType.Groups[1].Value.ToUpperInvariant();
+                    c.CableType = cType.Trim();
+                    c.CableSpec = earthCnt > 0
+                        ? string.Format(CultureInfo.InvariantCulture, "{0}x{1:0.##}+{2}{3:0.##}mm2{4}",
+                            cores, phSz, earthCnt > 1 ? (earthCnt + "x") : "", eSz, cType)
+                        : string.Format(CultureInfo.InvariantCulture, "{0}x{1:0.##}mm2{2}", cores, phSz, cType);
+                }
+            }
+
+            // Conduit e.g. "UPVC 50mm class4", "PVC 25mm", "EMT 32mm"
+            Match mCond = Regex.Match(
+                clean,
+                @"\b(UPVC|PVC|EMT|IMC|RGS|HDPE|GI)\s*(\d+(?:\.\d+)?)\s*(MM|CM|INCH|""|)\b(?:\s*(?:CLASS\s*\d+|CL\s*\d+|SCH\s*\d+|PN\s*\d+))?",
+                RegexOptions.IgnoreCase);
+            if (mCond.Success)
+                c.ConduitSpec = Regex.Replace(mCond.Value.Trim(), @"\s+", " ");
+
+            // Install depth / F.F.L note e.g. "under F.F.L 60cm"
+            Match mInst = Regex.Match(
+                clean,
+                @"(?:(?:under|below|above)\s+F\.?\s*F\.?\s*L\.?\s*\d+(?:\.\d+)?\s*(?:cm|mm|m)\b|(?:buried|depth|burial)\s*(?:at\s*)?\d+(?:\.\d+)?\s*(?:cm|mm|m)\b)",
+                RegexOptions.IgnoreCase);
+            if (mInst.Success)
+                c.InstallNote = Regex.Replace(mInst.Value.Trim(), @"\s+", " ");
+
+            // Annotated VD% e.g. "V.D 0.54%" (or across newline)
+            Match mVd = Regex.Match(clean, @"(?:V\.?\s*D\.?|VOLTAGE\s*DROP)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%", RegexOptions.IgnoreCase);
+            if (mVd.Success)
+            {
+                double vdVal;
+                if (double.TryParse(mVd.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out vdVal))
+                    c.AnnotatedVdPercent = Math.Round(vdVal, 3);
+            }
+            return c;
+        }
+
         private static string ExtractBestCircuitTagFromText(string raw, out string panelPrefix)
         {
             panelPrefix = "";
@@ -3464,24 +3592,110 @@ namespace AIEngineer.AutoCAD
             clean = Regex.Replace(clean, @"\\[A-Za-z][^;]*;|[{}]", "").Trim();
             if (clean.Length == 0) return "";
 
-            Match m1 = Regex.Match(clean, @"\b(?:LP|DB|MDB|SMDB|EMDB|EMLP|ELP|LCP|PP|MCC)[-\s_]*[A-Z0-9]+(?:[./\\-][A-Z0-9]+)*\b", RegexOptions.IgnoreCase);
+            Match m1 = Regex.Match(
+                clean,
+                @"\b(?:LP|DB|MDB|SMDB|EMDB|EMLP|ELP|LCP|PP|MCC)[-\s_]*[A-Z0-9]+(?:[./\\-][A-Z0-9]+)*(?:\s*\(\s*[A-Z]?\d{1,3}(?:\s*[,/&\-]\s*[A-Z]?\d{1,3})*\s*\)|(?:,\s*[A-Z]?\d{1,3})+)?",
+                RegexOptions.IgnoreCase);
             if (m1.Success)
             {
-                string tag = m1.Value.Trim();
+                string tag = Regex.Replace(m1.Value.Trim(), @"\s*\(\s*", "(");
+                tag = Regex.Replace(tag, @"\s*\)\s*", ")");
+                tag = Regex.Replace(tag, @"\s*,\s*", ",");
+                int parenIdx = tag.IndexOf('(');
                 int slashIdx = tag.LastIndexOfAny(new char[] { '/', '\\' });
-                if (slashIdx > 0) panelPrefix = tag.Substring(0, slashIdx).Trim();
+                if (parenIdx > 0 && (slashIdx < 0 || parenIdx < slashIdx))
+                    panelPrefix = tag.Substring(0, parenIdx).Trim();
+                else if (slashIdx > 0)
+                    panelPrefix = tag.Substring(0, slashIdx).Trim();
                 return tag;
             }
 
-            Match m2 = Regex.Match(clean, @"\b[A-Z]{1,4}[-_.]?[0-9]+(?:[/\\.-][A-Z0-9]+)+\b", RegexOptions.IgnoreCase);
+            Match m2 = Regex.Match(
+                clean,
+                @"\b[A-Z]{1,4}[-_.]?[0-9]+(?:[/\\.-][A-Z0-9]+)+(?:\s*\(\s*[A-Z]?\d{1,3}(?:\s*[,/&\-]\s*[A-Z]?\d{1,3})*\s*\)|(?:,\s*[A-Z]?\d{1,3})+)?",
+                RegexOptions.IgnoreCase);
             if (m2.Success)
             {
-                string tag = m2.Value.Trim();
+                string tag = Regex.Replace(m2.Value.Trim(), @"\s*\(\s*", "(");
+                tag = Regex.Replace(tag, @"\s*\)\s*", ")");
+                tag = Regex.Replace(tag, @"\s*,\s*", ",");
+                int parenIdx = tag.IndexOf('(');
                 int slashIdx = tag.LastIndexOfAny(new char[] { '/', '\\' });
-                if (slashIdx > 0) panelPrefix = tag.Substring(0, slashIdx).Trim();
+                if (parenIdx > 0 && (slashIdx < 0 || parenIdx < slashIdx))
+                    panelPrefix = tag.Substring(0, parenIdx).Trim();
+                else if (slashIdx > 0)
+                    panelPrefix = tag.Substring(0, slashIdx).Trim();
                 return tag;
             }
             return "";
+        }
+
+        private sealed class CalloutTextLineItem
+        {
+            public string Text;
+            public double X;
+            public double Y;
+            public double Height;
+        }
+
+        private static string ExtractSelectedCalloutText(
+            Transaction tr,
+            Database db,
+            List<string> handles,
+            out List<Point2d> leaderAnchorPts)
+        {
+            leaderAnchorPts = new List<Point2d>();
+            if (tr == null || db == null || handles == null || handles.Count == 0) return "";
+            List<CalloutTextLineItem> lines = new List<CalloutTextLineItem>();
+            for (int i = 0; i < handles.Count; i++)
+            {
+                ObjectId oid = ResolveHandle(db, handles[i]);
+                if (oid.IsNull || oid.IsErased) continue;
+                Entity ent = tr.GetObject(oid, OpenMode.ForRead) as Entity;
+                if (ent == null || ent.IsErased || IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer)) continue;
+                if (ent is DBText)
+                {
+                    DBText dt = (DBText)ent;
+                    if (!string.IsNullOrWhiteSpace(dt.TextString))
+                        lines.Add(new CalloutTextLineItem { Text = dt.TextString.Trim(), X = dt.Position.X, Y = dt.Position.Y, Height = Math.Max(1e-3, dt.Height) });
+                }
+                else if (ent is MText)
+                {
+                    MText mt = (MText)ent;
+                    string txt = !string.IsNullOrEmpty(mt.Text) ? mt.Text : (mt.Contents ?? "");
+                    if (!string.IsNullOrWhiteSpace(txt))
+                        lines.Add(new CalloutTextLineItem { Text = txt.Trim(), X = mt.Location.X, Y = mt.Location.Y, Height = Math.Max(1e-3, mt.TextHeight) });
+                }
+                else if (ent is MLeader)
+                {
+                    MLeader ml = (MLeader)ent;
+                    if (ml.ContentType == ContentType.MTextContent && ml.MText != null && !string.IsNullOrWhiteSpace(ml.MText.Text))
+                        lines.Add(new CalloutTextLineItem { Text = ml.MText.Text.Trim(), X = ml.MText.Location.X, Y = ml.MText.Location.Y, Height = Math.Max(1e-3, ml.MText.TextHeight) });
+                    try
+                    {
+                        for (int li = 0; li < ml.LeaderLineCount; li++)
+                        {
+                            try { Point3d vp = ml.GetFirstVertex(li); leaderAnchorPts.Add(new Point2d(vp.X, vp.Y)); } catch { }
+                        }
+                    }
+                    catch { }
+                }
+                else if (ent is Leader)
+                {
+                    Leader ldr = (Leader)ent;
+                    try { if (ldr.NumVertices > 0) { Point3d vp = ldr.VertexAt(0); leaderAnchorPts.Add(new Point2d(vp.X, vp.Y)); } } catch { }
+                }
+            }
+            if (lines.Count == 0) return "";
+            lines.Sort(delegate(CalloutTextLineItem a, CalloutTextLineItem b)
+            {
+                if (Math.Abs(b.Y - a.Y) > Math.Min(a.Height, b.Height) * 0.45)
+                    return b.Y.CompareTo(a.Y);
+                return a.X.CompareTo(b.X);
+            });
+            List<string> joined = new List<string>(lines.Count);
+            for (int i = 0; i < lines.Count; i++) joined.Add(lines[i].Text);
+            return string.Join(" ", joined.ToArray());
         }
 
         private static void CollectNearbyCircuitTags(
@@ -3496,9 +3710,30 @@ namespace AIEngineer.AutoCAD
             out string panelName,
             out string terminationType)
         {
+            ParsedCircuitCallout dummyCallout;
+            CollectNearbyCircuitTags(
+                tr, ms, layerHiddenFlags, visibleOnly, searchRadius,
+                terminators, openWireTips,
+                out circuitName, out panelName, out terminationType, out dummyCallout);
+        }
+
+        private static void CollectNearbyCircuitTags(
+            Transaction tr,
+            BlockTableRecord ms,
+            Dictionary<string, bool> layerHiddenFlags,
+            bool visibleOnly,
+            double searchRadius,
+            List<CircuitTerminatorInfo> terminators,
+            List<Point2d> openWireTips,
+            out string circuitName,
+            out string panelName,
+            out string terminationType,
+            out ParsedCircuitCallout parsedCallout)
+        {
             circuitName = "";
             panelName = "";
             terminationType = "open_end";
+            parsedCallout = new ParsedCircuitCallout();
 
             if (terminators.Count > 0)
             {
@@ -3523,17 +3758,20 @@ namespace AIEngineer.AutoCAD
                 string lbl = terminators[ti].Label;
                 if (!string.IsNullOrWhiteSpace(lbl))
                 {
-                    string pPref;
-                    string tag = ExtractBestCircuitTagFromText(lbl, out pPref);
-                    if (!string.IsNullOrEmpty(tag))
+                    ParsedCircuitCallout cTerm = ParseCircuitCalloutText(lbl);
+                    if (!string.IsNullOrEmpty(cTerm.CircuitName))
                     {
-                        circuitName = tag;
-                        if (!string.IsNullOrEmpty(pPref)) panelName = pPref;
-                        else if (!string.IsNullOrEmpty(terminators[ti].PanelName)) panelName = terminators[ti].PanelName;
+                        circuitName = cTerm.CircuitName;
+                        panelName = !string.IsNullOrEmpty(cTerm.PanelName) ? cTerm.PanelName : (terminators[ti].PanelName ?? "");
+                        parsedCallout = cTerm;
                         return;
                     }
                 }
             }
+
+            List<CalloutTextLineItem> allTexts = new List<CalloutTextLineItem>();
+            CalloutTextLineItem bestTextItem = null;
+            List<Point2d> matchedLeaderTailAnchors = new List<Point2d>();
 
             foreach (ObjectId mid in ms)
             {
@@ -3543,25 +3781,75 @@ namespace AIEngineer.AutoCAD
                 if (IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer)) continue;
                 if (visibleOnly && !IsEntityVisible(ent, layerHiddenFlags)) continue;
 
+                if (ent is Leader)
+                {
+                    Leader ldr = (Leader)ent;
+                    try
+                    {
+                        if (ldr.NumVertices >= 2)
+                        {
+                            Point3d pTip = ldr.VertexAt(0);
+                            Point3d pTail = ldr.VertexAt(ldr.NumVertices - 1);
+                            Point2d tip2 = new Point2d(pTip.X, pTip.Y);
+                            for (int ai = 0; ai < anchors.Count; ai++)
+                            {
+                                if (anchors[ai].GetDistanceTo(tip2) <= searchRadius)
+                                {
+                                    matchedLeaderTailAnchors.Add(new Point2d(pTail.X, pTail.Y));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                    continue;
+                }
+
                 string txt = null;
                 Point2d pos = Point2d.Origin;
+                double tH = 0.20;
                 DBText dbt = ent as DBText;
                 MText mt = ent as MText;
                 MLeader ml = ent as MLeader;
-                if (dbt != null) { txt = dbt.TextString; pos = new Point2d(dbt.Position.X, dbt.Position.Y); }
-                else if (mt != null) { txt = mt.Text; pos = new Point2d(mt.Location.X, mt.Location.Y); }
+                if (dbt != null) { txt = dbt.TextString; pos = new Point2d(dbt.Position.X, dbt.Position.Y); tH = Math.Max(1e-3, dbt.Height); }
+                else if (mt != null) { txt = mt.Text; pos = new Point2d(mt.Location.X, mt.Location.Y); tH = Math.Max(1e-3, mt.TextHeight); }
                 else if (ml != null && ml.ContentType == ContentType.MTextContent && ml.MText != null)
                 {
                     txt = ml.MText.Text;
                     pos = new Point2d(ml.MText.Location.X, ml.MText.Location.Y);
+                    tH = Math.Max(1e-3, ml.MText.TextHeight);
                 }
                 if (string.IsNullOrWhiteSpace(txt)) continue;
+
+                allTexts.Add(new CalloutTextLineItem { Text = txt.Trim(), X = pos.X, Y = pos.Y, Height = tH });
 
                 double minAnchorDist = double.MaxValue;
                 for (int ai = 0; ai < anchors.Count; ai++)
                 {
                     double d = anchors[ai].GetDistanceTo(pos);
                     if (d < minAnchorDist) minAnchorDist = d;
+                }
+                for (int li = 0; li < matchedLeaderTailAnchors.Count; li++)
+                {
+                    double d = matchedLeaderTailAnchors[li].GetDistanceTo(pos);
+                    if (d < minAnchorDist) minAnchorDist = d;
+                }
+                if (ml != null)
+                {
+                    try
+                    {
+                        for (int lli = 0; lli < ml.LeaderLineCount; lli++)
+                        {
+                            Point3d v0 = ml.GetFirstVertex(lli);
+                            Point2d v02 = new Point2d(v0.X, v0.Y);
+                            for (int ai = 0; ai < anchors.Count; ai++)
+                            {
+                                double d = anchors[ai].GetDistanceTo(v02);
+                                if (d < minAnchorDist) minAnchorDist = d;
+                            }
+                        }
+                    }
+                    catch { }
                 }
                 if (minAnchorDist > searchRadius) continue;
 
@@ -3573,6 +3861,42 @@ namespace AIEngineer.AutoCAD
                     bestDist = minAnchorDist;
                     circuitName = tag;
                     panelName = pPref;
+                    bestTextItem = allTexts[allTexts.Count - 1];
+                }
+            }
+
+            if (bestTextItem != null)
+            {
+                double stackReach = Math.Max(searchRadius, bestTextItem.Height * 14.0);
+                List<CalloutTextLineItem> stacked = new List<CalloutTextLineItem>();
+                Point2d bestPt = new Point2d(bestTextItem.X, bestTextItem.Y);
+                for (int i = 0; i < allTexts.Count; i++)
+                {
+                    CalloutTextLineItem cand = allTexts[i];
+                    if (bestPt.GetDistanceTo(new Point2d(cand.X, cand.Y)) <= stackReach &&
+                        Math.Abs(cand.Height - bestTextItem.Height) <= bestTextItem.Height * 0.85)
+                    {
+                        stacked.Add(cand);
+                    }
+                }
+                stacked.Sort(delegate(CalloutTextLineItem a, CalloutTextLineItem b)
+                {
+                    if (Math.Abs(b.Y - a.Y) > Math.Min(a.Height, b.Height) * 0.45)
+                        return b.Y.CompareTo(a.Y);
+                    return a.X.CompareTo(b.X);
+                });
+                List<string> sLines = new List<string>(stacked.Count);
+                for (int i = 0; i < stacked.Count; i++) sLines.Add(stacked[i].Text);
+                ParsedCircuitCallout fullC = ParseCircuitCalloutText(string.Join(" ", sLines.ToArray()));
+                if (!string.IsNullOrEmpty(fullC.CircuitName))
+                {
+                    parsedCallout = fullC;
+                    circuitName = fullC.CircuitName;
+                    if (!string.IsNullOrEmpty(fullC.PanelName)) panelName = fullC.PanelName;
+                }
+                else
+                {
+                    parsedCallout = ParseCircuitCalloutText(bestTextItem.Text);
                 }
             }
 
@@ -3587,6 +3911,143 @@ namespace AIEngineer.AutoCAD
                     }
                 }
             }
+        }
+
+        private sealed class CompetingWireEntry
+        {
+            public ObjectId Id;
+            public string Layer;
+            public Curve FlatCurve;
+            public double MinX;
+            public double MinY;
+            public double MaxX;
+            public double MaxY;
+        }
+
+        private static bool IsCompetingElectricalWire(Curve cv, HashSet<string> ourLayers)
+        {
+            if (cv == null || cv.IsErased) return false;
+            string lyr = cv.Layer ?? "0";
+            if (IsLegendOrHighlightLayer(lyr) || IsAiAnnotationLayer(lyr)) return false;
+            bool inOurLayer = ourLayers != null && ourLayers.Contains(lyr);
+            if (IsArchitecturalLayerName(lyr) && !inOurLayer) return false;
+            return inOurLayer || IsCandidateCircuitLayerName(lyr) || (cv.ColorIndex != 256 && cv.ColorIndex != 0 && cv.ColorIndex != 7);
+        }
+
+        private static double ComputeMinDistToCurveCandidatesXY(List<PathCurveCandidate> paths, Point2d pt)
+        {
+            if (paths == null || paths.Count == 0) return double.MaxValue;
+            double best = double.MaxValue;
+            Point3d p3 = new Point3d(pt.X, pt.Y, 0.0);
+            for (int i = 0; i < paths.Count; i++)
+            {
+                PathCurveCandidate pc = paths[i];
+                if (pc == null || pc.FlatCurve == null) continue;
+                double dx = pt.X < pc.MinX ? (pc.MinX - pt.X) : (pt.X > pc.MaxX ? (pt.X - pc.MaxX) : 0.0);
+                double dy = pt.Y < pc.MinY ? (pc.MinY - pt.Y) : (pt.Y > pc.MaxY ? (pt.Y - pc.MaxY) : 0.0);
+                double bDist = Math.Sqrt(dx * dx + dy * dy);
+                if (bDist >= best) continue;
+                try
+                {
+                    Point3d cp = pc.FlatCurve.GetClosestPointTo(p3, false);
+                    double d = Math.Sqrt((cp.X - pt.X) * (cp.X - pt.X) + (cp.Y - pt.Y) * (cp.Y - pt.Y));
+                    if (d < best) best = d;
+                }
+                catch { }
+            }
+            return best;
+        }
+
+        private static bool HasCloserCompetingWireToBlockCenter(
+            Point2d blkCenter,
+            Extents3d blockBounds,
+            double blockSpan,
+            double dOurs,
+            bool oursTouchesBounds,
+            SpatialGrid2D<CompetingWireEntry> wireGrid,
+            HashSet<ObjectId> pathIdSet)
+        {
+            if (wireGrid == null || double.IsInfinity(dOurs) || dOurs >= double.MaxValue * 0.5) return false;
+            double deadCenterTol = Math.Max(1e-4, blockSpan * 0.08);
+            if (dOurs <= deadCenterTol) return false;
+
+            double r = dOurs * 0.90;
+            List<CompetingWireEntry> near = new List<CompetingWireEntry>();
+            wireGrid.Query(blkCenter.X - r, blkCenter.Y - r, blkCenter.X + r, blkCenter.Y + r, near);
+            Point3d p3 = new Point3d(blkCenter.X, blkCenter.Y, 0.0);
+            double pad = Math.Max(1e-4, blockSpan * 0.02);
+            double dOtherMin = double.MaxValue;
+            for (int i = 0; i < near.Count; i++)
+            {
+                CompetingWireEntry w = near[i];
+                if (w == null || w.FlatCurve == null) continue;
+                if (pathIdSet != null && pathIdSet.Contains(w.Id)) continue;
+                double dx = blkCenter.X < w.MinX ? (w.MinX - blkCenter.X) : (blkCenter.X > w.MaxX ? (blkCenter.X - w.MaxX) : 0.0);
+                double dy = blkCenter.Y < w.MinY ? (w.MinY - blkCenter.Y) : (blkCenter.Y > w.MaxY ? (blkCenter.Y - w.MaxY) : 0.0);
+                if (Math.Sqrt(dx * dx + dy * dy) >= dOurs * 0.85) continue;
+                try
+                {
+                    Point3d cp = w.FlatCurve.GetClosestPointTo(p3, false);
+                    bool cpInBounds = cp.X >= blockBounds.MinPoint.X - pad && cp.X <= blockBounds.MaxPoint.X + pad &&
+                                      cp.Y >= blockBounds.MinPoint.Y - pad && cp.Y <= blockBounds.MaxPoint.Y + pad;
+                    if (oursTouchesBounds && !cpInBounds) continue;
+                    double d = Math.Sqrt((cp.X - blkCenter.X) * (cp.X - blkCenter.X) + (cp.Y - blkCenter.Y) * (cp.Y - blkCenter.Y));
+                    if (d < dOtherMin) dOtherMin = d;
+                }
+                catch { }
+            }
+            if (oursTouchesBounds)
+                return dOtherMin <= blockSpan * 0.25 && dOtherMin + 1e-4 < dOurs * 0.60;
+            return dOtherMin + 1e-4 < dOurs * 0.78;
+        }
+
+        private static bool HasCloserCompetingWireToBlockCenterCached(
+            Point2d blkCenter,
+            Extents3d blockBounds,
+            double blockSpan,
+            double dOurs,
+            bool oursTouchesBounds,
+            SpatialGrid2D<CurveChainNode> sharedCurveGrid,
+            HashSet<ObjectId> compIdSet,
+            HashSet<string> ourWireLayers)
+        {
+            if (sharedCurveGrid == null || double.IsInfinity(dOurs) || dOurs >= double.MaxValue * 0.5) return false;
+            double deadCenterTol = Math.Max(1e-4, blockSpan * 0.08);
+            if (dOurs <= deadCenterTol) return false;
+
+            double r = dOurs * 0.90;
+            List<CurveChainNode> near = new List<CurveChainNode>();
+            sharedCurveGrid.Query(blkCenter.X - r, blkCenter.Y - r, blkCenter.X + r, blkCenter.Y + r, near);
+            Point3d p3 = new Point3d(blkCenter.X, blkCenter.Y, 0.0);
+            double pad = Math.Max(1e-4, blockSpan * 0.02);
+            double dOtherMin = double.MaxValue;
+            for (int i = 0; i < near.Count; i++)
+            {
+                CurveChainNode cn = near[i];
+                if (cn == null || cn.FlatCurve == null) continue;
+                if (compIdSet != null && compIdSet.Contains(cn.Id)) continue;
+                string lyr = cn.Layer ?? "0";
+                bool inOur = ourWireLayers != null && ourWireLayers.Contains(lyr);
+                if (IsArchitecturalLayerName(lyr) && !inOur) continue;
+                if (!(inOur || IsCandidateCircuitLayerName(lyr) || cn.IsNonNeutralColor)) continue;
+
+                double dx = blkCenter.X < cn.MinX ? (cn.MinX - blkCenter.X) : (blkCenter.X > cn.MaxX ? (blkCenter.X - cn.MaxX) : 0.0);
+                double dy = blkCenter.Y < cn.MinY ? (cn.MinY - blkCenter.Y) : (blkCenter.Y > cn.MaxY ? (blkCenter.Y - cn.MaxY) : 0.0);
+                if (Math.Sqrt(dx * dx + dy * dy) >= dOurs * 0.85) continue;
+                try
+                {
+                    Point3d cp = cn.FlatCurve.GetClosestPointTo(p3, false);
+                    bool cpInBounds = cp.X >= blockBounds.MinPoint.X - pad && cp.X <= blockBounds.MaxPoint.X + pad &&
+                                      cp.Y >= blockBounds.MinPoint.Y - pad && cp.Y <= blockBounds.MaxPoint.Y + pad;
+                    if (oursTouchesBounds && !cpInBounds) continue;
+                    double d = Math.Sqrt((cp.X - blkCenter.X) * (cp.X - blkCenter.X) + (cp.Y - blkCenter.Y) * (cp.Y - blkCenter.Y));
+                    if (d < dOtherMin) dOtherMin = d;
+                }
+                catch { }
+            }
+            if (oursTouchesBounds)
+                return dOtherMin <= blockSpan * 0.25 && dOtherMin + 1e-4 < dOurs * 0.60;
+            return dOtherMin + 1e-4 < dOurs * 0.78;
         }
 
         private static void MatchBlocksAlongCircuitPath(
@@ -3616,11 +4077,107 @@ namespace AIEngineer.AutoCAD
             ref Extents3d? selectedAndPathExt,
             out int containerBlocksSkipped)
         {
+            int dummyCloser;
+            MatchBlocksAlongCircuitPath(
+                tr, ms, layerHiddenFlags, pathCandidates, pathIdSet, touchedTerminatorBlockIds,
+                visibleOnly, includeAnonymous, includeSystem, includeContainerBlocks, includeTerminatorBlocks, connectGaps,
+                layerFilter, blockFilter, excludeBlocks, explicitTolerance,
+                unitsPerM, medianFixtureSpan, drawingSpan, learnedProfile,
+                matchedItems, countsByBlock, terminators, ref selectedAndPathExt,
+                out containerBlocksSkipped, out dummyCloser);
+        }
+
+        private static void MatchBlocksAlongCircuitPath(
+            Transaction tr,
+            BlockTableRecord ms,
+            Dictionary<string, bool> layerHiddenFlags,
+            List<PathCurveCandidate> pathCandidates,
+            HashSet<ObjectId> pathIdSet,
+            HashSet<ObjectId> touchedTerminatorBlockIds,
+            bool visibleOnly,
+            bool includeAnonymous,
+            bool includeSystem,
+            bool includeContainerBlocks,
+            bool includeTerminatorBlocks,
+            bool connectGaps,
+            string layerFilter,
+            string blockFilter,
+            List<string> excludeBlocks,
+            double? explicitTolerance,
+            double unitsPerM,
+            double medianFixtureSpan,
+            double drawingSpan,
+            CircuitSampleProfile learnedProfile,
+            List<PathBlockMatchItem> matchedItems,
+            Dictionary<string, int> countsByBlock,
+            List<CircuitTerminatorInfo> terminators,
+            ref Extents3d? selectedAndPathExt,
+            out int containerBlocksSkipped,
+            out int skippedCloserWireCount)
+        {
             containerBlocksSkipped = 0;
+            skippedCloserWireCount = 0;
             double refFixSpan = (learnedProfile != null && learnedProfile.MedianFixtureSpan > 1e-3)
                 ? learnedProfile.MedianFixtureSpan
                 : medianFixtureSpan;
 
+            List<CompetingWireEntry> compWireRefs = new List<CompetingWireEntry>();
+            SpatialGrid2D<CompetingWireEntry> compWireGrid = null;
+            if (pathCandidates != null && pathCandidates.Count > 0)
+            {
+                double pMinX = double.MaxValue, pMinY = double.MaxValue, pMaxX = double.MinValue, pMaxY = double.MinValue;
+                HashSet<string> ourWireLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int pi = 0; pi < pathCandidates.Count; pi++)
+                {
+                    if (pathCandidates[pi].MinX < pMinX) pMinX = pathCandidates[pi].MinX;
+                    if (pathCandidates[pi].MinY < pMinY) pMinY = pathCandidates[pi].MinY;
+                    if (pathCandidates[pi].MaxX > pMaxX) pMaxX = pathCandidates[pi].MaxX;
+                    if (pathCandidates[pi].MaxY > pMaxY) pMaxY = pathCandidates[pi].MaxY;
+                }
+                foreach (ObjectId pid in pathIdSet)
+                {
+                    try
+                    {
+                        Curve pc0 = tr.GetObject(pid, OpenMode.ForRead) as Curve;
+                        if (pc0 != null && !string.IsNullOrEmpty(pc0.Layer)) ourWireLayers.Add(pc0.Layer);
+                    }
+                    catch { }
+                }
+                double compPad = Math.Max(refFixSpan > 1e-3 ? refFixSpan * 3.0 : 1.0 * unitsPerM, 0.5 * unitsPerM);
+                double compCell = Math.Max(0.5, compPad * 0.5);
+                compWireGrid = new SpatialGrid2D<CompetingWireEntry>(compCell);
+                foreach (ObjectId wid in ms)
+                {
+                    if (wid.IsErased || pathIdSet.Contains(wid)) continue;
+                    Entity we = tr.GetObject(wid, OpenMode.ForRead) as Entity;
+                    Curve wc = we as Curve;
+                    if (!IsCompetingElectricalWire(wc, ourWireLayers)) continue;
+                    if (visibleOnly && !IsEntityVisible(we, layerHiddenFlags)) continue;
+                    Extents3d wex;
+                    try { wex = wc.GeometricExtents; } catch { continue; }
+                    if (!IsFiniteBounds(wex)) continue;
+                    if (wex.MaxPoint.X < pMinX - compPad || wex.MinPoint.X > pMaxX + compPad ||
+                        wex.MaxPoint.Y < pMinY - compPad || wex.MinPoint.Y > pMaxY + compPad)
+                        continue;
+                    Curve wFlat = FlattenCurveToXY(wc);
+                    if (wFlat == null) continue;
+                    CompetingWireEntry cwEntry = new CompetingWireEntry
+                    {
+                        Id = wid,
+                        Layer = wc.Layer ?? "0",
+                        FlatCurve = wFlat,
+                        MinX = wex.MinPoint.X,
+                        MinY = wex.MinPoint.Y,
+                        MaxX = wex.MaxPoint.X,
+                        MaxY = wex.MaxPoint.Y
+                    };
+                    compWireRefs.Add(cwEntry);
+                    compWireGrid.Add(cwEntry.MinX, cwEntry.MinY, cwEntry.MaxX, cwEntry.MaxY, cwEntry);
+                }
+            }
+
+            try
+            {
             foreach (ObjectId mid in ms)
             {
                 if (mid.IsErased || pathIdSet.Contains(mid)) continue;
@@ -3715,6 +4272,16 @@ namespace AIEngineer.AutoCAD
                 if (!DoesPathHitBlockXY(pathCandidates, br, bex, tol, unitsPerM, out hitPathIdx, out hitDist))
                     continue;
 
+                Point2d blkCenterPt = new Point2d((bex.MinPoint.X + bex.MaxPoint.X) * 0.5, (bex.MinPoint.Y + bex.MaxPoint.Y) * 0.5);
+                double dOursToCenter = ComputeMinDistToCurveCandidatesXY(pathCandidates, blkCenterPt);
+                int dummyHpDirect; double dummyHdDirect;
+                bool oursTouchesBounds = DoesPathHitBlockXY(pathCandidates, br, bex, Math.Max(1e-4, blockSpan * 0.02), unitsPerM, out dummyHpDirect, out dummyHdDirect);
+                if (HasCloserCompetingWireToBlockCenter(blkCenterPt, bex, blockSpan, dOursToCenter, oursTouchesBounds, compWireGrid, pathIdSet))
+                {
+                    skippedCloserWireCount++;
+                    continue;
+                }
+
                 matchedItems.Add(new PathBlockMatchItem
                 {
                     Id = mid,
@@ -3733,6 +4300,14 @@ namespace AIEngineer.AutoCAD
                 if (!selectedAndPathExt.HasValue) selectedAndPathExt = bex;
                 else { Extents3d c = selectedAndPathExt.Value; c.AddExtents(bex); selectedAndPathExt = c; }
             }
+            }
+            finally
+            {
+                for (int cwi = 0; cwi < compWireRefs.Count; cwi++)
+                {
+                    try { if (compWireRefs[cwi].FlatCurve != null) compWireRefs[cwi].FlatCurve.Dispose(); } catch { }
+                }
+            }
         }
 
         private sealed class CircuitTraceMeta
@@ -3748,12 +4323,14 @@ namespace AIEngineer.AutoCAD
             public string UnitScaleWarning = "";
             public bool CircuitGuardTriggered;
             public int MaxCircuitBlocks = 35;
+            public int SkippedCloserOtherWireCount;
             public bool LearnedSampleThisCall;
             public bool FromSavedMemory;
             public bool UserLocked;
             public bool SavedToMemory;
             public bool MergedWithSaved;
             public bool SkipAutoMemorySave;
+            public ParsedCircuitCallout Callout;
             public List<CircuitTerminatorInfo> Terminators = new List<CircuitTerminatorInfo>();
         }
 
@@ -3782,6 +4359,16 @@ namespace AIEngineer.AutoCAD
             public string CableDesignation = "";
             public double VoltageDropPercent;
             public string LoadSource = "";
+            public List<string> PanelWays = new List<string>();
+            public int PanelWaysCount;
+            public int CableCoresCount;
+            public double CablePhaseSizeMm2;
+            public double CableEarthSizeMm2;
+            public int TotalConductorsCount;
+            public string ConduitSpec = "";
+            public string InstallNote = "";
+            public double? AnnotatedVdPercent;
+            public string RawCalloutText = "";
         }
 
         private static readonly Dictionary<IntPtr, Dictionary<string, SavedCircuitRecord>> s_savedCircuitsByDb =
@@ -3876,6 +4463,9 @@ namespace AIEngineer.AutoCAD
             num = 0;
             if (string.IsNullOrWhiteSpace(circuitName)) return false;
             string clean = circuitName.Trim();
+            Match mParen = Regex.Match(clean, @"\(\s*[A-Za-z]*(\d+)");
+            if (mParen.Success && int.TryParse(mParen.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out num))
+                return true;
             int slash = clean.LastIndexOfAny(new char[] { '/', '\\' });
             string tail = (slash >= 0 && slash + 1 < clean.Length) ? clean.Substring(slash + 1) : clean;
             Match mTail = Regex.Match(tail, @"(\d+)");
@@ -4015,8 +4605,19 @@ namespace AIEngineer.AutoCAD
                 BreakerRatingA = GetDouble(rd, "breaker_in_a", 0.0),
                 CableDesignation = GetStr(rd, "cable_designation") ?? "",
                 VoltageDropPercent = GetDouble(rd, "voltage_drop_percent", 0.0),
-                LoadSource = GetStr(rd, "load_source") ?? ""
+                LoadSource = GetStr(rd, "load_source") ?? "",
+                PanelWays = GetStringList(rd, "panel_ways"),
+                PanelWaysCount = GetInt(rd, "panel_ways_count", 0),
+                CableCoresCount = GetInt(rd, "cable_cores_count", 0),
+                CablePhaseSizeMm2 = GetDouble(rd, "cable_phase_size_mm2", 0.0),
+                CableEarthSizeMm2 = GetDouble(rd, "cable_earth_size_mm2", 0.0),
+                TotalConductorsCount = GetInt(rd, "total_conductors_count", 0),
+                ConduitSpec = GetStr(rd, "conduit_spec") ?? "",
+                InstallNote = GetStr(rd, "install_note") ?? "",
+                AnnotatedVdPercent = GetNullableDouble(rd, "annotated_vd_percent"),
+                RawCalloutText = GetStr(rd, "raw_callout_text") ?? ""
             };
+            if (rec.PanelWaysCount <= 0 && rec.PanelWays.Count > 0) rec.PanelWaysCount = rec.PanelWays.Count;
             Dictionary<string, object> cntObj = rd.ContainsKey("counts_by_block") ? rd["counts_by_block"] as Dictionary<string, object> : null;
             if (cntObj != null)
             {
@@ -4111,6 +4712,16 @@ namespace AIEngineer.AutoCAD
             if (!string.IsNullOrEmpty(r.CableDesignation)) d["cable_designation"] = r.CableDesignation;
             if (r.VoltageDropPercent > 0.0) d["voltage_drop_percent"] = Math.Round(r.VoltageDropPercent, 2);
             if (!string.IsNullOrEmpty(r.LoadSource)) d["load_source"] = r.LoadSource;
+            if (r.PanelWays != null && r.PanelWays.Count > 0) d["panel_ways"] = r.PanelWays;
+            if (r.PanelWaysCount > 0) d["panel_ways_count"] = r.PanelWaysCount;
+            if (r.CableCoresCount > 0) d["cable_cores_count"] = r.CableCoresCount;
+            if (r.CablePhaseSizeMm2 > 0.0) d["cable_phase_size_mm2"] = r.CablePhaseSizeMm2;
+            if (r.CableEarthSizeMm2 > 0.0) d["cable_earth_size_mm2"] = r.CableEarthSizeMm2;
+            if (r.TotalConductorsCount > 0) d["total_conductors_count"] = r.TotalConductorsCount;
+            if (!string.IsNullOrEmpty(r.ConduitSpec)) d["conduit_spec"] = r.ConduitSpec;
+            if (!string.IsNullOrEmpty(r.InstallNote)) d["install_note"] = r.InstallNote;
+            if (r.AnnotatedVdPercent.HasValue) d["annotated_vd_percent"] = Math.Round(r.AnnotatedVdPercent.Value, 3);
+            if (!string.IsNullOrEmpty(r.RawCalloutText)) d["raw_callout_text"] = r.RawCalloutText;
             return d;
         }
 
@@ -4171,7 +4782,17 @@ namespace AIEngineer.AutoCAD
                 BreakerRatingA = src.BreakerRatingA,
                 CableDesignation = src.CableDesignation ?? "",
                 VoltageDropPercent = src.VoltageDropPercent,
-                LoadSource = src.LoadSource ?? ""
+                LoadSource = src.LoadSource ?? "",
+                PanelWays = new List<string>(src.PanelWays ?? new List<string>()),
+                PanelWaysCount = src.PanelWaysCount,
+                CableCoresCount = src.CableCoresCount,
+                CablePhaseSizeMm2 = src.CablePhaseSizeMm2,
+                CableEarthSizeMm2 = src.CableEarthSizeMm2,
+                TotalConductorsCount = src.TotalConductorsCount,
+                ConduitSpec = src.ConduitSpec ?? "",
+                InstallNote = src.InstallNote ?? "",
+                AnnotatedVdPercent = src.AnnotatedVdPercent,
+                RawCalloutText = src.RawCalloutText ?? ""
             };
         }
 
@@ -4445,6 +5066,14 @@ namespace AIEngineer.AutoCAD
             public List<ObjectId> MatchedBlockIds = new List<ObjectId>();
             public List<ObjectId> PathCurveIds = new List<ObjectId>();
             public List<string> MatchedHandles = new List<string>();
+            public List<string> PanelWays = new List<string>();
+            public int PanelWaysCount;
+            public string CableDesignation = "";
+            public int CableCoresCount;
+            public int TotalConductorsCount;
+            public string ConduitSpec = "";
+            public string InstallNote = "";
+            public double? AnnotatedVdPercent;
         }
 
         private sealed class DrawingCircuitScanResult
@@ -4839,6 +5468,7 @@ namespace AIEngineer.AutoCAD
                 { "bridged_blocks_count", bridgedBlockCount },
                 { "bridged_block_names", bridgedBlockNames },
                 { "container_blocks_skipped", containerBlocksSkipped },
+                { "skipped_closer_other_wire_count", traceMeta != null ? traceMeta.SkippedCloserOtherWireCount : 0 },
                 { "path_entity_types", new List<string>(pathEntityTypes) },
                 { "path_handles", pathHandles },
                 { "total_path_length_units", Round(totalPathLenUnits) },
@@ -4884,6 +5514,10 @@ namespace AIEngineer.AutoCAD
                     }
                     catch { }
                 }
+                ParsedCircuitCallout callout = (traceMeta != null) ? traceMeta.Callout : null;
+                string resolvedCableDesig = (callout != null && !string.IsNullOrEmpty(callout.CableSpec))
+                    ? callout.CableSpec
+                    : (lvRes != null ? (lvRes.CableDesignation ?? "") : "");
                 SavedCircuitRecord rec = new SavedCircuitRecord
                 {
                     CircuitName = circuitName,
@@ -4905,11 +5539,34 @@ namespace AIEngineer.AutoCAD
                     LoadKva = lvRes != null ? lvRes.LoadKva : 0.0,
                     DesignCurrentA = lvRes != null ? lvRes.DesignCurrentA : 0.0,
                     BreakerRatingA = lvRes != null ? lvRes.BreakerRatingA : 0.0,
-                    CableDesignation = lvRes != null ? (lvRes.CableDesignation ?? "") : "",
-                    VoltageDropPercent = lvRes != null ? lvRes.VoltageDropPercent : 0.0,
-                    LoadSource = loadSource ?? ""
+                    CableDesignation = resolvedCableDesig,
+                    VoltageDropPercent = lvRes != null ? lvRes.VoltageDropPercent : (callout != null && callout.AnnotatedVdPercent.HasValue ? callout.AnnotatedVdPercent.Value : 0.0),
+                    LoadSource = loadSource ?? "",
+                    PanelWays = callout != null ? new List<string>(callout.PanelWays) : new List<string>(),
+                    PanelWaysCount = callout != null ? callout.PanelWaysCount : 0,
+                    CableCoresCount = callout != null ? callout.CableCoresCount : 0,
+                    CablePhaseSizeMm2 = callout != null ? callout.CablePhaseSizeMm2 : 0.0,
+                    CableEarthSizeMm2 = callout != null ? callout.CableEarthSizeMm2 : 0.0,
+                    TotalConductorsCount = callout != null ? callout.TotalConductorsCount : 0,
+                    ConduitSpec = callout != null ? (callout.ConduitSpec ?? "") : "",
+                    InstallNote = callout != null ? (callout.InstallNote ?? "") : "",
+                    AnnotatedVdPercent = callout != null ? callout.AnnotatedVdPercent : null,
+                    RawCalloutText = callout != null ? (callout.RawText ?? "") : ""
                 };
                 SaveCircuitRecordToMemory(doc, rec, true, traceMeta != null && (traceMeta.UserLocked || traceMeta.MergedWithSaved));
+                if (callout != null)
+                {
+                    if (callout.PanelWays.Count > 0) { res["panel_ways"] = callout.PanelWays; res["panel_ways_count"] = callout.PanelWaysCount; }
+                    if (!string.IsNullOrEmpty(callout.CableSpec)) res["cable_spec"] = callout.CableSpec;
+                    if (callout.CableCoresCount > 0) res["cable_cores_count"] = callout.CableCoresCount;
+                    if (callout.CablePhaseSizeMm2 > 0) res["cable_phase_size_mm2"] = callout.CablePhaseSizeMm2;
+                    if (callout.CableEarthSizeMm2 > 0) res["cable_earth_size_mm2"] = callout.CableEarthSizeMm2;
+                    if (callout.TotalConductorsCount > 0) res["total_conductors_count"] = callout.TotalConductorsCount;
+                    if (!string.IsNullOrEmpty(callout.ConduitSpec)) res["conduit_spec"] = callout.ConduitSpec;
+                    if (!string.IsNullOrEmpty(callout.InstallNote)) res["install_note"] = callout.InstallNote;
+                    if (callout.AnnotatedVdPercent.HasValue) res["annotated_vd_percent"] = callout.AnnotatedVdPercent.Value;
+                    if (!string.IsNullOrEmpty(callout.RawText)) res["raw_callout_text"] = callout.RawText;
+                }
             }
             if (includeElecCalc)
             {
@@ -5140,22 +5797,27 @@ namespace AIEngineer.AutoCAD
 
                         BlockTableRecord ms = (BlockTableRecord)tr.GetObject(
                             SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                        int skippedCloser = 0;
                         MatchBlocksAlongCircuitPath(
                             tr, ms, layerHiddenFlags, pathCandidates, pathIdSet, touchedTermSet,
                             visibleOnly, includeAnonymous, includeSystem, includeContainerBlocks, includeTerminatorBlocks, connectGaps,
                             layerFilter, blockFilter, excludeBlocks, explicitTolerance,
                             unitsPerM, medianFixtureSpan, drawingSpan, learnedProfile,
-                            matchedItems, countsByBlock, traceMeta.Terminators, ref selectedAndPathExt, out containerBlocksSkipped);
+                            matchedItems, countsByBlock, traceMeta.Terminators, ref selectedAndPathExt,
+                            out containerBlocksSkipped, out skippedCloser);
+                        traceMeta.SkippedCloserOtherWireCount = skippedCloser;
 
                         double tightTipTol = refSpan > 1e-3 ? Math.Max(1e-3, refSpan * 0.12) : Math.Max(1e-3, 0.06 * unitsPerM);
                         List<Point2d> openTips = CollectOpenWireTips(tr, pathCurveIds, tightTipTol);
                         double tagSearchRadius = refSpan > 1e-3
                             ? (refSpan * 4.5)
                             : Math.Max(2.5 * unitsPerM, 2.5);
+                        ParsedCircuitCallout nearCallout;
                         CollectNearbyCircuitTags(
                             tr, ms, layerHiddenFlags, visibleOnly, tagSearchRadius,
                             traceMeta.Terminators, openTips,
-                            out traceMeta.CircuitName, out traceMeta.PanelName, out traceMeta.TerminationType);
+                            out traceMeta.CircuitName, out traceMeta.PanelName, out traceMeta.TerminationType, out nearCallout);
+                        traceMeta.Callout = nearCallout;
 
                         tr.Commit();
                     }
@@ -5270,6 +5932,11 @@ namespace AIEngineer.AutoCAD
             {
                 int sepIdx = traceMeta.CircuitName.LastIndexOfAny(new char[] { '/', '\\' });
                 if (sepIdx > 0) traceMeta.PanelName = traceMeta.CircuitName.Substring(0, sepIdx).Trim();
+                else
+                {
+                    int parenIdx = traceMeta.CircuitName.IndexOf('(');
+                    if (parenIdx > 0) traceMeta.PanelName = traceMeta.CircuitName.Substring(0, parenIdx).Trim();
+                }
             }
 
             if ((selectBlocks || selectPaths || zoom) && !db.TileMode)
@@ -5374,16 +6041,53 @@ namespace AIEngineer.AutoCAD
                         List<Point2d> openTips = CollectOpenWireTips(tr, dedupWireIds, tightTipTol);
                         double tagSearchRadius = refSpan > 1e-3 ? (refSpan * 4.5) : Math.Max(2.5 * unitsPerM, 2.5);
                         string foundCName, foundPName, foundTerm;
+                        ParsedCircuitCallout foundCallout;
                         CollectNearbyCircuitTags(
                             tr, msTag, layerHiddenFlags, visibleOnly, tagSearchRadius,
                             traceMeta.Terminators, openTips,
-                            out foundCName, out foundPName, out foundTerm);
+                            out foundCName, out foundPName, out foundTerm, out foundCallout);
                         if (string.IsNullOrWhiteSpace(traceMeta.CircuitName) && !string.IsNullOrWhiteSpace(foundCName))
                             traceMeta.CircuitName = foundCName;
                         if (string.IsNullOrWhiteSpace(traceMeta.PanelName) && !string.IsNullOrWhiteSpace(foundPName))
                             traceMeta.PanelName = foundPName;
                         if (!string.IsNullOrWhiteSpace(foundTerm) && foundTerm != "open_end")
                             traceMeta.TerminationType = foundTerm;
+                        if (foundCallout != null &&
+                            (!string.IsNullOrEmpty(foundCallout.CableSpec) ||
+                             !string.IsNullOrEmpty(foundCallout.ConduitSpec) ||
+                             !string.IsNullOrEmpty(foundCallout.InstallNote) ||
+                             foundCallout.AnnotatedVdPercent.HasValue ||
+                             foundCallout.PanelWaysCount > 0))
+                        {
+                            traceMeta.Callout = foundCallout;
+                        }
+                    }
+
+                    SavedCircuitRecord existingCalloutRec;
+                    if (traceMeta.Callout == null && !string.IsNullOrWhiteSpace(traceMeta.CircuitName) &&
+                        TryGetSavedCircuitRecord(doc, traceMeta.CircuitName, out existingCalloutRec) && existingCalloutRec != null &&
+                        (!string.IsNullOrEmpty(existingCalloutRec.CableDesignation) ||
+                         !string.IsNullOrEmpty(existingCalloutRec.ConduitSpec) ||
+                         !string.IsNullOrEmpty(existingCalloutRec.InstallNote) ||
+                         existingCalloutRec.AnnotatedVdPercent.HasValue ||
+                         (existingCalloutRec.PanelWays != null && existingCalloutRec.PanelWays.Count > 0)))
+                    {
+                        traceMeta.Callout = new ParsedCircuitCallout
+                        {
+                            RawText = existingCalloutRec.RawCalloutText ?? "",
+                            CircuitName = existingCalloutRec.CircuitName ?? "",
+                            PanelName = existingCalloutRec.PanelName ?? "",
+                            PanelWays = existingCalloutRec.PanelWays != null ? new List<string>(existingCalloutRec.PanelWays) : new List<string>(),
+                            PanelWaysCount = existingCalloutRec.PanelWaysCount,
+                            CableSpec = existingCalloutRec.CableDesignation ?? "",
+                            CableCoresCount = existingCalloutRec.CableCoresCount,
+                            CablePhaseSizeMm2 = existingCalloutRec.CablePhaseSizeMm2,
+                            CableEarthSizeMm2 = existingCalloutRec.CableEarthSizeMm2,
+                            TotalConductorsCount = existingCalloutRec.TotalConductorsCount,
+                            ConduitSpec = existingCalloutRec.ConduitSpec ?? "",
+                            InstallNote = existingCalloutRec.InstallNote ?? "",
+                            AnnotatedVdPercent = existingCalloutRec.AnnotatedVdPercent
+                        };
                     }
 
                     tr.Commit();
@@ -5480,12 +6184,16 @@ namespace AIEngineer.AutoCAD
             using (DocumentLock docLock = doc.LockDocument())
             {
                 bool selectionHadOnlyBlocks = false;
+                string selectedCalloutText = "";
+                List<Point2d> selectedLeaderTips = new List<Point2d>();
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
                     ScanCircuitSeedEntities(
                         db, tr, candidateHandles, visibleOnly, rawUnitsPerM, usePreviousPath, excludeBlocks, blockFilter, learnSample,
                         ref learnedProfile, out drawingSpan, out medianFixtureSpan, out selectionHadOnlyBlocks, out skippedAiLayerCount,
                         pathCurveIds, pathHandles, selectedBlockIds);
+                    if (candidateHandles.Count > 0 && pathCurveIds.Count == 0 && selectedBlockIds.Count == 0)
+                        selectedCalloutText = ExtractSelectedCalloutText(tr, db, candidateHandles, out selectedLeaderTips);
                     tr.Commit();
                 }
 
@@ -5500,6 +6208,30 @@ namespace AIEngineer.AutoCAD
                     if (pathCurveIds.Count == 0 && selectedBlockIds.Count == 0)
                         return Err("لتثبيت مكونات اللينية وحذف ما ألغيته، حدد الأسلاك و/أو البلوكات المطلوب الإبقاء عليها في أوتوكاد أولاً.");
                     string targetName = !string.IsNullOrWhiteSpace(requestedCircuitName) ? requestedCircuitName : GetLastActiveCircuitName(doc);
+                    SavedCircuitRecord lockedBaseRec;
+                    if (selectionHadOnlyBlocks && TryGetSavedCircuitRecord(doc, targetName, out lockedBaseRec) &&
+                        lockedBaseRec != null && lockedBaseRec.PathHandles.Count > 0)
+                    {
+                        using (Transaction trLk = db.TransactionManager.StartTransaction())
+                        {
+                            pathCurveIds.Clear();
+                            pathHandles.Clear();
+                            for (int li = 0; li < lockedBaseRec.PathHandles.Count; li++)
+                            {
+                                ObjectId oid = ResolveHandle(db, lockedBaseRec.PathHandles[li]);
+                                if (!oid.IsNull && !oid.IsErased)
+                                {
+                                    Curve cv = trLk.GetObject(oid, OpenMode.ForRead) as Curve;
+                                    if (cv != null)
+                                    {
+                                        pathCurveIds.Add(oid);
+                                        pathHandles.Add(cv.Handle.ToString());
+                                    }
+                                }
+                            }
+                            trLk.Commit();
+                        }
+                    }
                     return BuildAndFinalizeExplicitCircuit(
                         doc, db, args, pathCurveIds, selectedBlockIds, selectedBlockIds.Count == 0,
                         targetName, "", learnedProfile, effectiveUnitsPerM, scaleInferred, scaleWarning, insunitsName,
@@ -5651,6 +6383,173 @@ namespace AIEngineer.AutoCAD
                         selectBlocks, selectPaths, drawLegend, zoom, zoomMode, title, hasCustomTitle, legendPosition,
                         layerFilter, blockFilter, excludeBlocks, explicitTolerance,
                         false, true, true, true);
+                }
+
+                // Case 2.5: Selected feeder/circuit callout text or MLeader only (e.g. 4X10mm2+6MM2 UPVC 50mm class4 / under F.F.L 60cm DB-LCP6(14,16,18) V.D / 0.54%)
+                if (pathCurveIds.Count == 0 && selectedBlockIds.Count == 0 && !string.IsNullOrWhiteSpace(selectedCalloutText))
+                {
+                    ParsedCircuitCallout callout = ParseCircuitCalloutText(selectedCalloutText);
+                    string activeLastName = GetLastActiveCircuitName(doc);
+                    string targetName = !string.IsNullOrWhiteSpace(requestedCircuitName)
+                        ? requestedCircuitName
+                        : (!string.IsNullOrWhiteSpace(callout.CircuitName) ? callout.CircuitName : activeLastName);
+
+                    SavedCircuitRecord existingRec = null;
+                    if (!string.IsNullOrWhiteSpace(targetName))
+                        TryGetSavedCircuitRecord(doc, targetName, out existingRec);
+                    if (existingRec == null && !string.IsNullOrWhiteSpace(activeLastName))
+                        TryGetSavedCircuitRecord(doc, activeLastName, out existingRec);
+
+                    if (existingRec != null)
+                    {
+                        string prevNormKey = NormalizeCircuitKey(existingRec.CircuitName);
+                        if (!string.IsNullOrWhiteSpace(requestedCircuitName))
+                            existingRec.CircuitName = requestedCircuitName.Trim();
+                        else if (!string.IsNullOrWhiteSpace(callout.CircuitName))
+                            existingRec.CircuitName = callout.CircuitName;
+
+                        if (!string.IsNullOrWhiteSpace(callout.PanelName))
+                            existingRec.PanelName = callout.PanelName;
+                        else if (string.IsNullOrWhiteSpace(existingRec.PanelName))
+                            existingRec.PanelName = ExtractPanelNameFallback(existingRec.CircuitName, "");
+
+                        if (callout.PanelWays != null && callout.PanelWays.Count > 0)
+                        {
+                            existingRec.PanelWays = new List<string>(callout.PanelWays);
+                            existingRec.PanelWaysCount = callout.PanelWaysCount;
+                        }
+                        if (!string.IsNullOrWhiteSpace(callout.CableSpec))
+                        {
+                            existingRec.CableDesignation = callout.CableSpec;
+                            existingRec.CableCoresCount = callout.CableCoresCount;
+                            existingRec.CablePhaseSizeMm2 = callout.CablePhaseSizeMm2;
+                            existingRec.CableEarthSizeMm2 = callout.CableEarthSizeMm2;
+                            existingRec.TotalConductorsCount = callout.TotalConductorsCount;
+                        }
+                        if (!string.IsNullOrWhiteSpace(callout.ConduitSpec))
+                            existingRec.ConduitSpec = callout.ConduitSpec;
+                        if (!string.IsNullOrWhiteSpace(callout.InstallNote))
+                            existingRec.InstallNote = callout.InstallNote;
+                        if (callout.AnnotatedVdPercent.HasValue)
+                        {
+                            existingRec.AnnotatedVdPercent = callout.AnnotatedVdPercent.Value;
+                            existingRec.VoltageDropPercent = callout.AnnotatedVdPercent.Value;
+                        }
+                        existingRec.RawCalloutText = !string.IsNullOrWhiteSpace(callout.RawText) ? callout.RawText : selectedCalloutText;
+
+                        using (Transaction trStamp = db.TransactionManager.StartTransaction())
+                        {
+                            StampCircuitXData(
+                                db, trStamp,
+                                existingRec.PathHandles, existingRec.MatchedBlockHandles, existingRec.ExcludedHandles,
+                                existingRec.CircuitName, existingRec.PanelName, existingRec.Discipline);
+                            trStamp.Commit();
+                        }
+                        string newNormKey = NormalizeCircuitKey(existingRec.CircuitName);
+                        if (!string.IsNullOrEmpty(prevNormKey) && !string.IsNullOrEmpty(newNormKey) &&
+                            !string.Equals(prevNormKey, newNormKey, StringComparison.OrdinalIgnoreCase))
+                        {
+                            lock (s_lastCoordLock)
+                            {
+                                Dictionary<string, SavedCircuitRecord> bucket;
+                                if (s_savedCircuitsByDb.TryGetValue(db.UnmanagedObject, out bucket) && bucket != null)
+                                    bucket.Remove(prevNormKey);
+                            }
+                        }
+                        SaveCircuitRecordToMemory(doc, existingRec, true, true);
+
+                        lock (s_lastCoordLock)
+                        {
+                            GuidedInventorySession gSess;
+                            if (s_guidedInventoryByDb.TryGetValue(db.UnmanagedObject, out gSess) && gSess != null && gSess.Active &&
+                                gSess.CurrentIndex >= 0 && gSess.CurrentIndex < gSess.Queue.Count)
+                            {
+                                GuidedInventoryItem gItem = gSess.Queue[gSess.CurrentIndex];
+                                if (gItem != null)
+                                {
+                                    gItem.CircuitName = existingRec.CircuitName;
+                                    gItem.PanelName = existingRec.PanelName;
+                                    gItem.PanelWays = new List<string>(existingRec.PanelWays);
+                                    gItem.PanelWaysCount = existingRec.PanelWaysCount;
+                                    gItem.CableDesignation = existingRec.CableDesignation;
+                                    gItem.CableCoresCount = existingRec.CableCoresCount;
+                                    gItem.TotalConductorsCount = existingRec.TotalConductorsCount;
+                                    gItem.ConduitSpec = existingRec.ConduitSpec;
+                                    gItem.InstallNote = existingRec.InstallNote;
+                                    gItem.AnnotatedVdPercent = existingRec.AnnotatedVdPercent;
+                                    gItem.RawCalloutText = existingRec.RawCalloutText;
+                                }
+                            }
+                        }
+
+                        Dictionary<string, object> calloutRes = new Dictionary<string, object>
+                        {
+                            { "ok", true },
+                            { "callout_applied", true },
+                            { "circuit_name", existingRec.CircuitName ?? "" },
+                            { "panel_name", existingRec.PanelName ?? "" },
+                            { "panel_ways", existingRec.PanelWays ?? new List<string>() },
+                            { "panel_ways_count", existingRec.PanelWaysCount },
+                            { "cable_spec", existingRec.CableDesignation ?? "" },
+                            { "cable_cores_count", existingRec.CableCoresCount },
+                            { "cable_phase_size_mm2", existingRec.CablePhaseSizeMm2 },
+                            { "cable_earth_size_mm2", existingRec.CableEarthSizeMm2 },
+                            { "total_conductors_count", existingRec.TotalConductorsCount },
+                            { "conduit_spec", existingRec.ConduitSpec ?? "" },
+                            { "install_note", existingRec.InstallNote ?? "" },
+                            { "annotated_vd_percent", existingRec.AnnotatedVdPercent.HasValue ? (object)Math.Round(existingRec.AnnotatedVdPercent.Value, 3) : null },
+                            { "raw_callout_text", existingRec.RawCalloutText ?? "" },
+                            { "matched_blocks_count", existingRec.MatchedBlocksCount },
+                            { "total_path_length_m", Math.Round(existingRec.LengthMeters, 2) },
+                            { "counts_by_block", existingRec.CountsByBlock ?? new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase) }
+                        };
+                        return calloutRes;
+                    }
+                    else if (!string.IsNullOrWhiteSpace(callout.CircuitName))
+                    {
+                        using (Transaction trSeed = db.TransactionManager.StartTransaction())
+                        {
+                            Dictionary<string, bool> hiddenS = BuildLayerHiddenMap(db, trSeed);
+                            double refSpS = (learnedProfile != null && learnedProfile.MedianFixtureSpan > 1e-3) ? learnedProfile.MedianFixtureSpan : medianFixtureSpan;
+                            List<ObjectId> cSeeds = FindCircuitSeedCurveByTagName(db, trSeed, callout.CircuitName, hiddenS, visibleOnly, refSpS, effectiveUnitsPerM);
+                            if (cSeeds.Count == 0 && selectedLeaderTips.Count > 0)
+                            {
+                                BlockTableRecord msS = (BlockTableRecord)trSeed.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                                double bestLD = Math.Max(refSpS * 2.5, 2.5 * effectiveUnitsPerM);
+                                ObjectId bestLC = ObjectId.Null;
+                                foreach (ObjectId oidS in msS)
+                                {
+                                    if (oidS.IsErased) continue;
+                                    Curve cvS = trSeed.GetObject(oidS, OpenMode.ForRead) as Curve;
+                                    if (cvS == null || IsLegendOrHighlightLayer(cvS.Layer) || IsAiAnnotationLayer(cvS.Layer) || IsArchitecturalLayerName(cvS.Layer ?? "")) continue;
+                                    if (visibleOnly && !IsEntityVisible(cvS, hiddenS)) continue;
+                                    for (int ti = 0; ti < selectedLeaderTips.Count; ti++)
+                                    {
+                                        try
+                                        {
+                                            Point3d cp = cvS.GetClosestPointTo(new Point3d(selectedLeaderTips[ti].X, selectedLeaderTips[ti].Y, 0.0), false);
+                                            double dc = selectedLeaderTips[ti].GetDistanceTo(new Point2d(cp.X, cp.Y));
+                                            if (dc < bestLD) { bestLD = dc; bestLC = oidS; }
+                                        }
+                                        catch { }
+                                    }
+                                }
+                                if (!bestLC.IsNull) cSeeds.Add(bestLC);
+                            }
+                            for (int si = 0; si < cSeeds.Count; si++)
+                            {
+                                Entity eS = trSeed.GetObject(cSeeds[si], OpenMode.ForRead) as Entity;
+                                if (eS != null && !pathCurveIds.Contains(cSeeds[si]))
+                                {
+                                    pathCurveIds.Add(cSeeds[si]);
+                                    pathHandles.Add(eS.Handle.ToString());
+                                }
+                            }
+                            trSeed.Commit();
+                        }
+                        if (string.IsNullOrWhiteSpace(requestedCircuitName))
+                            requestedCircuitName = callout.CircuitName;
+                    }
                 }
 
                 // Case 3: Recall or find circuit directly by circuit_name (ignoring accidentally selected AI table entities!)
@@ -5935,6 +6834,39 @@ namespace AIEngineer.AutoCAD
             ref Extents3d? selectedAndPathExt,
             out int containerBlocksSkipped)
         {
+            MatchBlocksFromCacheAlongPath(
+                cache, pathCandidates, pathIdSet, touchedTerminatorBlockIds,
+                includeContainerBlocks, includeTerminatorBlocks, connectGaps,
+                layerFilter, blockFilter, excludeBlocks, explicitTolerance,
+                unitsPerM, medianFixtureSpan, drawingSpan, learnedProfile,
+                matchedItems, countsByBlock, terminators, ref selectedAndPathExt,
+                out containerBlocksSkipped, null, null);
+        }
+
+        private static void MatchBlocksFromCacheAlongPath(
+            DrawingBlockGeometryCache cache,
+            List<PathCurveCandidate> pathCandidates,
+            HashSet<ObjectId> pathIdSet,
+            HashSet<ObjectId> touchedTerminatorBlockIds,
+            bool includeContainerBlocks,
+            bool includeTerminatorBlocks,
+            bool connectGaps,
+            string layerFilter,
+            string blockFilter,
+            List<string> excludeBlocks,
+            double? explicitTolerance,
+            double unitsPerM,
+            double medianFixtureSpan,
+            double drawingSpan,
+            CircuitSampleProfile learnedProfile,
+            List<PathBlockMatchItem> matchedItems,
+            Dictionary<string, int> countsByBlock,
+            List<CircuitTerminatorInfo> terminators,
+            ref Extents3d? selectedAndPathExt,
+            out int containerBlocksSkipped,
+            SpatialGrid2D<CurveChainNode> sharedCurveGrid,
+            HashSet<string> ourWireLayers)
+        {
             containerBlocksSkipped = 0;
             if (cache == null || pathCandidates == null || pathCandidates.Count == 0) return;
 
@@ -6045,6 +6977,13 @@ namespace AIEngineer.AutoCAD
                 int hitPathIdx;
                 double hitDist;
                 if (!DoesPathHitBlockXY(pathCandidates, fb.Br, fb.Bounds, tol, unitsPerM, out hitPathIdx, out hitDist))
+                    continue;
+
+                Point2d blkCenterPt = new Point2d(fb.CenterX, fb.CenterY);
+                double dOursToCenter = ComputeMinDistToCurveCandidatesXY(pathCandidates, blkCenterPt);
+                int dummyHpDirect; double dummyHdDirect;
+                bool oursTouchesBounds = DoesPathHitBlockXY(pathCandidates, fb.Br, fb.Bounds, Math.Max(1e-4, fb.Span * 0.02), unitsPerM, out dummyHpDirect, out dummyHdDirect);
+                if (sharedCurveGrid != null && HasCloserCompetingWireToBlockCenterCached(blkCenterPt, fb.Bounds, fb.Span, dOursToCenter, oursTouchesBounds, sharedCurveGrid, pathIdSet, ourWireLayers))
                     continue;
 
                 matchedSet.Add(fb.Id);
@@ -6158,7 +7097,8 @@ namespace AIEngineer.AutoCAD
                     false, false, connectGaps,
                     "", "", new List<string>(), null,
                     effectiveUnitsPerM, refSpan, drawingSpan, learnedProfile,
-                    matchedItems, countsByBlock, terminators, ref compExt, out containerSkipped);
+                    matchedItems, countsByBlock, terminators, ref compExt, out containerSkipped,
+                    sharedCurveGrid, scope.TargetLayers);
             }
             finally
             {
@@ -6173,6 +7113,9 @@ namespace AIEngineer.AutoCAD
             double tagRadius = refSpan > 1e-3 ? (refSpan * 4.5) : Math.Max(2.5 * effectiveUnitsPerM, 2.5);
             string circName, panelName, termType;
             cache.QueryNearbyCircuitTag(terminators, openTips, tagRadius, out circName, out panelName, out termType);
+            ParsedCircuitCallout calloutMeta = !string.IsNullOrWhiteSpace(circName)
+                ? ParseCircuitCalloutText(circName)
+                : new ParsedCircuitCallout();
 
             bool nn;
             string wColor = ResolveEntityEffectiveColorKey(seedCv, colorMap, out nn);
@@ -6217,7 +7160,15 @@ namespace AIEngineer.AutoCAD
                 EndSummary = endText + (guardTriggered ? " [توقف حد الأمان]" : ""),
                 MatchedBlockIds = matchedIds,
                 PathCurveIds = compIds,
-                MatchedHandles = matchedHandles
+                MatchedHandles = matchedHandles,
+                PanelWays = new List<string>(calloutMeta.PanelWays),
+                PanelWaysCount = calloutMeta.PanelWaysCount,
+                CableDesignation = calloutMeta.CableSpec ?? "",
+                CableCoresCount = calloutMeta.CableCoresCount,
+                TotalConductorsCount = calloutMeta.TotalConductorsCount,
+                ConduitSpec = calloutMeta.ConduitSpec ?? "",
+                InstallNote = calloutMeta.InstallNote ?? "",
+                AnnotatedVdPercent = calloutMeta.AnnotatedVdPercent
             };
         }
 
@@ -6319,7 +7270,15 @@ namespace AIEngineer.AutoCAD
                 EndSummary = "معتمد ومقفل من المستخدم (" + matchedIds.Count.ToString(CultureInfo.InvariantCulture) + " وحدة)",
                 MatchedBlockIds = matchedIds,
                 PathCurveIds = compIds,
-                MatchedHandles = matchedHandles
+                MatchedHandles = matchedHandles,
+                PanelWays = lr.PanelWays != null ? new List<string>(lr.PanelWays) : new List<string>(),
+                PanelWaysCount = lr.PanelWaysCount,
+                CableDesignation = lr.CableDesignation ?? "",
+                CableCoresCount = lr.CableCoresCount,
+                TotalConductorsCount = lr.TotalConductorsCount,
+                ConduitSpec = lr.ConduitSpec ?? "",
+                InstallNote = lr.InstallNote ?? "",
+                AnnotatedVdPercent = lr.AnnotatedVdPercent
             };
         }
 
@@ -6554,7 +7513,15 @@ namespace AIEngineer.AutoCAD
                         MatchedBlocksCount = c.MatchedBlocksCount,
                         LengthMeters = c.LengthMeters,
                         CountsByBlock = new Dictionary<string, int>(c.CountsByBlock, StringComparer.OrdinalIgnoreCase),
-                        UserLocked = false
+                        UserLocked = false,
+                        CableDesignation = c.CableDesignation ?? "",
+                        PanelWays = c.PanelWays != null ? new List<string>(c.PanelWays) : new List<string>(),
+                        PanelWaysCount = c.PanelWaysCount,
+                        CableCoresCount = c.CableCoresCount,
+                        TotalConductorsCount = c.TotalConductorsCount,
+                        ConduitSpec = c.ConduitSpec ?? "",
+                        InstallNote = c.InstallNote ?? "",
+                        AnnotatedVdPercent = c.AnnotatedVdPercent
                     }, false, overwriteLocked);
                 }
             }

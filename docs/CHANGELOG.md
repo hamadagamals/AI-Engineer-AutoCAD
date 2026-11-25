@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-25 - Phase 7.1: Field-Feedback Precision Upgrade (Gridded Legend Extraction, Nearest-Wire Ownership, Multi-Line Feeder Callout Parser & Exact Circuit Lock)
+
+- **Multi-Column Gridded Legend Extractor & Strict Selection Isolation (`integrations/autocad_context_plugin/CadProjectLegendDb.cs`):**
+  - Added grid-line column/row table extractor (`TryExtractGridTableLegend`, `CollectLegendGridSegmentsFromEntity`, `ClusterSortedAxisCoords`, `FindGridBandIndex`) to handle bordered multi-column Legend schedules with single-letter tag columns, fixture symbol columns, title + spec columns, `PCS` / `M/L` quantity columns (`IsLegendQtyCellText`), and right-side illustration/photo columns without quantity leaks.
+  - Added block-name wattage fallback in `ParseSpecFromLegendDescription` (e.g. `upligh9w` -> `9W`) when description omits explicit wattage, and updated `ManageProjectLegendDb` (`action: 'extract_from_selection'`) to return `extracted_items` scoped strictly to the current selection while pruning stale non-user-verified catalog entries.
+- **Nearest-Competing-Wire Fixture Ownership & Exact Subset Lock (`integrations/autocad_context_plugin/CadMepAndTakeoffTools.cs`):**
+  - Added `HasCloserCompetingWireToBlockCenter` and `HasCloserCompetingWireToBlockCenterCached` so wires touching a fixture's outer tolerance yield to a competing electrical wire passing closer to the fixture center core (`skipped_closer_other_wire_count`), while protecting fixtures whose own wire already terminates cleanly inside/on the fixture bounding box.
+  - Fixed `FindBlocksAlongPath` `lock_selection_as_circuit: true` when the engineer re-selects only kept fixture blocks (`selectionHadOnlyBlocks`) to hydrate and lock strictly against the existing circuit's `PathHandles` without re-expanding unrequested wires.
+- **Rich Multi-Line Feeder/Circuit Callout Parser & Propagation (`CadMepAndTakeoffTools.cs`, `CadGuidedInventoryTools.cs`, `CadPanelAndQaTools.cs`, `DirectCadAgent.cs`):**
+  - Added `ParsedCircuitCallout`, `ParseCircuitCalloutText`, and `ExtractSelectedCalloutText` to extract multi-line callouts such as `4X10mm2+6MM2 UPVC 50mm class4 / under F.F.L 60cm DB-LCP6(14,16,18) V.D / 0.54%` (grouped panel ways `[14, 16, 18]`, phase + earth conductor counts/sizes, conduit spec, depth note, and annotated VD%) both automatically via `Leader`/`MLeader` proximity and interactively when the engineer selects callout text alone (`callout_applied: true` and `guided_circuit_inventory(action: 'rename')`).
+  - Propagated `PanelWays`, `CableDesignation`, `ConduitSpec`, `InstallNote`, and `AnnotatedVdPercent` across `SavedCircuitRecord`, `TracedCircuitSummary`, `GuidedInventoryItem`, and `generate_panel_schedule_and_sld` (automatically sizing >=3-way / >=3-core feeders as 3-phase `RYB` and splitting `(` in `ExtractPanelNameFallback`).
+  - Updated `DirectCadAgent.cs` Rules `6k` & `6o` and added AcCore tests `TEST16A`–`TEST16D` in `tests/autocad_accore_harness/AcCoreRegressionVerifier.cs`.
+
 ## 2026-11-25 - Phase 7: AutoCAD Commercial Release Polish (XData Circuit Recovery, Full MV/LV + Landscape Master SLD, Interactive DIALux Review Dialog & Commercial Palette UI)
 
 - **XData Circuit Tagging, Saved-Circuit Recall & Cross-PC Portability (`integrations/autocad_context_plugin/CadGuidedInventoryTools.cs`, `CadProjectLegendDb.cs`, `CadMepAndTakeoffTools.cs`):**

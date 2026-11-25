@@ -276,6 +276,15 @@ namespace AIEngineer.AutoCAD
             public List<Dictionary<string, object>> MissingSpecBlocks = new List<Dictionary<string, object>>();
             public bool GuardTriggered;
             public int MaxCircuitBlocks = 35;
+            public List<string> PanelWays = new List<string>();
+            public int PanelWaysCount;
+            public string CableDesignation = "";
+            public int CableCoresCount;
+            public int TotalConductorsCount;
+            public string ConduitSpec = "";
+            public string InstallNote = "";
+            public double? AnnotatedVdPercent;
+            public string RawCalloutText = "";
         }
 
         internal sealed class GuidedInventorySession
@@ -484,7 +493,7 @@ namespace AIEngineer.AutoCAD
         private static Dictionary<string, object> GuidedItemToDict(GuidedInventoryItem item, int queueIndex, int totalCount)
         {
             if (item == null) return new Dictionary<string, object>();
-            return new Dictionary<string, object>
+            Dictionary<string, object> d = new Dictionary<string, object>
             {
                 { "queue_index", queueIndex + 1 },
                 { "total_count", totalCount },
@@ -509,6 +518,19 @@ namespace AIEngineer.AutoCAD
                 { "missing_spec_blocks", item.MissingSpecBlocks ?? new List<Dictionary<string, object>>() },
                 { "guard_triggered", item.GuardTriggered }
             };
+            if (item.PanelWays != null && item.PanelWays.Count > 0)
+            {
+                d["panel_ways"] = new List<string>(item.PanelWays);
+                d["panel_ways_count"] = item.PanelWaysCount;
+            }
+            if (!string.IsNullOrEmpty(item.CableDesignation)) d["cable_spec"] = item.CableDesignation;
+            if (item.CableCoresCount > 0) d["cable_cores_count"] = item.CableCoresCount;
+            if (item.TotalConductorsCount > 0) d["total_conductors_count"] = item.TotalConductorsCount;
+            if (!string.IsNullOrEmpty(item.ConduitSpec)) d["conduit_spec"] = item.ConduitSpec;
+            if (!string.IsNullOrEmpty(item.InstallNote)) d["install_note"] = item.InstallNote;
+            if (item.AnnotatedVdPercent.HasValue) d["annotated_vd_percent"] = Math.Round(item.AnnotatedVdPercent.Value, 3);
+            if (!string.IsNullOrEmpty(item.RawCalloutText)) d["raw_callout_text"] = item.RawCalloutText;
+            return d;
         }
 
         private static void ClearGuidedHighlightLayer(Database db, Transaction tr)
@@ -723,10 +745,33 @@ namespace AIEngineer.AutoCAD
                         List<Point2d> openTips = CollectOpenWireTips(tr, wireIds, tightTipTol);
                         double tagSearchR = refSpan > 1e-3 ? (refSpan * 4.5) : Math.Max(2.5 * unitsPerM, 2.5);
                         string foundC, foundP, foundT;
-                        CollectNearbyCircuitTags(tr, ms, layerHiddenFlags, true, tagSearchR, terminators, openTips, out foundC, out foundP, out foundT);
+                        ParsedCircuitCallout foundCallout;
+                        CollectNearbyCircuitTags(tr, ms, layerHiddenFlags, true, tagSearchR, terminators, openTips, out foundC, out foundP, out foundT, out foundCallout);
                         if (!string.IsNullOrWhiteSpace(foundC)) item.CircuitName = foundC;
                         if (!string.IsNullOrWhiteSpace(foundP)) item.PanelName = foundP;
                         if (!string.IsNullOrWhiteSpace(foundT)) item.TerminationType = foundT;
+                        if (foundCallout != null)
+                        {
+                            if (foundCallout.PanelWays.Count > 0 && (item.PanelWays == null || item.PanelWays.Count == 0))
+                            {
+                                item.PanelWays = new List<string>(foundCallout.PanelWays);
+                                item.PanelWaysCount = foundCallout.PanelWaysCount;
+                            }
+                            if (!string.IsNullOrEmpty(foundCallout.CableSpec) && string.IsNullOrEmpty(item.CableDesignation))
+                            {
+                                item.CableDesignation = foundCallout.CableSpec;
+                                item.CableCoresCount = foundCallout.CableCoresCount;
+                                item.TotalConductorsCount = foundCallout.TotalConductorsCount;
+                            }
+                            if (!string.IsNullOrEmpty(foundCallout.ConduitSpec) && string.IsNullOrEmpty(item.ConduitSpec))
+                                item.ConduitSpec = foundCallout.ConduitSpec;
+                            if (!string.IsNullOrEmpty(foundCallout.InstallNote) && string.IsNullOrEmpty(item.InstallNote))
+                                item.InstallNote = foundCallout.InstallNote;
+                            if (foundCallout.AnnotatedVdPercent.HasValue && !item.AnnotatedVdPercent.HasValue)
+                                item.AnnotatedVdPercent = foundCallout.AnnotatedVdPercent;
+                            if (!string.IsNullOrEmpty(foundCallout.RawText) && string.IsNullOrEmpty(item.RawCalloutText))
+                                item.RawCalloutText = foundCallout.RawText;
+                        }
                     }
                     if (!string.IsNullOrWhiteSpace(item.CircuitName))
                         item.PanelName = ExtractPanelNameFallback(item.CircuitName, item.PanelName);
@@ -1368,7 +1413,18 @@ namespace AIEngineer.AutoCAD
                         MatchedBlockHandles = new List<string>(c.MatchedHandles),
                         CountsByBlock = new Dictionary<string, int>(c.CountsByBlock, StringComparer.OrdinalIgnoreCase),
                         LengthMeters = c.LengthMeters,
-                        GuardTriggered = c.GuardTriggered
+                        GuardTriggered = c.GuardTriggered,
+                        PanelWays = c.PanelWays != null && c.PanelWays.Count > 0
+                            ? new List<string>(c.PanelWays)
+                            : (existingRec != null && existingRec.PanelWays != null ? new List<string>(existingRec.PanelWays) : new List<string>()),
+                        PanelWaysCount = c.PanelWaysCount > 0 ? c.PanelWaysCount : (existingRec != null ? existingRec.PanelWaysCount : 0),
+                        CableDesignation = !string.IsNullOrEmpty(c.CableDesignation) ? c.CableDesignation : (existingRec != null ? (existingRec.CableDesignation ?? "") : ""),
+                        CableCoresCount = c.CableCoresCount > 0 ? c.CableCoresCount : (existingRec != null ? existingRec.CableCoresCount : 0),
+                        TotalConductorsCount = c.TotalConductorsCount > 0 ? c.TotalConductorsCount : (existingRec != null ? existingRec.TotalConductorsCount : 0),
+                        ConduitSpec = !string.IsNullOrEmpty(c.ConduitSpec) ? c.ConduitSpec : (existingRec != null ? (existingRec.ConduitSpec ?? "") : ""),
+                        InstallNote = !string.IsNullOrEmpty(c.InstallNote) ? c.InstallNote : (existingRec != null ? (existingRec.InstallNote ?? "") : ""),
+                        AnnotatedVdPercent = c.AnnotatedVdPercent.HasValue ? c.AnnotatedVdPercent : (existingRec != null ? existingRec.AnnotatedVdPercent : null),
+                        RawCalloutText = existingRec != null ? (existingRec.RawCalloutText ?? "") : ""
                     };
                     if (existingRec != null && existingRec.ExcludedHandles != null)
                     {
@@ -1564,7 +1620,53 @@ namespace AIEngineer.AutoCAD
                 string newCirc = GetStr(args, "circuit_name");
                 string newPanel = GetStr(args, "panel_name");
                 string newDisc = GetStr(args, "discipline");
-                if (!string.IsNullOrWhiteSpace(newCirc)) curItem.CircuitName = newCirc.Trim();
+                string selCalloutTxt = "";
+                if (string.IsNullOrWhiteSpace(newCirc))
+                {
+                    List<string> explicitHandles = GetStringList(args, "handles");
+                    List<string> pickedHandles = explicitHandles.Count > 0 ? explicitHandles : GetSelectedHandleStrings(doc);
+                    if (pickedHandles.Count > 0)
+                    {
+                        using (DocumentLock dl = doc.LockDocument())
+                        using (Transaction trTxt = db.TransactionManager.StartTransaction())
+                        {
+                            List<Point2d> dummyTips;
+                            selCalloutTxt = ExtractSelectedCalloutText(trTxt, db, pickedHandles, out dummyTips);
+                            trTxt.Commit();
+                        }
+                    }
+                }
+                string calloutSource = !string.IsNullOrWhiteSpace(selCalloutTxt) ? selCalloutTxt : (newCirc ?? "");
+                if (!string.IsNullOrWhiteSpace(calloutSource))
+                {
+                    ParsedCircuitCallout parsed = ParseCircuitCalloutText(calloutSource);
+                    if (!string.IsNullOrWhiteSpace(parsed.CircuitName))
+                        curItem.CircuitName = parsed.CircuitName;
+                    else if (!string.IsNullOrWhiteSpace(newCirc))
+                        curItem.CircuitName = newCirc.Trim();
+
+                    if (!string.IsNullOrWhiteSpace(parsed.PanelName))
+                        curItem.PanelName = parsed.PanelName;
+                    if (parsed.PanelWays != null && parsed.PanelWays.Count > 0)
+                    {
+                        curItem.PanelWays = new List<string>(parsed.PanelWays);
+                        curItem.PanelWaysCount = parsed.PanelWaysCount;
+                    }
+                    if (!string.IsNullOrWhiteSpace(parsed.CableSpec))
+                    {
+                        curItem.CableDesignation = parsed.CableSpec;
+                        curItem.CableCoresCount = parsed.CableCoresCount;
+                        curItem.TotalConductorsCount = parsed.TotalConductorsCount;
+                    }
+                    if (!string.IsNullOrWhiteSpace(parsed.ConduitSpec))
+                        curItem.ConduitSpec = parsed.ConduitSpec;
+                    if (!string.IsNullOrWhiteSpace(parsed.InstallNote))
+                        curItem.InstallNote = parsed.InstallNote;
+                    if (parsed.AnnotatedVdPercent.HasValue)
+                        curItem.AnnotatedVdPercent = parsed.AnnotatedVdPercent;
+                    if (!string.IsNullOrWhiteSpace(parsed.RawText))
+                        curItem.RawCalloutText = parsed.RawText;
+                }
                 if (!string.IsNullOrWhiteSpace(newPanel)) curItem.PanelName = newPanel.Trim();
                 else curItem.PanelName = ExtractPanelNameFallback(curItem.CircuitName, curItem.PanelName);
                 if (!string.IsNullOrWhiteSpace(newDisc))
@@ -1745,7 +1847,17 @@ namespace AIEngineer.AutoCAD
                     UserLocked = true,
                     LoadKw = curItem.LoadKw,
                     LoadKva = curItem.LoadKva,
-                    LoadSource = curItem.LoadSource
+                    CableDesignation = curItem.CableDesignation ?? "",
+                    VoltageDropPercent = curItem.AnnotatedVdPercent ?? 0.0,
+                    LoadSource = curItem.LoadSource,
+                    PanelWays = curItem.PanelWays != null ? new List<string>(curItem.PanelWays) : new List<string>(),
+                    PanelWaysCount = curItem.PanelWaysCount,
+                    CableCoresCount = curItem.CableCoresCount,
+                    TotalConductorsCount = curItem.TotalConductorsCount,
+                    ConduitSpec = curItem.ConduitSpec ?? "",
+                    InstallNote = curItem.InstallNote ?? "",
+                    AnnotatedVdPercent = curItem.AnnotatedVdPercent,
+                    RawCalloutText = curItem.RawCalloutText ?? ""
                 };
                 using (DocumentLock dl = doc.LockDocument())
                 using (Transaction xtr = db.TransactionManager.StartTransaction())
@@ -1912,7 +2024,17 @@ namespace AIEngineer.AutoCAD
                         UserLocked = true,
                         LoadKw = tempItem.LoadKw,
                         LoadKva = tempItem.LoadKva,
-                        LoadSource = tempItem.LoadSource
+                        CableDesignation = tempItem.CableDesignation ?? "",
+                        VoltageDropPercent = tempItem.AnnotatedVdPercent ?? 0.0,
+                        LoadSource = tempItem.LoadSource,
+                        PanelWays = tempItem.PanelWays != null ? new List<string>(tempItem.PanelWays) : new List<string>(),
+                        PanelWaysCount = tempItem.PanelWaysCount,
+                        CableCoresCount = tempItem.CableCoresCount,
+                        TotalConductorsCount = tempItem.TotalConductorsCount,
+                        ConduitSpec = tempItem.ConduitSpec ?? "",
+                        InstallNote = tempItem.InstallNote ?? "",
+                        AnnotatedVdPercent = tempItem.AnnotatedVdPercent,
+                        RawCalloutText = tempItem.RawCalloutText ?? ""
                     };
                     using (DocumentLock dl = doc.LockDocument())
                     using (Transaction xtr = db.TransactionManager.StartTransaction())

@@ -868,11 +868,40 @@ namespace AIEngineer.AutoCAD
                     item.VoltageV = vVal;
             }
 
+            // 6. Fallback: explicit numeric wattage embedded in fixture block name (e.g. upligh9w -> 9W, LED_18W -> 18W)
+            if (!item.Watt.HasValue && !item.Va.HasValue && !string.IsNullOrEmpty(item.BlockName))
+            {
+                Match mBlkW = Regex.Match(item.BlockName, @"(?:^|[A-Za-z_\-])(\d+(?:\.\d+)?)\s*W(?=$|[^A-Za-z])", RegexOptions.IgnoreCase);
+                if (mBlkW.Success)
+                {
+                    double bwVal;
+                    if (double.TryParse(mBlkW.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out bwVal) &&
+                        bwVal > 0.0 && bwVal <= 5000.0)
+                    {
+                        item.Watt = Math.Round(bwVal, 2);
+                    }
+                }
+            }
+
             item.Category = InferCategoryFromLegendText(item.BlockName, desc);
             return item;
         }
 
         // ==================== Deterministic Drawing Legend Extractor ====================
+
+        private sealed class LegendGridSegment
+        {
+            public double X1;
+            public double Y1;
+            public double X2;
+            public double Y2;
+            public bool IsHoriz;
+            public double MinX { get { return Math.Min(X1, X2); } }
+            public double MaxX { get { return Math.Max(X1, X2); } }
+            public double MinY { get { return Math.Min(Y1, Y2); } }
+            public double MaxY { get { return Math.Max(Y1, Y2); } }
+            public double Length { get { return Math.Sqrt((X2 - X1) * (X2 - X1) + (Y2 - Y1) * (Y2 - Y1)); } }
+        }
 
         private sealed class LegendCandidateSymbol
         {
@@ -919,6 +948,52 @@ namespace AIEngineer.AutoCAD
             return u.Contains("LEGEND") || u.Contains("SYMBOL") || u.Contains("KEY_PLAN") || u.Contains("KEYPLAN");
         }
 
+        private static void CollectLegendGridSegmentsFromEntity(
+            Entity ent,
+            Matrix3d xform,
+            List<LegendGridSegment> gridSegs)
+        {
+            if (ent == null || ent.IsErased || gridSegs == null) return;
+            if (ent is Line)
+            {
+                Line ln = (Line)ent;
+                Point3d p1 = ln.StartPoint.TransformBy(xform);
+                Point3d p2 = ln.EndPoint.TransformBy(xform);
+                double dx = Math.Abs(p2.X - p1.X);
+                double dy = Math.Abs(p2.Y - p1.Y);
+                double len = Math.Sqrt(dx * dx + dy * dy);
+                if (len <= 1e-4) return;
+                double angTol = Math.Max(1e-4, len * 0.03);
+                if (dy <= angTol)
+                    gridSegs.Add(new LegendGridSegment { X1 = p1.X, Y1 = p1.Y, X2 = p2.X, Y2 = p2.Y, IsHoriz = true });
+                else if (dx <= angTol)
+                    gridSegs.Add(new LegendGridSegment { X1 = p1.X, Y1 = p1.Y, X2 = p2.X, Y2 = p2.Y, IsHoriz = false });
+            }
+            else if (ent is Polyline)
+            {
+                Polyline pl = (Polyline)ent;
+                int nv = pl.NumberOfVertices;
+                if (nv < 2) return;
+                int segCnt = pl.Closed ? nv : (nv - 1);
+                for (int vi = 0; vi < segCnt; vi++)
+                {
+                    Point2d a2 = pl.GetPoint2dAt(vi);
+                    Point2d b2 = pl.GetPoint2dAt((vi + 1) % nv);
+                    Point3d p1 = new Point3d(a2.X, a2.Y, 0.0).TransformBy(xform);
+                    Point3d p2 = new Point3d(b2.X, b2.Y, 0.0).TransformBy(xform);
+                    double dx = Math.Abs(p2.X - p1.X);
+                    double dy = Math.Abs(p2.Y - p1.Y);
+                    double len = Math.Sqrt(dx * dx + dy * dy);
+                    if (len <= 1e-4) continue;
+                    double angTol = Math.Max(1e-4, len * 0.03);
+                    if (dy <= angTol)
+                        gridSegs.Add(new LegendGridSegment { X1 = p1.X, Y1 = p1.Y, X2 = p2.X, Y2 = p2.Y, IsHoriz = true });
+                    else if (dx <= angTol)
+                        gridSegs.Add(new LegendGridSegment { X1 = p1.X, Y1 = p1.Y, X2 = p2.X, Y2 = p2.Y, IsHoriz = false });
+                }
+            }
+        }
+
         private static void CollectLegendPrimitivesRecursive(
             Transaction tr,
             BlockTableRecord btr,
@@ -927,7 +1002,8 @@ namespace AIEngineer.AutoCAD
             bool visibleOnly,
             Dictionary<string, bool> hiddenMap,
             List<LegendCandidateSymbol> symbols,
-            List<LegendCandidateText> texts)
+            List<LegendCandidateText> texts,
+            List<LegendGridSegment> gridSegs)
         {
             if (btr == null || depth > 3) return;
             foreach (ObjectId oid in btr)
@@ -937,6 +1013,12 @@ namespace AIEngineer.AutoCAD
                 if (ent == null || ent.IsErased) continue;
                 if (IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer)) continue;
                 if (depth == 0 && visibleOnly && !IsEntityVisible(ent, hiddenMap)) continue;
+
+                if (ent is Line || ent is Polyline)
+                {
+                    CollectLegendGridSegmentsFromEntity(ent, xform, gridSegs);
+                    continue;
+                }
 
                 if (ent is DBText || ent is MText)
                 {
@@ -1010,11 +1092,442 @@ namespace AIEngineer.AutoCAD
                         {
                             CollectLegendPrimitivesRecursive(
                                 tr, subBtr, xform * br.BlockTransform, depth + 1,
-                                false, hiddenMap, symbols, texts);
+                                false, hiddenMap, symbols, texts, gridSegs);
                         }
                     }
                 }
             }
+        }
+
+        private static bool IsLegendQtyCellText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string t = Regex.Replace(text.Trim(), @"\s+", " ");
+            if (Regex.IsMatch(t, @"^(?:\d+(?:\.\d+)?(?:\s*(?:PCS|PC|NO|NOS|EA|SET|SETS|UNIT|UNITS|NR|LOT|M|M/L|LM))?|M/L|N/?A|NIL|[\-–]+)$", RegexOptions.IgnoreCase))
+                return true;
+            return false;
+        }
+
+        private static bool IsLegendHeaderQtyText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string u = Regex.Replace(text.Trim().ToUpperInvariant(), @"[\s'’.:_\-]+", " ").Trim();
+            return u == "QTY" || u == "Q TY" || u == "QUANTITY" || u == "COUNT" || u == "TOTAL" ||
+                   u == "الكمية" || u == "العدد" || u.StartsWith("QTY ", StringComparison.Ordinal);
+        }
+
+        private static bool IsLegendHeaderTagText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string u = Regex.Replace(text.Trim().ToUpperInvariant(), @"[\s'’.:_\-]+", " ").Trim();
+            return u == "TAG" || u == "CODE" || u == "MARK" || u == "REF" || u == "NO" || u == "ITEM" ||
+                   u == "SR" || u == "SL" || u == "ID" || u == "الكود";
+        }
+
+        private static List<double> ClusterSortedAxisCoords(List<double> coords, double tol, bool descending)
+        {
+            List<double> result = new List<double>();
+            if (coords == null || coords.Count == 0) return result;
+            List<double> sorted = new List<double>(coords);
+            sorted.Sort();
+            double sum = sorted[0];
+            int cnt = 1;
+            double last = sorted[0];
+            for (int i = 1; i < sorted.Count; i++)
+            {
+                if (sorted[i] - last <= tol)
+                {
+                    sum += sorted[i];
+                    cnt++;
+                }
+                else
+                {
+                    result.Add(sum / cnt);
+                    sum = sorted[i];
+                    cnt = 1;
+                }
+                last = sorted[i];
+            }
+            result.Add(sum / cnt);
+            if (descending)
+                result.Sort(delegate(double a, double b) { return b.CompareTo(a); });
+            return result;
+        }
+
+        private static int FindGridBandIndex(List<double> bounds, double val, double tol, bool descending)
+        {
+            if (bounds == null || bounds.Count < 2) return -1;
+            int bestIdx = -1;
+            double bestCenterDist = double.MaxValue;
+            for (int i = 0; i < bounds.Count - 1; i++)
+            {
+                double hi = descending ? bounds[i] : bounds[i + 1];
+                double lo = descending ? bounds[i + 1] : bounds[i];
+                if (val <= hi + tol && val >= lo - tol)
+                {
+                    double centerDist = Math.Abs(val - (hi + lo) * 0.5);
+                    if (centerDist < bestCenterDist)
+                    {
+                        bestCenterDist = centerDist;
+                        bestIdx = i;
+                    }
+                }
+            }
+            return bestIdx;
+        }
+
+        private static List<ProjectLegendSpecItem> TryExtractGridTableLegend(
+            List<LegendCandidateSymbol> symbols,
+            List<LegendCandidateText> texts,
+            List<LegendGridSegment> gridSegs,
+            Dictionary<string, int> placedModelBlockFreq,
+            double medSpan,
+            bool fromSelectionOnly,
+            string srcTag,
+            out HashSet<string> matchedGridBlocks)
+        {
+            matchedGridBlocks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<ProjectLegendSpecItem> result = new List<ProjectLegendSpecItem>();
+            if (symbols == null || symbols.Count == 0 || texts == null || texts.Count == 0 || gridSegs == null || gridSegs.Count < 6)
+                return result;
+
+            double minSegLen = Math.Max(1e-4, medSpan * 0.85);
+            List<LegendGridSegment> validSegs = new List<LegendGridSegment>();
+            for (int i = 0; i < gridSegs.Count; i++)
+            {
+                if (gridSegs[i].Length >= minSegLen) validSegs.Add(gridSegs[i]);
+            }
+            if (validSegs.Count < 6) return result;
+
+            // Group touching/intersecting grid lines into connected table components
+            double connTol = Math.Max(1e-3, medSpan * 0.45);
+            int nSeg = validSegs.Count;
+            bool[] vis = new bool[nSeg];
+            List<List<LegendGridSegment>> clusters = new List<List<LegendGridSegment>>();
+            for (int i = 0; i < nSeg; i++)
+            {
+                if (vis[i]) continue;
+                vis[i] = true;
+                List<LegendGridSegment> comp = new List<LegendGridSegment> { validSegs[i] };
+                Queue<int> q = new Queue<int>();
+                q.Enqueue(i);
+                while (q.Count > 0)
+                {
+                    int curIdx = q.Dequeue();
+                    LegendGridSegment cs = validSegs[curIdx];
+                    for (int j = 0; j < nSeg; j++)
+                    {
+                        if (vis[j]) continue;
+                        LegendGridSegment os = validSegs[j];
+                        if (os.MaxX + connTol < cs.MinX || os.MinX - connTol > cs.MaxX ||
+                            os.MaxY + connTol < cs.MinY || os.MinY - connTol > cs.MaxY)
+                            continue;
+                        vis[j] = true;
+                        comp.Add(os);
+                        q.Enqueue(j);
+                    }
+                }
+                clusters.Add(comp);
+            }
+
+            double axisTol = Math.Max(1e-3, medSpan * 0.28);
+            double cellPad = Math.Max(1e-3, medSpan * 0.22);
+            Dictionary<string, ProjectLegendSpecItem> bestByBlock = new Dictionary<string, ProjectLegendSpecItem>(StringComparer.OrdinalIgnoreCase);
+
+            for (int clIdx = 0; clIdx < clusters.Count; clIdx++)
+            {
+                List<LegendGridSegment> comp = clusters[clIdx];
+                if (comp.Count < 6) continue;
+
+                List<double> hCoords = new List<double>();
+                List<double> vCoords = new List<double>();
+                for (int si = 0; si < comp.Count; si++)
+                {
+                    if (comp[si].IsHoriz) hCoords.Add((comp[si].Y1 + comp[si].Y2) * 0.5);
+                    else vCoords.Add((comp[si].X1 + comp[si].X2) * 0.5);
+                }
+                if (hCoords.Count < 3 || vCoords.Count < 3) continue;
+
+                List<double> rowYs = ClusterSortedAxisCoords(hCoords, axisTol, true);
+                List<double> colXs = ClusterSortedAxisCoords(vCoords, axisTol, false);
+                if (rowYs.Count < 3 || colXs.Count < 3) continue;
+
+                int nRows = rowYs.Count - 1;
+                int nCols = colXs.Count - 1;
+                double gridMinX = colXs[0];
+                double gridMaxX = colXs[colXs.Count - 1];
+                double gridMinY = rowYs[rowYs.Count - 1];
+                double gridMaxY = rowYs[0];
+
+                List<LegendCandidateSymbol>[,] symCells = new List<LegendCandidateSymbol>[nRows, nCols];
+                List<LegendCandidateText>[,] textCells = new List<LegendCandidateText>[nRows, nCols];
+                Dictionary<string, int> legendBlockOccurrences = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+                for (int si = 0; si < symbols.Count; si++)
+                {
+                    LegendCandidateSymbol s = symbols[si];
+                    if (s.Cx < gridMinX - cellPad || s.Cx > gridMaxX + cellPad ||
+                        s.Cy < gridMinY - cellPad || s.Cy > gridMaxY + cellPad)
+                        continue;
+                    int r = FindGridBandIndex(rowYs, s.Cy, cellPad, true);
+                    int c = FindGridBandIndex(colXs, s.Cx, cellPad, false);
+                    if (r < 0 || c < 0) continue;
+                    if (symCells[r, c] == null) symCells[r, c] = new List<LegendCandidateSymbol>();
+                    symCells[r, c].Add(s);
+                    int lc = 0;
+                    legendBlockOccurrences.TryGetValue(s.BlockName, out lc);
+                    legendBlockOccurrences[s.BlockName] = lc + 1;
+                }
+
+                for (int ti = 0; ti < texts.Count; ti++)
+                {
+                    LegendCandidateText tx = texts[ti];
+                    if (tx.Cx < gridMinX - cellPad || tx.Cx > gridMaxX + cellPad ||
+                        tx.Cy < gridMinY - cellPad || tx.Cy > gridMaxY + cellPad)
+                        continue;
+                    int r = FindGridBandIndex(rowYs, tx.Cy, cellPad, true);
+                    int c = FindGridBandIndex(colXs, tx.Cx, cellPad, false);
+                    if (r < 0 || c < 0) continue;
+                    if (textCells[r, c] == null) textCells[r, c] = new List<LegendCandidateText>();
+                    textCells[r, c].Add(tx);
+                }
+
+                int[] colSymCnt = new int[nCols];
+                int[] colOutsidePlanCnt = new int[nCols];
+                int[] colTextCellCnt = new int[nCols];
+                int[] colQtyCellCnt = new int[nCols];
+                int[] colTagCellCnt = new int[nCols];
+                bool[] colHdrQty = new bool[nCols];
+                bool[] colHdrTag = new bool[nCols];
+
+                for (int c = 0; c < nCols; c++)
+                {
+                    for (int r = 0; r < nRows; r++)
+                    {
+                        List<LegendCandidateSymbol> sc = symCells[r, c];
+                        if (sc != null && sc.Count > 0)
+                        {
+                            colSymCnt[c] += sc.Count;
+                            if (placedModelBlockFreq != null)
+                            {
+                                for (int k = 0; k < sc.Count; k++)
+                                {
+                                    int modelCnt = 0;
+                                    placedModelBlockFreq.TryGetValue(sc[k].BlockName, out modelCnt);
+                                    int legCnt = 0;
+                                    legendBlockOccurrences.TryGetValue(sc[k].BlockName, out legCnt);
+                                    if (fromSelectionOnly ? modelCnt > 0 : modelCnt > legCnt)
+                                        colOutsidePlanCnt[c]++;
+                                }
+                            }
+                        }
+
+                        List<LegendCandidateText> tc = textCells[r, c];
+                        if (tc != null && tc.Count > 0)
+                        {
+                            tc.Sort(delegate(LegendCandidateText a, LegendCandidateText b)
+                            {
+                                if (Math.Abs(b.Cy - a.Cy) > Math.Min(a.Height, b.Height) * 0.45)
+                                    return b.Cy.CompareTo(a.Cy);
+                                return a.MinX.CompareTo(b.MinX);
+                            });
+                            List<string> cellLines = new List<string>(tc.Count);
+                            for (int k = 0; k < tc.Count; k++) cellLines.Add(tc[k].Text);
+                            string combinedCell = Regex.Replace(string.Join(" ", cellLines.ToArray()), @"\s+", " ").Trim();
+                            if (string.IsNullOrWhiteSpace(combinedCell)) continue;
+
+                            if (r <= 1 && IsLegendHeaderQtyText(combinedCell)) { colHdrQty[c] = true; continue; }
+                            if (r <= 1 && IsLegendHeaderTagText(combinedCell)) { colHdrTag[c] = true; continue; }
+
+                            colTextCellCnt[c]++;
+                            if (IsLegendQtyCellText(combinedCell)) colQtyCellCnt[c]++;
+                            else if (IsLegendCodeTagToken(combinedCell) && combinedCell.Length <= 4) colTagCellCnt[c]++;
+                        }
+                    }
+                }
+
+                bool[] isQtyCol = new bool[nCols];
+                bool[] isTagCol = new bool[nCols];
+                for (int c = 0; c < nCols; c++)
+                {
+                    if (colHdrQty[c] || (colTextCellCnt[c] >= 2 && (double)colQtyCellCnt[c] / colTextCellCnt[c] >= 0.55))
+                        isQtyCol[c] = true;
+                    if (!isQtyCol[c] && (colHdrTag[c] || (colTextCellCnt[c] >= 2 && (double)colTagCellCnt[c] / colTextCellCnt[c] >= 0.60)))
+                        isTagCol[c] = true;
+                }
+
+                bool anyOutsidePlanSym = false;
+                int maxSymInAnyCol = 0;
+                for (int c = 0; c < nCols; c++)
+                {
+                    if (colOutsidePlanCnt[c] > 0) anyOutsidePlanSym = true;
+                    if (colSymCnt[c] > maxSymInAnyCol) maxSymInAnyCol = colSymCnt[c];
+                }
+                if (maxSymInAnyCol < 2 && !(fromSelectionOnly && maxSymInAnyCol >= 1)) continue;
+
+                List<int> symCols = new List<int>();
+                int lastQtyCol = -1;
+                for (int c = nCols - 1; c >= 0; c--) { if (isQtyCol[c]) { lastQtyCol = c; break; } }
+                for (int c = 0; c < nCols; c++)
+                {
+                    if (colSymCnt[c] == 0) continue;
+                    if (anyOutsidePlanSym)
+                    {
+                        if (colOutsidePlanCnt[c] > 0) symCols.Add(c);
+                    }
+                    else
+                    {
+                        if (symCols.Count > 0 && lastQtyCol >= 0 && c > lastQtyCol) continue;
+                        if (colSymCnt[c] >= 2 || (fromSelectionOnly && colSymCnt[c] >= 1)) symCols.Add(c);
+                    }
+                }
+                if (symCols.Count == 0) continue;
+
+                // Determine whether spec text lies right or left of each symbol column
+                bool gridDescOnLeft = false;
+                if (symCols.Count == 1)
+                {
+                    int sc0 = symCols[0];
+                    int leftSpecChars = 0, rightSpecChars = 0;
+                    for (int c = 0; c < nCols; c++)
+                    {
+                        if (c == sc0 || isQtyCol[c] || isTagCol[c]) continue;
+                        for (int r = 0; r < nRows; r++)
+                        {
+                            if (textCells[r, c] == null) continue;
+                            for (int k = 0; k < textCells[r, c].Count; k++)
+                            {
+                                string tt = textCells[r, c][k].Text;
+                                if (c < sc0) leftSpecChars += tt.Length;
+                                else rightSpecChars += tt.Length;
+                            }
+                        }
+                    }
+                    if (leftSpecChars > rightSpecChars * 1.2) gridDescOnLeft = true;
+                }
+
+                List<ProjectLegendSpecItem> clusterItems = new List<ProjectLegendSpecItem>();
+                int clusterSpecRows = 0;
+                int clusterWattRows = 0;
+
+                for (int sci = 0; sci < symCols.Count; sci++)
+                {
+                    int symCol = symCols[sci];
+                    int minSpanCol = gridDescOnLeft ? (sci > 0 ? symCols[sci - 1] + 1 : 0) : symCol + 1;
+                    int maxSpanCol = gridDescOnLeft ? (symCol - 1) : (sci + 1 < symCols.Count ? symCols[sci + 1] - 1 : nCols - 1);
+                    if (minSpanCol > maxSpanCol) continue;
+
+                    ProjectLegendSpecItem lastGridSpec = null;
+                    for (int r = 0; r < nRows; r++)
+                    {
+                        List<LegendCandidateSymbol> rowSyms = symCells[r, symCol];
+                        if (rowSyms == null || rowSyms.Count == 0) continue;
+
+                        // Prefer non-anonymous block actually placed in drawing if cell has multiple
+                        LegendCandidateSymbol chosenSym = rowSyms[0];
+                        for (int k = 0; k < rowSyms.Count; k++)
+                        {
+                            int mc = 0;
+                            if (placedModelBlockFreq != null) placedModelBlockFreq.TryGetValue(rowSyms[k].BlockName, out mc);
+                            int bestMc = 0;
+                            if (placedModelBlockFreq != null) placedModelBlockFreq.TryGetValue(chosenSym.BlockName, out bestMc);
+                            if (mc > bestMc) chosenSym = rowSyms[k];
+                        }
+
+                        string rowTag = "";
+                        int tagColStart = gridDescOnLeft ? Math.Max(minSpanCol - 1, symCol + 1) : Math.Max(0, symCol - 1);
+                        for (int tcIdx = Math.Max(0, symCol - 1); tcIdx <= Math.Min(nCols - 1, symCol + 1); tcIdx++)
+                        {
+                            if (!isTagCol[tcIdx] || textCells[r, tcIdx] == null) continue;
+                            for (int k = 0; k < textCells[r, tcIdx].Count; k++)
+                            {
+                                string candT = textCells[r, tcIdx][k].Text.Trim();
+                                if (!string.IsNullOrEmpty(candT)) { rowTag = candT; break; }
+                            }
+                            if (!string.IsNullOrEmpty(rowTag)) break;
+                        }
+
+                        List<string> descParts = new List<string>();
+                        for (int c = minSpanCol; c <= maxSpanCol; c++)
+                        {
+                            if (isQtyCol[c] || isTagCol[c] || colSymCnt[c] > 0) continue;
+                            List<LegendCandidateText> tc = textCells[r, c];
+                            if (tc == null || tc.Count == 0) continue;
+                            for (int k = 0; k < tc.Count; k++)
+                            {
+                                string txtLine = tc[k].Text.Trim();
+                                if (string.IsNullOrWhiteSpace(txtLine)) continue;
+                                string tu = txtLine.ToUpperInvariant();
+                                if (tu == "SYMBOL" || tu == "SYMBOLS" || tu == "DESCRIPTION" || tu == "TITLE" || tu == "SPECIFICATION" || tu == "LEGEND")
+                                    continue;
+                                if (string.Equals(txtLine, chosenSym.BlockName, StringComparison.OrdinalIgnoreCase)) continue;
+                                descParts.Add(txtLine);
+                            }
+                        }
+
+                        string combinedDesc = Regex.Replace(string.Join(" ", descParts.ToArray()), @"\s+", " ").Trim();
+                        if (string.IsNullOrWhiteSpace(combinedDesc)) continue;
+                        if (!fromSelectionOnly && IsCircuitTagOrFloorNoteNoise(combinedDesc)) continue;
+
+                        ProjectLegendSpecItem parsed = ParseSpecFromLegendDescription(chosenSym.BlockName, combinedDesc, srcTag);
+                        parsed.LegendTag = rowTag;
+                        if (IsAsAboveReferenceText(combinedDesc) && lastGridSpec != null)
+                        {
+                            if (!parsed.Watt.HasValue && lastGridSpec.Watt.HasValue)
+                            {
+                                parsed.Watt = lastGridSpec.Watt;
+                                parsed.InheritedFrom = lastGridSpec.BlockName;
+                            }
+                            if (!parsed.Va.HasValue && lastGridSpec.Va.HasValue)
+                            {
+                                parsed.Va = lastGridSpec.Va;
+                                if (string.IsNullOrEmpty(parsed.InheritedFrom)) parsed.InheritedFrom = lastGridSpec.BlockName;
+                            }
+                            if (!parsed.VoltageV.HasValue && lastGridSpec.VoltageV.HasValue)
+                                parsed.VoltageV = lastGridSpec.VoltageV;
+                            if (parsed.Category == "lighting" && !string.IsNullOrEmpty(lastGridSpec.Category))
+                                parsed.Category = lastGridSpec.Category;
+                        }
+
+                        if (parsed.Watt.HasValue || parsed.Va.HasValue)
+                        {
+                            lastGridSpec = parsed;
+                            clusterWattRows++;
+                            clusterSpecRows++;
+                        }
+                        else if (HasEngineeringSpecSignal(combinedDesc))
+                        {
+                            clusterSpecRows++;
+                        }
+                        clusterItems.Add(parsed);
+                    }
+                }
+
+                if (!fromSelectionOnly)
+                {
+                    if (clusterItems.Count < 2 || clusterSpecRows == 0) continue;
+                }
+                else
+                {
+                    if (clusterItems.Count == 0) continue;
+                }
+
+                for (int k = 0; k < clusterItems.Count; k++)
+                {
+                    ProjectLegendSpecItem item = clusterItems[k];
+                    matchedGridBlocks.Add(item.BlockName);
+                    ProjectLegendSpecItem prev;
+                    if (!bestByBlock.TryGetValue(item.BlockName, out prev) ||
+                        (!prev.Watt.HasValue && item.Watt.HasValue) ||
+                        (item.Watt.HasValue == prev.Watt.HasValue && item.Description.Length > prev.Description.Length && (item.Watt.HasValue || item.Va.HasValue)))
+                    {
+                        bestByBlock[item.BlockName] = item;
+                    }
+                }
+            }
+
+            result.AddRange(bestByBlock.Values);
+            return result;
         }
 
         private static List<ProjectLegendSpecItem> ExtractLegendFromEntities(
@@ -1024,7 +1537,8 @@ namespace AIEngineer.AutoCAD
             bool visibleOnly,
             out int nativeTablesScanned,
             out int candidateSymbolsCount,
-            out int candidateTextsCount)
+            out int candidateTextsCount,
+            List<string> explicitHandles = null)
         {
             nativeTablesScanned = 0;
             candidateSymbolsCount = 0;
@@ -1032,11 +1546,15 @@ namespace AIEngineer.AutoCAD
             List<ProjectLegendSpecItem> extracted = new List<ProjectLegendSpecItem>();
             string srcTag = fromSelectionOnly ? "selection_legend" : "drawing_legend";
 
-            List<string> selHandles = fromSelectionOnly ? GetSelectedHandleStrings(doc) : new List<string>();
+            List<string> selHandles = fromSelectionOnly
+                ? ((explicitHandles != null && explicitHandles.Count > 0) ? new List<string>(explicitHandles) : GetSelectedHandleStrings(doc))
+                : new List<string>();
             if (fromSelectionOnly && selHandles.Count == 0) return extracted;
 
             List<LegendCandidateSymbol> symbols = new List<LegendCandidateSymbol>();
             List<LegendCandidateText> texts = new List<LegendCandidateText>();
+            List<LegendGridSegment> gridSegs = new List<LegendGridSegment>();
+            Dictionary<string, int> modelBlockFreq = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             HashSet<string> allKnownDrawingBlocks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
@@ -1152,10 +1670,14 @@ namespace AIEngineer.AutoCAD
                 }
 
                 // B. Collect symbols & texts (handling loose entities and nested LEGEND block containers)
-                Dictionary<string, int> modelBlockFreq = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 for (int i = 0; i < scopeEnts.Count; i++)
                 {
                     Entity ent = scopeEnts[i];
+                    if (ent is Line || ent is Polyline)
+                    {
+                        CollectLegendGridSegmentsFromEntity(ent, Matrix3d.Identity, gridSegs);
+                        continue;
+                    }
                     if (ent is DBText || ent is MText)
                     {
                         string txt = ExtractLegendEntityText(ent);
@@ -1191,7 +1713,7 @@ namespace AIEngineer.AutoCAD
                             {
                                 BlockTableRecord subBtr = tr.GetObject(defId, OpenMode.ForRead) as BlockTableRecord;
                                 if (subBtr != null)
-                                    CollectLegendPrimitivesRecursive(tr, subBtr, br.BlockTransform, 1, false, hiddenMap, symbols, texts);
+                                    CollectLegendPrimitivesRecursive(tr, subBtr, br.BlockTransform, 1, false, hiddenMap, symbols, texts, gridSegs);
                             }
                         }
                         else if (!IsAnonymousBlockName(bn) && !IsPanelOrFrameBlockName(bn))
@@ -1219,6 +1741,22 @@ namespace AIEngineer.AutoCAD
                         }
                     }
                 }
+                if (fromSelectionOnly)
+                {
+                    foreach (ObjectId mid in ms)
+                    {
+                        if (mid.IsErased) continue;
+                        Entity mEnt = tr.GetObject(mid, OpenMode.ForRead) as Entity;
+                        BlockReference mBr = mEnt as BlockReference;
+                        if (mBr == null || mEnt.IsErased || IsLegendOrHighlightLayer(mEnt.Layer) || IsAiAnnotationLayer(mEnt.Layer)) continue;
+                        string mbn = ResolveBlockName(tr, mBr);
+                        if (string.IsNullOrEmpty(mbn) || IsAnonymousBlockName(mbn) || IsSystemBlockName(mbn) ||
+                            IsPanelOrFrameBlockName(mbn) || IsCircuitTerminatorArrowBlock(mbn)) continue;
+                        int curM = 0;
+                        modelBlockFreq.TryGetValue(mbn, out curM);
+                        modelBlockFreq[mbn] = curM + 1;
+                    }
+                }
                 tr.Commit();
             }
 
@@ -1232,6 +1770,38 @@ namespace AIEngineer.AutoCAD
             spans.Sort();
             double medSpan = spans[spans.Count / 2];
             double colXTol = Math.Max(1e-3, medSpan * 1.4);
+
+            // A2. Grid-line aware multi-column Legend extractor (handles tag/symbol/title/spec/qty/photo grids cleanly)
+            if (gridSegs.Count >= 6)
+            {
+                HashSet<string> gridMatchedNames;
+                List<ProjectLegendSpecItem> gridExtracted = TryExtractGridTableLegend(
+                    symbols, texts, gridSegs, modelBlockFreq, medSpan, fromSelectionOnly, srcTag, out gridMatchedNames);
+                // Re-pass placed ModelSpace frequencies only if grid extraction succeeded cleanly
+                if (gridExtracted.Count >= 2 || (fromSelectionOnly && gridExtracted.Count >= 1))
+                {
+                    Dictionary<string, ProjectLegendSpecItem> gridMap = new Dictionary<string, ProjectLegendSpecItem>(StringComparer.OrdinalIgnoreCase);
+                    for (int gi = 0; gi < extracted.Count; gi++)
+                        gridMap[extracted[gi].BlockName] = extracted[gi];
+                    for (int gi = 0; gi < gridExtracted.Count; gi++)
+                    {
+                        ProjectLegendSpecItem gItem = gridExtracted[gi];
+                        ProjectLegendSpecItem prev;
+                        if (!gridMap.TryGetValue(gItem.BlockName, out prev) ||
+                            (!prev.Watt.HasValue && gItem.Watt.HasValue) ||
+                            (gItem.Watt.HasValue == prev.Watt.HasValue && gItem.Description.Length > prev.Description.Length))
+                        {
+                            gridMap[gItem.BlockName] = gItem;
+                        }
+                    }
+                    extracted = new List<ProjectLegendSpecItem>(gridMap.Values);
+                    extracted.Sort(delegate(ProjectLegendSpecItem a, ProjectLegendSpecItem b)
+                    {
+                        return string.Compare(a.BlockName, b.BlockName, StringComparison.OrdinalIgnoreCase);
+                    });
+                    return extracted;
+                }
+            }
 
             // Detect Legend region headers & explicit SYMBOL <-> DESCRIPTION pairs
             List<Point2d> legendHeaderPts = new List<Point2d>();
@@ -1936,6 +2506,7 @@ namespace AIEngineer.AutoCAD
             bool visibleOnly = GetBool(args, "visible_only", true);
 
             List<string> warnings = new List<string>();
+            List<object> extractedItemDicts = new List<object>();
             int upsertedCount = 0;
             int skippedVerifiedCount = 0;
             int extractedRawCount = 0;
@@ -1957,10 +2528,43 @@ namespace AIEngineer.AutoCAD
                 else if (action == "extract_from_drawing" || action == "extract_from_selection")
                 {
                     bool fromSel = (action == "extract_from_selection");
+                    List<string> explicitHandles = GetStringList(args, "handles");
                     List<ProjectLegendSpecItem> found = ExtractLegendFromEntities(
                         doc, db, fromSel, visibleOnly,
-                        out nativeTablesScanned, out candSymbols, out candTexts);
+                        out nativeTablesScanned, out candSymbols, out candTexts,
+                        explicitHandles);
                     extractedRawCount = found.Count;
+
+                    HashSet<string> placedInDwg = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    HashSet<string> foundNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    for (int i = 0; i < found.Count; i++)
+                    {
+                        if (!string.IsNullOrWhiteSpace(found[i].BlockName))
+                            foundNames.Add(found[i].BlockName.Trim());
+                        extractedItemDicts.Add(LegendSpecToDict(found[i]));
+                    }
+                    if (fromSel && found.Count > 0)
+                    {
+                        try
+                        {
+                            using (Transaction trBlk = db.TransactionManager.StartTransaction())
+                            {
+                                BlockTableRecord msBlk = (BlockTableRecord)trBlk.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                                foreach (ObjectId mid in msBlk)
+                                {
+                                    if (mid.IsErased) continue;
+                                    Entity ent = trBlk.GetObject(mid, OpenMode.ForRead) as Entity;
+                                    BlockReference br = ent as BlockReference;
+                                    if (br == null || IsLegendOrHighlightLayer(ent.Layer) || IsAiAnnotationLayer(ent.Layer)) continue;
+                                    string bn = ResolveBlockName(trBlk, br);
+                                    if (!string.IsNullOrEmpty(bn) && !IsAnonymousBlockName(bn) && !IsSystemBlockName(bn))
+                                        placedInDwg.Add(bn);
+                                }
+                                trBlk.Commit();
+                            }
+                        }
+                        catch { }
+                    }
 
                     lock (s_lastCoordLock)
                     {
@@ -1983,6 +2587,18 @@ namespace AIEngineer.AutoCAD
                                 }
                             }
                             for (int si = 0; si < staleKeys.Count; si++) cat.Remove(staleKeys[si]);
+                        }
+                        else if (fromSel && found.Count > 0)
+                        {
+                            List<string> staleCrossKeys = new List<string>();
+                            foreach (KeyValuePair<string, ProjectLegendSpecItem> kv in cat)
+                            {
+                                if (kv.Value == null) continue;
+                                if (string.Equals(kv.Value.Source, "user_verified", StringComparison.OrdinalIgnoreCase)) continue;
+                                if (!foundNames.Contains(kv.Key) && !placedInDwg.Contains(kv.Key))
+                                    staleCrossKeys.Add(kv.Key);
+                            }
+                            for (int si = 0; si < staleCrossKeys.Count; si++) cat.Remove(staleCrossKeys[si]);
                         }
                         for (int i = 0; i < found.Count; i++)
                         {
@@ -2241,6 +2857,7 @@ namespace AIEngineer.AutoCAD
             {
                 { "action", action },
                 { "items_count", itemDicts.Count },
+                { "total_catalog_count", itemDicts.Count },
                 { "verified_count", verifiedCount },
                 { "upserted_count", upsertedCount },
                 { "extracted_raw_count", extractedRawCount },
@@ -2256,6 +2873,8 @@ namespace AIEngineer.AutoCAD
                 { "persisted_to_disk", !string.IsNullOrEmpty(primaryPath) || !string.IsNullOrEmpty(mirrorPath) },
                 { "items", itemDicts }
             };
+            if (extractedItemDicts.Count > 0 || action == "extract_from_drawing" || action == "extract_from_selection")
+                res["extracted_items"] = extractedItemDicts;
             if (excelExported)
             {
                 res["excel_exported"] = true;
