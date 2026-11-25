@@ -1536,6 +1536,7 @@ namespace AcCoreRegressionHarness
                     LayerTable lt16 = (LayerTable)tr16a.GetObject(db.LayerTableId, OpenMode.ForRead);
                     EnsureLayer(tr16a, lt16, "E-LEGEND-16A", 7);
                     EnsureLayer(tr16a, lt16, "E-LTG-16A-CIRC", 4);
+                    EnsureLayer(tr16a, lt16, "Lig-POST-16A", 3);
                     BlockTable bt16 = (BlockTable)tr16a.GetObject(db.BlockTableId, OpenMode.ForRead);
                     ObjectId pedBtr = EnsureRectBlock(tr16a, bt16, "ped post", 0.4, 0.4, 6);
                     ObjectId up9Btr = EnsureRectBlock(tr16a, bt16, "upligh9w", 0.4, 0.4, 3);
@@ -1544,14 +1545,22 @@ namespace AcCoreRegressionHarness
                     ObjectId sideBtr = EnsureRectBlock(tr16a, bt16, "Sidelight", 0.4, 0.4, 1);
                     ObjectId panel16Btr = EnsureRectBlock(tr16a, bt16, "A$Cf9b77d30", 0.4, 0.4, 3);
                     ObjectId tranBtr = EnsureRectBlock(tr16a, bt16, "traneleled", 0.4, 0.4, 5);
+                    ObjectId bol16Btr = EnsureRectBlock(tr16a, bt16, "BOLLARD16A", 0.4, 0.4, 3);
+                    // Put inner entity of BOLLARD16A on Lig-POST-16A to match real exploded Legend layer signature
+                    BlockTableRecord bol16Def = (BlockTableRecord)tr16a.GetObject(bol16Btr, OpenMode.ForRead);
+                    foreach (ObjectId beid in bol16Def)
+                    {
+                        Entity bent = tr16a.GetObject(beid, OpenMode.ForWrite) as Entity;
+                        if (bent != null) bent.Layer = "Lig-POST-16A";
+                    }
                     BlockTableRecord ms16a = (BlockTableRecord)tr16a.GetObject(bt16[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
 
-                    double[] yGrid = new double[] { 27.0, 24.0, 20.0, 16.0, 12.0, 8.0, 4.0, 0.0 };
+                    double[] yGrid = new double[] { 27.0, 24.0, 20.0, 16.0, 12.0, 8.0, 4.0, 0.0, -4.0 };
                     for (int yi = 0; yi < yGrid.Length; yi++)
                         handles16a.Add(AddLine(ms16a, tr16a, new Point3d(120.0, yGrid[yi], 0), new Point3d(176.0, yGrid[yi], 0), "E-LEGEND-16A", 7).Handle.ToString());
                     double[] xGrid = new double[] { 120.0, 122.5, 127.0, 132.5, 149.0, 154.0, 159.0, 164.0, 176.0 };
                     for (int xi = 0; xi < xGrid.Length; xi++)
-                        handles16a.Add(AddLine(ms16a, tr16a, new Point3d(xGrid[xi], 0.0, 0), new Point3d(xGrid[xi], 27.0, 0), "E-LEGEND-16A", 7).Handle.ToString());
+                        handles16a.Add(AddLine(ms16a, tr16a, new Point3d(xGrid[xi], -4.0, 0), new Point3d(xGrid[xi], 27.0, 0), "E-LEGEND-16A", 7).Handle.ToString());
 
                     // Short diagram lines inside TYPE column & short sub-divider lines inside RECOMMENDED TYPE (must be filtered by FilterMajorGridAxes)
                     handles16a.Add(AddLine(ms16a, tr16a, new Point3d(128.0, 21.0, 0), new Point3d(131.5, 21.0, 0), "E-LEGEND-16A", 7).Handle.ToString());
@@ -1618,14 +1627,26 @@ namespace AcCoreRegressionHarness
                     handles16a.Add(InsertBlock(ms16a, tr16a, tranBtr, new Point3d(124.7, 2.0, 0), "E-LEGEND-16A").Handle.ToString());
                     handles16a.Add(AddText(ms16a, tr16a, new Point3d(133.5, 2.0, 0), "ELECTRICAL BOX FOR LED TRANSFORMER", 0.25, "E-LEGEND-16A").Handle.ToString());
 
-                    // Drawing blocks + isolated test circuit at Y=-10 to verify strict_legend_specs calc
-                    InsertBlock(ms16a, tr16a, pedBtr, new Point3d(126.0, -10.0, 0), "E-LTG-16A-CIRC");
-                    InsertBlock(ms16a, tr16a, spotBtr, new Point3d(130.0, -10.0, 0), "E-LTG-16A-CIRC");
-                    InsertBlock(ms16a, tr16a, tranBtr, new Point3d(134.0, -10.0, 0), "E-LTG-16A-CIRC");
-                    InsertBlock(ms16a, tr16a, up9Btr, new Point3d(140.0, -10.0, 0), "E-LTG-16A-CIRC");
-                    InsertBlock(ms16a, tr16a, sideBtr, new Point3d(142.0, -10.0, 0), "E-LTG-16A-CIRC");
-                    InsertBlock(ms16a, tr16a, panel16Btr, new Point3d(144.0, -10.0, 0), "E-LTG-16A-CIRC");
-                    wire16aCirc = AddLine(ms16a, tr16a, new Point3d(125.0, -10.0, 0), new Point3d(135.0, -10.0, 0), "E-LTG-16A-CIRC", 4).Handle.ToString();
+                    // Row 7 (Y=-2): Exploded loose ICON geometry (no BlockReference in ICON cell!) matching BOLLARD16A by layer signature
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, -2.0, 0), "A", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    Circle expCirc = new Circle(new Point3d(124.7, -2.0, 0), Vector3d.ZAxis, 0.45);
+                    expCirc.Layer = "Lig-POST-16A";
+                    ms16a.AppendEntity(expCirc);
+                    tr16a.AddNewlyCreatedDBObject(expCirc, true);
+                    handles16a.Add(expCirc.Handle.ToString());
+                    handles16a.Add(AddLine(ms16a, tr16a, new Point3d(124.3, -2.0, 0), new Point3d(125.1, -2.0, 0), "Lig-POST-16A", 3).Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(133.5, -2.0, 0), "POST LIGHTING LED NOT MORE THAN 45W", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(150.0, -2.0, 0), "196 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+
+                    // Drawing blocks + isolated test circuit at Y=-12 to verify strict_legend_specs calc
+                    InsertBlock(ms16a, tr16a, pedBtr, new Point3d(126.0, -12.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, spotBtr, new Point3d(130.0, -12.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, tranBtr, new Point3d(134.0, -12.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, up9Btr, new Point3d(140.0, -12.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, sideBtr, new Point3d(142.0, -12.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, panel16Btr, new Point3d(144.0, -12.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, bol16Btr, new Point3d(146.0, -12.0, 0), "Lig-POST-16A");
+                    wire16aCirc = AddLine(ms16a, tr16a, new Point3d(125.0, -12.0, 0), new Point3d(135.0, -12.0, 0), "E-LTG-16A-CIRC", 4).Handle.ToString();
                     tr16a.Commit();
                 }
 
@@ -1634,9 +1655,9 @@ namespace AcCoreRegressionHarness
                     new Dictionary<string, object> { { "action", "extract_from_selection" }, { "handles", handles16a.ToArray() } }
                 });
                 IList extItems16a = r16a.ContainsKey("extracted_items") ? r16a["extracted_items"] as IList : null;
-                AssertTrue(GetBoolVal(r16a, "ok") && extItems16a != null && extItems16a.Count == 6,
-                    "Test 16A expected strictly 6 ICON items from 8-column gridded Legend (got " + (extItems16a != null ? extItems16a.Count : 0) + ")");
-                double wPed = 0.0, wUp9 = 0.0, wSpot16 = 0.0, wSide = 0.0;
+                AssertTrue(GetBoolVal(r16a, "ok") && extItems16a != null && extItems16a.Count == 7,
+                    "Test 16A expected strictly 7 ICON items (incl. exploded BOLLARD16A) from 8-column gridded Legend (got " + (extItems16a != null ? extItems16a.Count : 0) + ")");
+                double wPed = 0.0, wUp9 = 0.0, wSpot16 = 0.0, wSide = 0.0, wBol16 = 0.0;
                 string catPanel16 = "", catTran16 = "";
                 bool sawStale16a = false, sawSpote16a = false;
                 foreach (object itemObj in extItems16a)
@@ -1648,6 +1669,7 @@ namespace AcCoreRegressionHarness
                     else if (bn == "upligh9w") wUp9 = GetDblVal(it, "watt");
                     else if (bn == "SPOT") wSpot16 = GetDblVal(it, "watt");
                     else if (bn == "Sidelight") wSide = GetDblVal(it, "watt");
+                    else if (bn == "BOLLARD16A") wBol16 = GetDblVal(it, "watt");
                     else if (bn == "A$Cf9b77d30") catPanel16 = GetStrVal(it, "category");
                     else if (bn == "traneleled") catTran16 = GetStrVal(it, "category");
                     else if (bn == "SPOTE") sawSpote16a = true;
@@ -1656,9 +1678,10 @@ namespace AcCoreRegressionHarness
                 AssertTrue(!sawStale16a && !sawSpote16a &&
                            Math.Abs(wPed - 24.0) < 0.01 && Math.Abs(wUp9 - 9.0) < 0.01 &&
                            Math.Abs(wSpot16 - 9.0) < 0.01 && Math.Abs(wSide - 6.0) < 0.01 &&
+                           Math.Abs(wBol16 - 45.0) < 0.01 &&
                            catPanel16 == "panel" && catTran16 == "accessory",
                     "Test 16A 8-col Legend mismatch (ped=" + wPed + ", up9=" + wUp9 + ", spot=" + wSpot16 +
-                    ", side=" + wSide + ", panelCat=" + catPanel16 + ", tranCat=" + catTran16 + ", spote=" + sawSpote16a + ")");
+                    ", side=" + wSide + ", bol=" + wBol16 + ", panelCat=" + catPanel16 + ", tranCat=" + catTran16 + ", spote=" + sawSpote16a + ")");
 
                 Dictionary<string, object> r16aCalc = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
                     doc, "find_blocks_along_path",

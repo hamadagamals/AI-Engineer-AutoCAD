@@ -1869,6 +1869,8 @@ namespace AIEngineer.AutoCAD
                     }
 
                     drawingExt = visExt.HasValue ? visExt : allExt;
+                    if (useProjectDb && blockStats.Count > 0)
+                        EnsureAutoDrawingLegendExtracted(doc, blockStats.Keys);
 
                     List<BlockLegendRowSpec> entries = new List<BlockLegendRowSpec>();
                     foreach (BlockLegendRowSpec item in blockStats.Values)

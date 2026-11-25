@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-25 - Phase 7.1.2: Exploded-Icon Legend Resolution & One-Time Auto-Legend Hydration
+
+- **Exploded-Icon Pass-2 Matching by Block Layer Signature (`integrations/autocad_context_plugin/CadProjectLegendDb.cs`, `tests/autocad_accore_harness/AcCoreRegressionVerifier.cs`):**
+  - Added `LegendLooseIconEntity`, `IsGenericNonFixtureLayerName`, `CollectBlockDefLayerSignatures`, and Pass 2 in `TryExtractGridTableLegend` so Legend rows whose icons were exploded into loose geometry (`Circle`/`Arc`/`Hatch`/`Polyline`/`Line` on fixture layers such as `Lig-POST 3M` or `Lig-Park post mountaed`) match their placed ModelSpace block definitions (`BOLLARD = 45W`, `WALL LIGHT = 75W`) using dominant layer signatures and optional `QTY` count confirmation.
+  - Extended `TEST16A` with an exploded-icon row (`BOLLARD16A = 45W`) and verified against `ACP-SWC-AS-BUILT-DWG-DP-SW-LS-001TO005.dwg` (`15/15` Legend blocks extracted cleanly).
+- **Automatic Drawing Legend Hydration (`CadProjectLegendDb.cs`, `CadToolExecutor.cs`):**
+  - Added `EnsureAutoDrawingLegendExtracted` called automatically at the start of `ComputeCircuitLoadFromProjectDb` and inside `DrawBlockLegend` whenever any needed block is absent from the project Legend DB (and not explicitly cleared via `clear_catalog`), healing stale or incomplete catalogs on first circuit trace/legend draw and persisting the refreshed specs to disk.
+
 ## 2026-11-25 - Phase 7.1.1: Real-Project 8-Column Gridded Legend, Range Wattages & Zero-Load Accessories
 
 - **Full-Span Grid Filtering & Header-Aware Symbol Column Isolation (`integrations/autocad_context_plugin/CadProjectLegendDb.cs`):**

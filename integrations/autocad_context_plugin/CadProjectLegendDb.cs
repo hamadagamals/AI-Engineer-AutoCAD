@@ -37,6 +37,10 @@ namespace AIEngineer.AutoCAD
             new Dictionary<IntPtr, Dictionary<string, ProjectLegendSpecItem>>();
         private static readonly HashSet<IntPtr> s_legendLoadedForDb =
             new HashSet<IntPtr>();
+        private static readonly HashSet<IntPtr> s_legendAutoExtractedByDb =
+            new HashSet<IntPtr>();
+        private static readonly HashSet<IntPtr> s_legendSuppressAutoExtractByDb =
+            new HashSet<IntPtr>();
         private static readonly Dictionary<IntPtr, DateTime> s_legendLoadedMtimeByDb =
             new Dictionary<IntPtr, DateTime>();
         private static readonly Dictionary<IntPtr, Dictionary<string, Dictionary<string, object>>> s_dialuxRoomPrefsByDb =
@@ -625,6 +629,18 @@ namespace AIEngineer.AutoCAD
                 return;
             }
 
+            if (doc != null && countsByBlock != null && countsByBlock.Count > 0)
+            {
+                List<string> neededKeys = new List<string>();
+                foreach (KeyValuePair<string, int> kv in countsByBlock)
+                {
+                    if (kv.Value > 0 && !kv.Key.StartsWith("__", StringComparison.Ordinal))
+                        neededKeys.Add(kv.Key);
+                }
+                if (neededKeys.Count > 0)
+                    EnsureAutoDrawingLegendExtracted(doc, neededKeys);
+            }
+
             bool matchedAny = false;
             foreach (KeyValuePair<string, int> kv in countsByBlock)
             {
@@ -1067,6 +1083,74 @@ namespace AIEngineer.AutoCAD
             }
         }
 
+        private sealed class LegendLooseIconEntity
+        {
+            public string Layer;
+            public double Cx;
+            public double Cy;
+            public double Span;
+            public bool IsRichShape;
+        }
+
+        private static bool IsGenericNonFixtureLayerName(string layer)
+        {
+            string l = (layer ?? "").Trim();
+            if (string.IsNullOrEmpty(l)) return true;
+            if (IsLegendOrHighlightLayer(l) || IsAiAnnotationLayer(l) || IsArchitecturalLayerName(l)) return true;
+            string u = l.ToUpperInvariant();
+            if (u == "0" || u == "DEFPOINTS" || u == "TABLE" || u == "TABLES" ||
+                u == "TEXT" || u == "MTEXT" || u == "LEGEND" || u == "BORDER" ||
+                u == "FRAME" || u == "TITLE" || u == "NOTES" || u == "DIM" || u == "DIMS")
+                return true;
+            return false;
+        }
+
+        private static void CollectBlockDefLayerSignatures(
+            Transaction tr,
+            BlockTable bt,
+            BlockReference br,
+            string blockName,
+            Dictionary<string, HashSet<string>> blockLayerSigs,
+            Dictionary<string, HashSet<string>> defLayerCache)
+        {
+            if (tr == null || br == null || string.IsNullOrEmpty(blockName) || blockLayerSigs == null) return;
+            HashSet<string> sigs;
+            if (!blockLayerSigs.TryGetValue(blockName, out sigs))
+            {
+                sigs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                blockLayerSigs[blockName] = sigs;
+            }
+            if (!IsGenericNonFixtureLayerName(br.Layer)) sigs.Add(br.Layer.Trim());
+
+            HashSet<string> innerLyrs;
+            if (!defLayerCache.TryGetValue(blockName, out innerLyrs))
+            {
+                innerLyrs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    ObjectId defId = GetBlockDefinitionId(br);
+                    if (defId.IsNull && bt != null && bt.Has(blockName)) defId = bt[blockName];
+                    if (!defId.IsNull)
+                    {
+                        BlockTableRecord btr = tr.GetObject(defId, OpenMode.ForRead) as BlockTableRecord;
+                        if (btr != null)
+                        {
+                            foreach (ObjectId eid in btr)
+                            {
+                                if (eid.IsErased) continue;
+                                Entity ie = tr.GetObject(eid, OpenMode.ForRead) as Entity;
+                                if (ie != null && !ie.IsErased && !IsGenericNonFixtureLayerName(ie.Layer))
+                                    innerLyrs.Add(ie.Layer.Trim());
+                            }
+                        }
+                    }
+                }
+                catch { }
+                defLayerCache[blockName] = innerLyrs;
+            }
+            foreach (string il in innerLyrs) sigs.Add(il);
+        }
+
         private static void CollectLegendPrimitivesRecursive(
             Transaction tr,
             BlockTableRecord btr,
@@ -1076,7 +1160,8 @@ namespace AIEngineer.AutoCAD
             Dictionary<string, bool> hiddenMap,
             List<LegendCandidateSymbol> symbols,
             List<LegendCandidateText> texts,
-            List<LegendGridSegment> gridSegs)
+            List<LegendGridSegment> gridSegs,
+            List<LegendLooseIconEntity> looseIconEnts = null)
         {
             if (btr == null || depth > 3) return;
             foreach (ObjectId oid in btr)
@@ -1090,6 +1175,61 @@ namespace AIEngineer.AutoCAD
                 if (ent is Line || ent is Polyline)
                 {
                     CollectLegendGridSegmentsFromEntity(ent, xform, gridSegs);
+                    if (looseIconEnts != null && !IsGenericNonFixtureLayerName(ent.Layer))
+                    {
+                        try
+                        {
+                            Extents3d exL = ent.GeometricExtents;
+                            if (IsFiniteBounds(exL))
+                            {
+                                Point3d pMinL = exL.MinPoint.TransformBy(xform);
+                                Point3d pMaxL = exL.MaxPoint.TransformBy(xform);
+                                double spL = Math.Max(Math.Abs(pMaxL.X - pMinL.X), Math.Abs(pMaxL.Y - pMinL.Y));
+                                if (spL > 1e-4)
+                                {
+                                    looseIconEnts.Add(new LegendLooseIconEntity
+                                    {
+                                        Layer = ent.Layer.Trim(),
+                                        Cx = (pMinL.X + pMaxL.X) * 0.5,
+                                        Cy = (pMinL.Y + pMaxL.Y) * 0.5,
+                                        Span = spL,
+                                        IsRichShape = (ent is Polyline)
+                                    });
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                    continue;
+                }
+
+                if (ent is Circle || ent is Arc || ent is Hatch)
+                {
+                    if (looseIconEnts != null && !IsGenericNonFixtureLayerName(ent.Layer))
+                    {
+                        try
+                        {
+                            Extents3d exC = ent.GeometricExtents;
+                            if (IsFiniteBounds(exC))
+                            {
+                                Point3d pMinC = exC.MinPoint.TransformBy(xform);
+                                Point3d pMaxC = exC.MaxPoint.TransformBy(xform);
+                                double spC = Math.Max(Math.Abs(pMaxC.X - pMinC.X), Math.Abs(pMaxC.Y - pMinC.Y));
+                                if (spC > 1e-4)
+                                {
+                                    looseIconEnts.Add(new LegendLooseIconEntity
+                                    {
+                                        Layer = ent.Layer.Trim(),
+                                        Cx = (pMinC.X + pMaxC.X) * 0.5,
+                                        Cy = (pMinC.Y + pMaxC.Y) * 0.5,
+                                        Span = spC,
+                                        IsRichShape = true
+                                    });
+                                }
+                            }
+                        }
+                        catch { }
+                    }
                     continue;
                 }
 
@@ -1165,7 +1305,7 @@ namespace AIEngineer.AutoCAD
                         {
                             CollectLegendPrimitivesRecursive(
                                 tr, subBtr, xform * br.BlockTransform, depth + 1,
-                                false, hiddenMap, symbols, texts, gridSegs);
+                                false, hiddenMap, symbols, texts, gridSegs, looseIconEnts);
                         }
                     }
                 }
@@ -1372,6 +1512,8 @@ namespace AIEngineer.AutoCAD
             List<LegendCandidateText> texts,
             List<LegendGridSegment> gridSegs,
             Dictionary<string, int> placedModelBlockFreq,
+            List<LegendLooseIconEntity> looseIconEnts,
+            Dictionary<string, HashSet<string>> blockLayerSigs,
             double medSpan,
             bool fromSelectionOnly,
             string srcTag,
@@ -1740,6 +1882,127 @@ namespace AIEngineer.AutoCAD
                         }
                         clusterItems.Add(parsed);
                     }
+
+                    // Pass 2: Exploded-icon rows (loose Hatch/Circle/Arc/Polyline/Line inside ICON cell matched to placed ModelSpace block by layer signature)
+                    if (looseIconEnts != null && looseIconEnts.Count > 0 && blockLayerSigs != null && blockLayerSigs.Count > 0)
+                    {
+                        HashSet<string> pass1Matched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        for (int ci = 0; ci < clusterItems.Count; ci++) pass1Matched.Add(clusterItems[ci].BlockName);
+                        double colMinX = colXs[symCol];
+                        double colMaxX = colXs[symCol + 1];
+                        double symColWidth = Math.Max(1e-3, colMaxX - colMinX);
+
+                        for (int r = 0; r < nRows; r++)
+                        {
+                            if (symCells[r, symCol] != null && symCells[r, symCol].Count > 0) continue;
+                            if (r == 0 && (colHdrSym[symCol] || colHdrDesc[symCol] || anyHeaderSymCol)) continue;
+                            double rowHiY = rowYs[r];
+                            double rowLoY = rowYs[r + 1];
+                            double rowH = Math.Max(1e-3, rowHiY - rowLoY);
+
+                            Dictionary<string, int> layerCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                            Dictionary<string, bool> layerHasRich = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                            for (int li = 0; li < looseIconEnts.Count; li++)
+                            {
+                                LegendLooseIconEntity le = looseIconEnts[li];
+                                if (le.Span > Math.Max(symColWidth, rowH) * 1.35) continue;
+                                if (le.Cx < colMinX - cellPad || le.Cx > colMaxX + cellPad ||
+                                    le.Cy < rowLoY - cellPad || le.Cy > rowHiY + cellPad)
+                                    continue;
+                                layerCounts[le.Layer] = layerCounts.ContainsKey(le.Layer) ? layerCounts[le.Layer] + 1 : 1;
+                                if (le.IsRichShape) layerHasRich[le.Layer] = true;
+                            }
+                            if (layerCounts.Count == 0) continue;
+
+                            string domLayer = null;
+                            int domCnt = 0;
+                            foreach (KeyValuePair<string, int> kv in layerCounts)
+                            {
+                                bool rich = layerHasRich.ContainsKey(kv.Key) && layerHasRich[kv.Key];
+                                if (kv.Value < 2 && !rich) continue;
+                                if (kv.Value > domCnt) { domCnt = kv.Value; domLayer = kv.Key; }
+                            }
+                            if (string.IsNullOrEmpty(domLayer)) continue;
+
+                            string rowTag = "";
+                            for (int tcIdx = Math.Max(0, symCol - 1); tcIdx <= Math.Min(nCols - 1, symCol + 1); tcIdx++)
+                            {
+                                if (!isTagCol[tcIdx] || textCells[r, tcIdx] == null) continue;
+                                for (int k = 0; k < textCells[r, tcIdx].Count; k++)
+                                {
+                                    string candT = textCells[r, tcIdx][k].Text.Trim();
+                                    if (!string.IsNullOrEmpty(candT)) { rowTag = candT; break; }
+                                }
+                                if (!string.IsNullOrEmpty(rowTag)) break;
+                            }
+
+                            int rowQty = 0;
+                            List<string> descParts = new List<string>();
+                            int cStart = gridDescOnLeft ? maxSpanCol : minSpanCol;
+                            int cEnd = gridDescOnLeft ? minSpanCol : maxSpanCol;
+                            int cStep = gridDescOnLeft ? -1 : 1;
+                            for (int c = cStart; gridDescOnLeft ? (c >= cEnd) : (c <= cEnd); c += cStep)
+                            {
+                                if (isQtyCol[c])
+                                {
+                                    if (rowQty == 0 && textCells[r, c] != null)
+                                    {
+                                        for (int k = 0; k < textCells[r, c].Count; k++)
+                                        {
+                                            Match mQ = Regex.Match(textCells[r, c][k].Text.Trim(), @"^(\d+)\b");
+                                            int qv;
+                                            if (mQ.Success && int.TryParse(mQ.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out qv) && qv > 0)
+                                            {
+                                                rowQty = qv;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                                if (isTagCol[c] || colHdrIgnore[c] || symColsSet.Contains(c)) continue;
+                                List<LegendCandidateText> tc = textCells[r, c];
+                                if (tc == null || tc.Count == 0) continue;
+                                for (int k = 0; k < tc.Count; k++)
+                                {
+                                    string txtLine = tc[k].Text.Trim();
+                                    if (string.IsNullOrWhiteSpace(txtLine)) continue;
+                                    string tu = txtLine.ToUpperInvariant();
+                                    if (tu == "ICON" || tu == "TYPE" || tu == "SYMBOL" || tu == "SYMBOLS" ||
+                                        tu == "DESCRIPTION" || tu == "TITLE" || tu == "SPECIFICATION" ||
+                                        tu == "LEGEND" || tu == "RECOMMENDED TYPE")
+                                        continue;
+                                    descParts.Add(txtLine);
+                                }
+                            }
+
+                            string combinedDesc = Regex.Replace(string.Join(" ", descParts.ToArray()), @"\s+", " ").Trim();
+                            if (string.IsNullOrWhiteSpace(combinedDesc) || !HasEngineeringSpecSignal(combinedDesc)) continue;
+                            if (!fromSelectionOnly && IsCircuitTagOrFloorNoteNoise(combinedDesc)) continue;
+
+                            string bestBn = null;
+                            int bestScore = int.MinValue;
+                            foreach (KeyValuePair<string, HashSet<string>> bkv in blockLayerSigs)
+                            {
+                                if (pass1Matched.Contains(bkv.Key) || matchedGridBlocks.Contains(bkv.Key)) continue;
+                                if (!bkv.Value.Contains(domLayer)) continue;
+                                int placedCnt = 0;
+                                if (placedModelBlockFreq != null) placedModelBlockFreq.TryGetValue(bkv.Key, out placedCnt);
+                                int sc = 100 + Math.Min(20, placedCnt / 5);
+                                if (rowQty > 0 && placedCnt > 0 && Math.Abs(placedCnt - rowQty) <= Math.Max(2, (int)(rowQty * 0.05)))
+                                    sc += 30;
+                                if (sc > bestScore) { bestScore = sc; bestBn = bkv.Key; }
+                            }
+                            if (string.IsNullOrEmpty(bestBn)) continue;
+
+                            ProjectLegendSpecItem parsed = ParseSpecFromLegendDescription(bestBn, combinedDesc, srcTag);
+                            parsed.LegendTag = rowTag;
+                            if (parsed.Watt.HasValue || parsed.Va.HasValue) clusterWattRows++;
+                            clusterSpecRows++;
+                            clusterItems.Add(parsed);
+                            pass1Matched.Add(bestBn);
+                        }
+                    }
                 }
 
                 if (!fromSelectionOnly)
@@ -1793,7 +2056,10 @@ namespace AIEngineer.AutoCAD
             List<LegendCandidateSymbol> symbols = new List<LegendCandidateSymbol>();
             List<LegendCandidateText> texts = new List<LegendCandidateText>();
             List<LegendGridSegment> gridSegs = new List<LegendGridSegment>();
+            List<LegendLooseIconEntity> looseIconEnts = new List<LegendLooseIconEntity>();
             Dictionary<string, int> modelBlockFreq = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, HashSet<string>> blockLayerSigs = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, HashSet<string>> defLayerCache = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
             HashSet<string> allKnownDrawingBlocks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
@@ -1915,6 +2181,56 @@ namespace AIEngineer.AutoCAD
                     if (ent is Line || ent is Polyline)
                     {
                         CollectLegendGridSegmentsFromEntity(ent, Matrix3d.Identity, gridSegs);
+                        if (!IsGenericNonFixtureLayerName(ent.Layer))
+                        {
+                            try
+                            {
+                                Extents3d exL = ent.GeometricExtents;
+                                if (IsFiniteBounds(exL))
+                                {
+                                    double spL = Math.Max(exL.MaxPoint.X - exL.MinPoint.X, exL.MaxPoint.Y - exL.MinPoint.Y);
+                                    if (spL > 1e-4)
+                                    {
+                                        looseIconEnts.Add(new LegendLooseIconEntity
+                                        {
+                                            Layer = ent.Layer.Trim(),
+                                            Cx = (exL.MinPoint.X + exL.MaxPoint.X) * 0.5,
+                                            Cy = (exL.MinPoint.Y + exL.MaxPoint.Y) * 0.5,
+                                            Span = spL,
+                                            IsRichShape = (ent is Polyline)
+                                        });
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                        continue;
+                    }
+                    if (ent is Circle || ent is Arc || ent is Hatch)
+                    {
+                        if (!IsGenericNonFixtureLayerName(ent.Layer))
+                        {
+                            try
+                            {
+                                Extents3d exC = ent.GeometricExtents;
+                                if (IsFiniteBounds(exC))
+                                {
+                                    double spC = Math.Max(exC.MaxPoint.X - exC.MinPoint.X, exC.MaxPoint.Y - exC.MinPoint.Y);
+                                    if (spC > 1e-4)
+                                    {
+                                        looseIconEnts.Add(new LegendLooseIconEntity
+                                        {
+                                            Layer = ent.Layer.Trim(),
+                                            Cx = (exC.MinPoint.X + exC.MaxPoint.X) * 0.5,
+                                            Cy = (exC.MinPoint.Y + exC.MaxPoint.Y) * 0.5,
+                                            Span = spC,
+                                            IsRichShape = true
+                                        });
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
                         continue;
                     }
                     if (ent is DBText || ent is MText)
@@ -1952,7 +2268,7 @@ namespace AIEngineer.AutoCAD
                             {
                                 BlockTableRecord subBtr = tr.GetObject(defId, OpenMode.ForRead) as BlockTableRecord;
                                 if (subBtr != null)
-                                    CollectLegendPrimitivesRecursive(tr, subBtr, br.BlockTransform, 1, false, hiddenMap, symbols, texts, gridSegs);
+                                    CollectLegendPrimitivesRecursive(tr, subBtr, br.BlockTransform, 1, false, hiddenMap, symbols, texts, gridSegs, looseIconEnts);
                             }
                         }
                         else if (!IsAnonymousBlockName(bn) && !IsPanelOrFrameBlockName(bn))
@@ -1960,6 +2276,7 @@ namespace AIEngineer.AutoCAD
                             int curC = 0;
                             modelBlockFreq.TryGetValue(bn, out curC);
                             modelBlockFreq[bn] = curC + 1;
+                            CollectBlockDefLayerSignatures(tr, bt, br, bn, blockLayerSigs, defLayerCache);
 
                             Extents3d ex;
                             try { ex = br.GeometricExtents; } catch { continue; }
@@ -1994,6 +2311,7 @@ namespace AIEngineer.AutoCAD
                         int curM = 0;
                         modelBlockFreq.TryGetValue(mbn, out curM);
                         modelBlockFreq[mbn] = curM + 1;
+                        CollectBlockDefLayerSignatures(tr, bt, mBr, mbn, blockLayerSigs, defLayerCache);
                     }
                 }
                 tr.Commit();
@@ -2015,7 +2333,7 @@ namespace AIEngineer.AutoCAD
             {
                 HashSet<string> gridMatchedNames;
                 List<ProjectLegendSpecItem> gridExtracted = TryExtractGridTableLegend(
-                    symbols, texts, gridSegs, modelBlockFreq, medSpan, fromSelectionOnly, srcTag, out gridMatchedNames);
+                    symbols, texts, gridSegs, modelBlockFreq, looseIconEnts, blockLayerSigs, medSpan, fromSelectionOnly, srcTag, out gridMatchedNames);
                 // Re-pass placed ModelSpace frequencies only if grid extraction succeeded cleanly
                 if (gridExtracted.Count >= 2 || (fromSelectionOnly && gridExtracted.Count >= 1))
                 {
@@ -2732,6 +3050,77 @@ namespace AIEngineer.AutoCAD
             public List<ProjectLegendSpecItem> Items;
         }
 
+        private static void EnsureAutoDrawingLegendExtracted(Document doc, IEnumerable<string> neededBlocks)
+        {
+            if (doc == null || doc.Database == null || doc.Database.UnmanagedObject == IntPtr.Zero) return;
+            Database db = doc.Database;
+            IntPtr dbPtr = db.UnmanagedObject;
+
+            lock (s_lastCoordLock)
+            {
+                EnsureProjectLegendDbLoadedLocked(doc, db);
+                if (s_legendAutoExtractedByDb.Contains(dbPtr) || s_legendSuppressAutoExtractByDb.Contains(dbPtr))
+                    return;
+
+                Dictionary<string, ProjectLegendSpecItem> cat;
+                s_legendCatalogByDb.TryGetValue(dbPtr, out cat);
+                if (neededBlocks != null && cat != null && cat.Count > 0)
+                {
+                    bool allFound = true;
+                    foreach (string bn in neededBlocks)
+                    {
+                        if (string.IsNullOrWhiteSpace(bn) || bn.StartsWith("__", StringComparison.Ordinal)) continue;
+                        if (!cat.ContainsKey(bn.Trim())) { allFound = false; break; }
+                    }
+                    if (allFound) return;
+                }
+                s_legendAutoExtractedByDb.Add(dbPtr);
+            }
+
+            try
+            {
+                int nt, cs, ct;
+                List<ProjectLegendSpecItem> found = ExtractLegendFromEntities(
+                    doc, db, false, true, out nt, out cs, out ct, null);
+                if (found != null && found.Count > 0)
+                {
+                    lock (s_lastCoordLock)
+                    {
+                        Dictionary<string, ProjectLegendSpecItem> cat;
+                        if (!s_legendCatalogByDb.TryGetValue(dbPtr, out cat))
+                        {
+                            cat = new Dictionary<string, ProjectLegendSpecItem>(StringComparer.OrdinalIgnoreCase);
+                            s_legendCatalogByDb[dbPtr] = cat;
+                        }
+                        List<string> staleKeys = new List<string>();
+                        foreach (KeyValuePair<string, ProjectLegendSpecItem> kv in cat)
+                        {
+                            if (kv.Value != null &&
+                                string.Equals(kv.Value.Source, "drawing_legend", StringComparison.OrdinalIgnoreCase))
+                            {
+                                staleKeys.Add(kv.Key);
+                            }
+                        }
+                        for (int si = 0; si < staleKeys.Count; si++) cat.Remove(staleKeys[si]);
+
+                        for (int i = 0; i < found.Count; i++)
+                        {
+                            ProjectLegendSpecItem f = found[i];
+                            ProjectLegendSpecItem existing;
+                            if (cat.TryGetValue(f.BlockName, out existing) && existing != null &&
+                                string.Equals(existing.Source, "user_verified", StringComparison.OrdinalIgnoreCase))
+                            {
+                                continue;
+                            }
+                            cat[f.BlockName] = CloneLegendSpec(f);
+                        }
+                        SaveProjectDatabaseToDiskLocked(doc, db);
+                    }
+                }
+            }
+            catch { }
+        }
+
         private static Dictionary<string, object> ManageProjectLegendDb(Document doc, Dictionary<string, object> args)
         {
             if (doc == null || doc.Database == null)
@@ -2761,12 +3150,19 @@ namespace AIEngineer.AutoCAD
                     {
                         EnsureProjectLegendDbLoadedLocked(doc, db);
                         s_legendCatalogByDb[dbPtr] = new Dictionary<string, ProjectLegendSpecItem>(StringComparer.OrdinalIgnoreCase);
+                        s_legendSuppressAutoExtractByDb.Add(dbPtr);
+                        s_legendAutoExtractedByDb.Remove(dbPtr);
                         SaveProjectDatabaseToDiskLocked(doc, db);
                     }
                 }
                 else if (action == "extract_from_drawing" || action == "extract_from_selection")
                 {
                     bool fromSel = (action == "extract_from_selection");
+                    lock (s_lastCoordLock)
+                    {
+                        s_legendSuppressAutoExtractByDb.Remove(dbPtr);
+                        s_legendAutoExtractedByDb.Add(dbPtr);
+                    }
                     List<string> explicitHandles = GetStringList(args, "handles");
                     List<ProjectLegendSpecItem> found = ExtractLegendFromEntities(
                         doc, db, fromSel, visibleOnly,
