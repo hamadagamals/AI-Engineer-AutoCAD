@@ -15,8 +15,15 @@ from agent.exceptions import PackagingError
 
 
 READINESS_VERSION = "autocad.release_readiness.v2"
-SUPPORTED_AUTOCAD_YEARS = (2021, 2023)
-_AUTOCAD_RELEASES = {2021: "24.0", 2023: "24.2"}
+SUPPORTED_AUTOCAD_YEARS = (2021, 2022, 2023, 2024, 2025, 2026)
+_AUTOCAD_RELEASES = {
+    2021: "24.0",
+    2022: "24.1",
+    2023: "24.2",
+    2024: "24.3",
+    2025: "25.0",
+    2026: "25.1",
+}
 AUTOCAD_PRODUCT_FILES = (
     "CHECK-AI-ENGINEER-AUTOCAD-2023.ps1",
     "START-AI-ENGINEER-AUTOCAD-2023.ps1",
@@ -30,6 +37,12 @@ AUTOCAD_PRODUCT_FILES = (
     "integrations/autocad_context_plugin/DrawingChangeTracker.cs",
     "integrations/autocad_context_plugin/OperatorCommandChannel.cs",
     "integrations/autocad_context_plugin/PaletteCommands.cs",
+    "integrations/autocad_context_plugin/CadPanelAndQaTools.cs",
+    "integrations/autocad_context_plugin/CadPanelManufacturingTools.cs",
+    "integrations/autocad_context_plugin/CadProjectLegendDb.cs",
+    "integrations/autocad_context_plugin/CadGuidedInventoryTools.cs",
+    "integrations/autocad_context_plugin/CadDistributionNetworkTools.cs",
+    "integrations/autocad_context_plugin/CadVisualCaptureTools.cs",
     "integrations/autocad_drawing_delta.py",
     "integrations/autocad_drawing_index.py",
     "integrations/autocad_drawing_inventory.py",
@@ -38,6 +51,7 @@ AUTOCAD_PRODUCT_FILES = (
     "integrations/autocad_operator_channel.py",
     "integrations/autocad_review_channel.py",
     "integrations/manufacturer_templates/free-candidates.template.json",
+    "data/switchgear_3d_catalog.json",
 )
 _AUTOCAD_FILES = (
     "acad.exe",
@@ -47,7 +61,14 @@ _AUTOCAD_FILES = (
     "accoremgd.dll",
     "AcWindows.dll",
 )
-_FRAMEWORK_VERSIONS = {2021: ("v4.7.2",), 2023: ("v4.8", "v4.7.2")}
+_FRAMEWORK_VERSIONS = {
+    2021: ("v4.7.2",),
+    2022: ("v4.8", "v4.7.2"),
+    2023: ("v4.8", "v4.7.2"),
+    2024: ("v4.8", "v4.7.2"),
+    2025: ("v4.8", "v4.7.2"),
+    2026: ("v4.8", "v4.7.2"),
+}
 PortProbe = Callable[[int], bool]
 
 
@@ -94,7 +115,7 @@ def inspect_autocad_release_readiness(
 ) -> AutoCADReadinessReport:
     """Inspect fixed local prerequisites without starting services or AutoCAD."""
     if autocad_year not in SUPPORTED_AUTOCAD_YEARS:
-        raise PackagingError("Supported AutoCAD years are 2021 and 2023.")
+        raise PackagingError("Supported AutoCAD years are 2021 through 2026.")
     if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
         raise PackagingError("AutoCAD readiness port must be from 1024 through 65535.")
     root = project_root.expanduser().resolve(strict=True)

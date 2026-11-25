@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -7,13 +8,45 @@ using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
+using Autodesk.AutoCAD.Runtime;
+
+#if !PANEL_MFG_STANDALONE
+[assembly: CommandClass(typeof(AIEngineer.AutoCAD.DialuxWizardCommands))]
+#endif
 
 namespace AIEngineer.AutoCAD
 {
+#if !PANEL_MFG_STANDALONE
+    public sealed class DialuxWizardCommands
+    {
+        [CommandMethod("AIENGDIALUX", CommandFlags.Session)]
+        public void RunDialuxExportWizard()
+        {
+            Autodesk.AutoCAD.ApplicationServices.Document doc =
+                Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            Dictionary<string, object> res = CadToolExecutor.ExecuteTool(doc, "export_dialux_stf", new Dictionary<string, object>
+            {
+                { "interactive_dialog", true }
+            });
+            Editor ed = doc.Editor;
+            if (ed != null && res != null)
+            {
+                object msgObj;
+                if (res.TryGetValue("message", out msgObj) && msgObj != null)
+                    ed.WriteMessage("\n[AI-Engineer DIALux] " + msgObj.ToString() + "\n");
+                else if (res.TryGetValue("error", out msgObj) && msgObj != null)
+                    ed.WriteMessage("\n[AI-Engineer DIALux] " + msgObj.ToString() + "\n");
+            }
+        }
+    }
+#endif
+
     internal static partial class CadToolExecutor
     {
-        private sealed class PhotometricProfile
+        internal sealed class PhotometricProfile
         {
             public string SourceFile = "";
             public string Manufacturer = "Generic";
@@ -1042,39 +1075,506 @@ namespace AIEngineer.AutoCAD
             return Ok(res);
         }
 
+        internal sealed class DialuxRoomReviewRow
+        {
+            public int Index;
+            public string RoomName = "";
+            public string Handle = "";
+            public double AreaM2;
+            public string SpaceCategory = "General / Office";
+            public double TargetLux = 400.0;
+            public double CeilingHeightM = 3.0;
+            public double MountingHeightM = 3.0;
+            public double WorkplaneM = 0.80;
+            public double ReflCeiling = 0.70;
+            public double ReflWalls = 0.50;
+            public double ReflFloor = 0.20;
+            public int FixtureCount;
+            public bool HeightConfirmed;
+            public string StatusNote = "";
+        }
+
+        internal sealed class DialuxLuminaireReviewRow
+        {
+            public string BlockName = "";
+            public int Qty;
+            public double Watt = 36.0;
+            public double Lumens = 3600.0;
+            public double LengthM = 0.60;
+            public double WidthM = 0.60;
+            public double HeightM = 0.05;
+            public string MountingType = "Recessed";
+            public string IesPath = "";
+            public string Manufacturer = "Generic";
+            public PhotometricProfile Photometry;
+            public bool HasVerifiedLegendSpec;
+            public bool MissingSpec { get { return !HasVerifiedLegendSpec; } }
+            public string SpecStatus = "";
+        }
+
+        internal sealed class DialuxExportReviewForm : Form
+        {
+            private readonly DataGridView _roomsGrid = new DataGridView();
+            private readonly DataGridView _lumGrid = new DataGridView();
+            private readonly TextBox _txtPath = new TextBox();
+            private readonly NumericUpDown _numMf = new NumericUpDown();
+            private readonly NumericUpDown _numApplyHeight = new NumericUpDown();
+            private readonly CheckBox _chkSaveDb = new CheckBox();
+            private readonly Label _lblSummary = new Label();
+            private readonly List<DialuxRoomReviewRow> _rooms;
+            private readonly List<DialuxLuminaireReviewRow> _lums;
+
+            internal DataGridView RoomsGrid { get { return _roomsGrid; } }
+            internal DataGridView LuminairesGrid { get { return _lumGrid; } }
+            internal string SelectedStfPath { get { return (_txtPath.Text ?? "").Trim(); } }
+            internal double SelectedMaintenanceFactor { get { return (double)_numMf.Value; } }
+            internal bool SaveToProjectDb { get { return _chkSaveDb.Checked; } }
+            internal int MissingCount
+            {
+                get
+                {
+                    int c = 0;
+                    for (int i = 0; i < _rooms.Count; i++) if (!_rooms[i].HeightConfirmed) c++;
+                    for (int i = 0; i < _lums.Count; i++) if (_lums[i].MissingSpec) c++;
+                    return c;
+                }
+            }
+
+            public DialuxExportReviewForm(
+                List<DialuxRoomReviewRow> rooms,
+                List<DialuxLuminaireReviewRow> luminaires,
+                string defaultStfPath,
+                double defaultMf)
+            {
+                _rooms = rooms ?? new List<DialuxRoomReviewRow>();
+                _lums = luminaires ?? new List<DialuxLuminaireReviewRow>();
+
+                Text = "AI-Engineer Pro — DIALux Pre-Export Review & Missing Parameters";
+                Width = 920;
+                Height = 620;
+                MinimumSize = new Size(720, 480);
+                StartPosition = FormStartPosition.CenterParent;
+                BackColor = Color.FromArgb(24, 28, 36);
+                ForeColor = Color.FromArgb(230, 237, 243);
+                try { Font = new System.Drawing.Font("Segoe UI", 9.5F, FontStyle.Regular); } catch { }
+
+                Panel header = new Panel { Dock = DockStyle.Top, Height = 56, BackColor = Color.FromArgb(17, 24, 39), Padding = new Padding(12, 8, 12, 8) };
+                Panel accent = new Panel { Dock = DockStyle.Top, Height = 3, BackColor = Color.FromArgb(59, 130, 246) };
+                Label title = new Label
+                {
+                    Text = "⚡ مراجعة بيانات DIALux والبنود الناقصة قبل التصدير (.stf)",
+                    Dock = DockStyle.Top,
+                    AutoSize = true,
+                    ForeColor = Color.White
+                };
+                try { title.Font = new System.Drawing.Font("Segoe UI", 11F, FontStyle.Bold); } catch { }
+                _lblSummary.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "الغرف المكتشفة: {0} | أنواع الكشافات: {1} | بنود افتراضية/ناقصة تحتاج تأكيد أو تعديل: {2}",
+                    _rooms.Count, _lums.Count, MissingCount);
+                _lblSummary.Dock = DockStyle.Top;
+                _lblSummary.AutoSize = true;
+                _lblSummary.ForeColor = MissingCount > 0 ? Color.FromArgb(251, 191, 36) : Color.FromArgb(74, 222, 128);
+                header.Controls.Add(_lblSummary);
+                header.Controls.Add(title);
+
+                FlowLayoutPanel topBar = new FlowLayoutPanel
+                {
+                    Dock = DockStyle.Top,
+                    AutoSize = true,
+                    BackColor = Color.FromArgb(30, 41, 59),
+                    Padding = new Padding(10, 6, 10, 6),
+                    WrapContents = true
+                };
+                _numMf.Minimum = 0.40M; _numMf.Maximum = 1.00M; _numMf.DecimalPlaces = 2; _numMf.Increment = 0.05M;
+                _numMf.Value = (decimal)Math.Max(0.40, Math.Min(1.00, defaultMf));
+                _numMf.Width = 65;
+
+                _numApplyHeight.Minimum = 2.0M; _numApplyHeight.Maximum = 25.0M; _numApplyHeight.DecimalPlaces = 2; _numApplyHeight.Increment = 0.1M;
+                _numApplyHeight.Value = _rooms.Count > 0 ? (decimal)Math.Max(2.0, Math.Min(25.0, _rooms[0].CeilingHeightM)) : 3.0M;
+                _numApplyHeight.Width = 65;
+
+                Button btnApplyAll = new Button
+                {
+                    Text = "تطبيق الارتفاع على كل الغرف",
+                    AutoSize = true,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = Color.FromArgb(37, 99, 235),
+                    ForeColor = Color.White,
+                    Margin = new Padding(6, 0, 12, 0)
+                };
+                btnApplyAll.Click += delegate
+                {
+                    double hVal = (double)_numApplyHeight.Value;
+                    for (int r = 0; r < _roomsGrid.Rows.Count; r++)
+                    {
+                        _roomsGrid.Rows[r].Cells["CeilingH"].Value = hVal.ToString("0.00", CultureInfo.InvariantCulture);
+                        _roomsGrid.Rows[r].Cells["MountH"].Value = hVal.ToString("0.00", CultureInfo.InvariantCulture);
+                        _roomsGrid.Rows[r].Cells["Status"].Value = "مؤكد يدوياً";
+                        _roomsGrid.Rows[r].Cells["CeilingH"].Style.BackColor = Color.FromArgb(20, 83, 45);
+                    }
+                };
+
+                Label lblPath = new Label { Text = "ملف STF:", AutoSize = true, Margin = new Padding(4, 6, 4, 2) };
+                _txtPath.Text = defaultStfPath ?? "";
+                _txtPath.Width = 260;
+                _txtPath.BackColor = Color.FromArgb(15, 23, 42);
+                _txtPath.ForeColor = Color.White;
+                Button btnBrowse = new Button
+                {
+                    Text = "...",
+                    Width = 34,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = Color.FromArgb(51, 65, 85),
+                    ForeColor = Color.White
+                };
+                btnBrowse.Click += delegate
+                {
+                    using (SaveFileDialog sfd = new SaveFileDialog())
+                    {
+                        sfd.Filter = "DIALux Interface File (*.stf)|*.stf";
+                        sfd.DefaultExt = "stf";
+                        sfd.FileName = Path.GetFileName(_txtPath.Text);
+                        if (sfd.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(sfd.FileName))
+                            _txtPath.Text = sfd.FileName;
+                    }
+                };
+
+                topBar.Controls.Add(new Label { Text = "MF:", AutoSize = true, Margin = new Padding(2, 6, 2, 2) });
+                topBar.Controls.Add(_numMf);
+                topBar.Controls.Add(new Label { Text = "  ارتفاع السقف (م):", AutoSize = true, Margin = new Padding(6, 6, 2, 2) });
+                topBar.Controls.Add(_numApplyHeight);
+                topBar.Controls.Add(btnApplyAll);
+                topBar.Controls.Add(lblPath);
+                topBar.Controls.Add(_txtPath);
+                topBar.Controls.Add(btnBrowse);
+
+                TabControl tabs = new TabControl { Dock = DockStyle.Fill };
+                TabPage tabRooms = new TabPage("الغرف والارتفاعات / Rooms & Heights");
+                TabPage tabLums = new TabPage("الكشافات والليجند / Luminaires & IES");
+
+                StyleGrid(_roomsGrid);
+                _roomsGrid.Columns.Add("RoomName", "اسم الغرفة");
+                _roomsGrid.Columns.Add("AreaM2", "المساحة m2");
+                _roomsGrid.Columns.Add("SpaceType", "نوع الغرفة");
+                _roomsGrid.Columns.Add("CeilingH", "ارتفاع السقف (م)");
+                _roomsGrid.Columns.Add("MountH", "ارتفاع الكشاف (م)");
+                _roomsGrid.Columns.Add("Workplane", "مستوى العمل (م)");
+                _roomsGrid.Columns.Add("TargetLux", "Lux المطلوب");
+                _roomsGrid.Columns.Add("FixCount", "الكشافات");
+                _roomsGrid.Columns.Add("Status", "الحالة");
+                _roomsGrid.Columns["AreaM2"].ReadOnly = true;
+                _roomsGrid.Columns["FixCount"].ReadOnly = true;
+                _roomsGrid.Columns["Status"].ReadOnly = true;
+
+                for (int i = 0; i < _rooms.Count; i++)
+                {
+                    DialuxRoomReviewRow rr = _rooms[i];
+                    int rowIdx = _roomsGrid.Rows.Add(
+                        rr.RoomName,
+                        rr.AreaM2.ToString("0.##", CultureInfo.InvariantCulture),
+                        rr.SpaceCategory,
+                        rr.CeilingHeightM.ToString("0.00", CultureInfo.InvariantCulture),
+                        rr.MountingHeightM.ToString("0.00", CultureInfo.InvariantCulture),
+                        rr.WorkplaneM.ToString("0.00", CultureInfo.InvariantCulture),
+                        rr.TargetLux.ToString("0", CultureInfo.InvariantCulture),
+                        rr.FixtureCount.ToString(CultureInfo.InvariantCulture),
+                        rr.StatusNote);
+                    if (!rr.HeightConfirmed)
+                        _roomsGrid.Rows[rowIdx].Cells["CeilingH"].Style.BackColor = Color.FromArgb(120, 53, 15);
+                }
+
+                StyleGrid(_lumGrid);
+                _lumGrid.Columns.Add("BlockName", "اسم البلوك");
+                _lumGrid.Columns.Add("Qty", "الكمية");
+                _lumGrid.Columns.Add("Watt", "القدرة (W)");
+                _lumGrid.Columns.Add("Lumens", "اللومن (lm)");
+                _lumGrid.Columns.Add("MountType", "التركيب");
+                _lumGrid.Columns.Add("IesPath", "ملف .ies / .ldt");
+                _lumGrid.Columns.Add("SpecStatus", "مصدر المواصفة");
+                _lumGrid.Columns["BlockName"].ReadOnly = true;
+                _lumGrid.Columns["Qty"].ReadOnly = true;
+                _lumGrid.Columns["SpecStatus"].ReadOnly = true;
+
+                for (int i = 0; i < _lums.Count; i++)
+                {
+                    DialuxLuminaireReviewRow lr = _lums[i];
+                    int rowIdx = _lumGrid.Rows.Add(
+                        lr.BlockName,
+                        lr.Qty.ToString(CultureInfo.InvariantCulture),
+                        lr.Watt.ToString("0.##", CultureInfo.InvariantCulture),
+                        lr.Lumens.ToString("0", CultureInfo.InvariantCulture),
+                        lr.MountingType,
+                        lr.IesPath,
+                        lr.SpecStatus);
+                    if (lr.MissingSpec)
+                        _lumGrid.Rows[rowIdx].Cells["Watt"].Style.BackColor = Color.FromArgb(127, 29, 29);
+                }
+
+                tabRooms.Controls.Add(_roomsGrid);
+                tabLums.Controls.Add(_lumGrid);
+                tabs.TabPages.Add(tabRooms);
+                tabs.TabPages.Add(tabLums);
+
+                Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 48, BackColor = Color.FromArgb(17, 24, 39), Padding = new Padding(12, 8, 12, 8) };
+                _chkSaveDb.Text = "حفظ الارتفاعات والمواصفات في قاعدة بيانات المشروع";
+                _chkSaveDb.Checked = true;
+                _chkSaveDb.AutoSize = true;
+                _chkSaveDb.Location = new Point(12, 14);
+
+                Button btnOk = new Button
+                {
+                    Text = "✅ اعتماد وتصدير DIALux (.stf)",
+                    DialogResult = DialogResult.OK,
+                    AutoSize = true,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = Color.FromArgb(22, 101, 52),
+                    ForeColor = Color.White,
+                    Anchor = AnchorStyles.Right | AnchorStyles.Top,
+                    Location = new Point(660, 9)
+                };
+                btnOk.Click += delegate { ApplyGridsBackToModels(); Close(); };
+
+                Button btnCancel = new Button
+                {
+                    Text = "إلغاء",
+                    DialogResult = DialogResult.Cancel,
+                    AutoSize = true,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = Color.FromArgb(71, 85, 105),
+                    ForeColor = Color.White,
+                    Anchor = AnchorStyles.Right | AnchorStyles.Top,
+                    Location = new Point(580, 9)
+                };
+
+                footer.Controls.Add(_chkSaveDb);
+                footer.Controls.Add(btnCancel);
+                footer.Controls.Add(btnOk);
+
+                Controls.Add(tabs);
+                Controls.Add(topBar);
+                Controls.Add(header);
+                Controls.Add(accent);
+                Controls.Add(footer);
+                AcceptButton = btnOk;
+                CancelButton = btnCancel;
+            }
+
+            private static void StyleGrid(DataGridView g)
+            {
+                g.Dock = DockStyle.Fill;
+                g.AllowUserToAddRows = false;
+                g.AllowUserToDeleteRows = false;
+                g.RowHeadersVisible = false;
+                g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+                g.BackgroundColor = Color.FromArgb(19, 23, 32);
+                g.GridColor = Color.FromArgb(51, 65, 85);
+                g.DefaultCellStyle.BackColor = Color.FromArgb(26, 32, 44);
+                g.DefaultCellStyle.ForeColor = Color.FromArgb(230, 237, 243);
+                g.DefaultCellStyle.SelectionBackColor = Color.FromArgb(37, 99, 235);
+                g.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(30, 41, 59);
+                g.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
+                g.EnableHeadersVisualStyles = false;
+            }
+
+            internal void ApplyGridsBackToModels()
+            {
+                for (int i = 0; i < _rooms.Count && i < _roomsGrid.Rows.Count; i++)
+                {
+                    DataGridViewRow row = _roomsGrid.Rows[i];
+                    _rooms[i].RoomName = Convert.ToString(row.Cells["RoomName"].Value, CultureInfo.InvariantCulture) ?? _rooms[i].RoomName;
+                    _rooms[i].SpaceCategory = Convert.ToString(row.Cells["SpaceType"].Value, CultureInfo.InvariantCulture) ?? _rooms[i].SpaceCategory;
+                    double v;
+                    if (double.TryParse(Convert.ToString(row.Cells["CeilingH"].Value, CultureInfo.InvariantCulture), NumberStyles.Any, CultureInfo.InvariantCulture, out v) && v >= 1.8)
+                        _rooms[i].CeilingHeightM = v;
+                    if (double.TryParse(Convert.ToString(row.Cells["MountH"].Value, CultureInfo.InvariantCulture), NumberStyles.Any, CultureInfo.InvariantCulture, out v) && v >= 1.5)
+                        _rooms[i].MountingHeightM = Math.Min(_rooms[i].CeilingHeightM, v);
+                    if (double.TryParse(Convert.ToString(row.Cells["Workplane"].Value, CultureInfo.InvariantCulture), NumberStyles.Any, CultureInfo.InvariantCulture, out v) && v >= 0.0)
+                        _rooms[i].WorkplaneM = v;
+                    if (double.TryParse(Convert.ToString(row.Cells["TargetLux"].Value, CultureInfo.InvariantCulture), NumberStyles.Any, CultureInfo.InvariantCulture, out v) && v > 10.0)
+                        _rooms[i].TargetLux = v;
+                    _rooms[i].HeightConfirmed = true;
+                }
+
+                for (int i = 0; i < _lums.Count && i < _lumGrid.Rows.Count; i++)
+                {
+                    DataGridViewRow row = _lumGrid.Rows[i];
+                    double v;
+                    if (double.TryParse(Convert.ToString(row.Cells["Watt"].Value, CultureInfo.InvariantCulture), NumberStyles.Any, CultureInfo.InvariantCulture, out v) && v > 0.0)
+                        _lums[i].Watt = v;
+                    if (double.TryParse(Convert.ToString(row.Cells["Lumens"].Value, CultureInfo.InvariantCulture), NumberStyles.Any, CultureInfo.InvariantCulture, out v) && v > 0.0)
+                        _lums[i].Lumens = v;
+                    _lums[i].MountingType = Convert.ToString(row.Cells["MountType"].Value, CultureInfo.InvariantCulture) ?? _lums[i].MountingType;
+                    string ies = (Convert.ToString(row.Cells["IesPath"].Value, CultureInfo.InvariantCulture) ?? "").Trim();
+                    _lums[i].IesPath = ies;
+                    if (!string.IsNullOrEmpty(ies) && File.Exists(ies))
+                        _lums[i].Photometry = ParsePhotometricFile(ies, _lums[i].Lumens, _lums[i].Watt, _lums[i].BlockName);
+                    else if (_lums[i].Photometry != null)
+                    {
+                        _lums[i].Photometry.Watts = _lums[i].Watt;
+                        _lums[i].Photometry.TotalLumens = _lums[i].Lumens;
+                    }
+                    _lums[i].HasVerifiedLegendSpec = _lums[i].Watt > 0.0;
+                }
+            }
+        }
+
+        private static string WriteDialuxStfFile(
+            string stfPath,
+            string projectName,
+            List<RoomPolygonInfo> rooms,
+            List<List<KeyValuePair<string, double[]>>> luminairesPerRoom,
+            Dictionary<string, DialuxLuminaireReviewRow> lumDefs,
+            List<DialuxRoomReviewRow> roomRows,
+            double mf)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("[VERSION]\r\n");
+            sb.Append("STFF=1.0.5\r\n");
+            sb.Append("Progname=AIEngineer.AutoCAD\r\n");
+            sb.Append("Progvers=2.0\r\n\r\n");
+
+            sb.Append("[PROJECT]\r\n");
+            sb.Append("Name=" + SanitizeStfValue(projectName, "AutoCAD_Lighting_Project") + "\r\n");
+            sb.Append("Date=" + DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "\r\n");
+            sb.Append("Operator=AI-Engineer\r\n");
+            sb.Append("NrRooms=" + rooms.Count.ToString(CultureInfo.InvariantCulture) + "\r\n");
+            for (int r = 0; r < rooms.Count; r++)
+                sb.Append("Room" + (r + 1).ToString(CultureInfo.InvariantCulture) + "=ROOM.R" + (r + 1).ToString(CultureInfo.InvariantCulture) + "\r\n");
+            sb.Append("\r\n");
+
+            Dictionary<string, string> blockToSection = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            List<DialuxLuminaireReviewRow> orderedDefs = new List<DialuxLuminaireReviewRow>(lumDefs.Values);
+            if (orderedDefs.Count == 0)
+            {
+                orderedDefs.Add(new DialuxLuminaireReviewRow { BlockName = "LED_Fixture", Watt = 36.0, Lumens = 3600.0 });
+            }
+            for (int li = 0; li < orderedDefs.Count; li++)
+            {
+                DialuxLuminaireReviewRow def = orderedDefs[li];
+                string sec = "LUMINAIRE.L" + (li + 1).ToString(CultureInfo.InvariantCulture);
+                blockToSection[def.BlockName] = sec;
+                PhotometricProfile prof = def.Photometry;
+                sb.Append("[" + sec + "]\r\n");
+                sb.Append("Manufacturer=" + SanitizeStfValue(prof != null ? prof.Manufacturer : def.Manufacturer, "Generic") + "\r\n");
+                sb.Append("OrderNr=" + SanitizeStfValue(def.BlockName, "LED-36W") + "\r\n");
+                sb.Append("Name=" + SanitizeStfValue(def.BlockName, "LED_Fixture") + "\r\n");
+                if (!string.IsNullOrWhiteSpace(def.IesPath))
+                    sb.Append("Photometry=" + SanitizeStfValue(Path.GetFileName(def.IesPath), "") + "\r\n");
+                double boxL = prof != null && prof.LengthM > 0 ? prof.LengthM : def.LengthM;
+                double boxW = prof != null && prof.WidthM > 0 ? prof.WidthM : def.WidthM;
+                double boxH = prof != null && prof.HeightM > 0 ? prof.HeightM : def.HeightM;
+                sb.Append("Box=" + boxL.ToString("0.000", CultureInfo.InvariantCulture) + " " +
+                              boxW.ToString("0.000", CultureInfo.InvariantCulture) + " " +
+                              boxH.ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("Shape=1\r\n");
+                sb.Append("Load=" + def.Watt.ToString("0.##", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("Flux=" + def.Lumens.ToString("0.##", CultureInfo.InvariantCulture) + "\r\n\r\n");
+            }
+
+            for (int r = 0; r < rooms.Count; r++)
+            {
+                RoomPolygonInfo rm = rooms[r];
+                DialuxRoomReviewRow rRow = (roomRows != null && r < roomRows.Count) ? roomRows[r] : new DialuxRoomReviewRow();
+                List<KeyValuePair<string, double[]>> lums =
+                    (luminairesPerRoom != null && r < luminairesPerRoom.Count)
+                    ? luminairesPerRoom[r]
+                    : new List<KeyValuePair<string, double[]>>();
+
+                sb.Append("[ROOM.R" + (r + 1).ToString(CultureInfo.InvariantCulture) + "]\r\n");
+                sb.Append("Name=" + SanitizeStfValue(!string.IsNullOrWhiteSpace(rRow.RoomName) ? rRow.RoomName : rm.Name, "Room_" + (r + 1).ToString(CultureInfo.InvariantCulture)) + "\r\n");
+                sb.Append("Height=" + rRow.CeilingHeightM.ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("WorkingPlane=" + rRow.WorkplaneM.ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("MF=" + mf.ToString("0.00", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("R_Ceiling=" + rRow.ReflCeiling.ToString("0.00", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("R_Floor=" + rRow.ReflFloor.ToString("0.00", CultureInfo.InvariantCulture) + "\r\n");
+                sb.Append("NrPoints=" + rm.VerticesM.Count.ToString(CultureInfo.InvariantCulture) + "\r\n");
+                for (int v = 0; v < rm.VerticesM.Count; v++)
+                {
+                    sb.Append("Point" + (v + 1).ToString(CultureInfo.InvariantCulture) + "=" +
+                              rm.VerticesM[v].X.ToString("0.000", CultureInfo.InvariantCulture) + " " +
+                              rm.VerticesM[v].Y.ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                    sb.Append("R_Wall" + (v + 1).ToString(CultureInfo.InvariantCulture) + "=" +
+                              rRow.ReflWalls.ToString("0.00", CultureInfo.InvariantCulture) + "\r\n");
+                }
+                sb.Append("NrStruct=0\r\n");
+                sb.Append("NrLums=" + lums.Count.ToString(CultureInfo.InvariantCulture) + "\r\n");
+                for (int k = 0; k < lums.Count; k++)
+                {
+                    KeyValuePair<string, double[]> lum = lums[k];
+                    string sec;
+                    if (!blockToSection.TryGetValue(lum.Key ?? "", out sec))
+                        sec = "LUMINAIRE.L1";
+                    double[] lp = lum.Value;
+                    double zM = (lp != null && lp.Length > 2 && lp[2] > 0) ? lp[2] : rRow.MountingHeightM;
+                    string pfx = "Lum" + (k + 1).ToString(CultureInfo.InvariantCulture);
+                    sb.Append(pfx + "=" + sec + "\r\n");
+                    sb.Append(pfx + ".Pos=" + lp[0].ToString("0.000", CultureInfo.InvariantCulture) + " " +
+                              lp[1].ToString("0.000", CultureInfo.InvariantCulture) + " " +
+                              zM.ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                    sb.Append(pfx + ".Rot=0.000 0.000 " + lp[3].ToString("0.000", CultureInfo.InvariantCulture) + "\r\n");
+                }
+                sb.Append("\r\n");
+            }
+
+            string fullStf = Path.GetFullPath(stfPath);
+            string dir = Path.GetDirectoryName(fullStf);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(fullStf, sb.ToString(), new UTF8Encoding(false));
+            return fullStf;
+        }
+
         private static Dictionary<string, object> ExportDialuxStf(Document doc, Dictionary<string, object> args)
         {
+            if (args == null) args = new Dictionary<string, object>();
             Database db = doc.Database;
             string stfPath = GetStr(args, "file_path") ?? GetStr(args, "stf_path");
             bool browse = GetBool(args, "browse", false);
+            bool interactiveDialog = GetBool(args, "interactive_dialog", false);
+            bool previewMissingOnly = GetBool(args, "preview_missing_only", false);
+            bool saveToProjectDb = GetBool(args, "save_to_project_db", true);
             string blockFilter = GetStr(args, "block_name");
             string fixLayerFilter = GetStr(args, "fixture_layer");
             string iesPath = GetStr(args, "ies_path") ?? GetStr(args, "ldt_path");
+            string stdPref = GetStr(args, "standard") ?? "ECP";
 
-            double roomH = Math.Max(1.8, GetDouble(args, "room_height_m", 3.0));
-            double workplaneM = Math.Max(0.0, GetDouble(args, "workplane_m", 0.80));
-            double mountH = Math.Max(workplaneM + 0.5, GetDouble(args, "mounting_height_m", roomH));
+            double? explicitRoomH = GetNullableDouble(args, "room_height_m");
+            double? explicitMountH = GetNullableDouble(args, "mounting_height_m");
+            double? explicitWorkplaneM = GetNullableDouble(args, "workplane_m");
+            double defRoomH = Math.Max(1.8, explicitRoomH ?? 3.0);
+            double defWorkplaneM = Math.Max(0.0, explicitWorkplaneM ?? 0.80);
+            double defMountH = Math.Max(defWorkplaneM + 0.5, explicitMountH ?? defRoomH);
             double mf = Math.Max(0.4, Math.Min(1.0, GetDouble(args, "maintenance_factor", 0.80)));
             double reflCeil = GetDouble(args, "reflectance_ceiling", 0.70);
             double reflWall = GetDouble(args, "reflectance_walls", 0.50);
             double reflFloor = GetDouble(args, "reflectance_floor", 0.20);
-            double lumens = GetDouble(args, "fixture_lumens", 3600.0);
-            double watts = GetDouble(args, "fixture_watts", 36.0);
-            PhotometricProfile phot = ParsePhotometricFile(iesPath, lumens, watts, string.IsNullOrWhiteSpace(blockFilter) ? "LED_Fixture" : blockFilter);
+            double defLumens = GetDouble(args, "fixture_lumens", 3600.0);
+            double defWatts = GetDouble(args, "fixture_watts", 36.0);
 
-            double unitsPerM = Convert.ToDouble(GetUnitsInfo(db)["units_per_m"], CultureInfo.InvariantCulture);
-            if (unitsPerM <= 1e-9) unitsPerM = 1000.0;
+            Dictionary<string, Dictionary<string, object>> savedRoomPrefs = GetSavedDialuxRoomPrefs(doc);
 
+            double unitsPerM = 1000.0;
             List<RoomPolygonInfo> rooms = null;
-            List<List<double[]>> fixturesPerRoomM = new List<List<double[]>>();
+            List<List<KeyValuePair<string, double[]>>> fixturesPerRoom = new List<List<KeyValuePair<string, double[]>>>();
+            Dictionary<string, DialuxLuminaireReviewRow> lumDefs =
+                new Dictionary<string, DialuxLuminaireReviewRow>(StringComparer.OrdinalIgnoreCase);
             int totalLumExported = 0;
 
             using (DocumentLock docLock = doc.LockDocument())
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
+                Dictionary<string, bool> layerHiddenFlags = BuildLayerHiddenMap(db, tr);
+                double dwgSpan, medSpan;
+                Extents3d? mExt;
+                ComputeDrawingFixtureMetrics(db, tr, true, layerHiddenFlags, out dwgSpan, out medSpan, out mExt);
+                double rawU = Convert.ToDouble(GetUnitsInfo(db)["units_per_m"], CultureInfo.InvariantCulture);
+                bool scInf;
+                string scWarn;
+                unitsPerM = ResolveEffectiveUnitsPerMeter(db, rawU, dwgSpan, medSpan, out scInf, out scWarn);
+                if (unitsPerM <= 1e-9) unitsPerM = 1000.0;
+
                 BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
                 BlockTableRecord ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
-                Dictionary<string, bool> layerHiddenFlags = BuildLayerHiddenMap(db, tr);
 
                 rooms = ExtractClosedRoomsFromModelSpace(doc, db, ms, tr, layerHiddenFlags, unitsPerM, args);
                 if (rooms.Count == 0)
@@ -1082,7 +1582,7 @@ namespace AIEngineer.AutoCAD
                     tr.Commit();
                     return Err("لم يتم العثور على غرف مغلقة (Closed Polylines) لتصديرها إلى DIALux .stf.");
                 }
-                for (int r = 0; r < rooms.Count; r++) fixturesPerRoomM.Add(new List<double[]>());
+                for (int r = 0; r < rooms.Count; r++) fixturesPerRoom.Add(new List<KeyValuePair<string, double[]>>());
 
                 foreach (ObjectId id in ms)
                 {
@@ -1095,6 +1595,9 @@ namespace AIEngineer.AutoCAD
                     string bn = ResolveBlockName(tr, br);
                     if (IsAnonymousBlockName(bn) || IsSystemBlockName(bn)) continue;
 
+                    ProjectLegendSpecItem legSpec;
+                    bool inLegendDb = TryGetProjectLegendSpec(doc, bn, out legSpec);
+
                     if (!string.IsNullOrWhiteSpace(blockFilter))
                     {
                         if (!string.Equals(bn, blockFilter, StringComparison.OrdinalIgnoreCase) && !MatchesPatternOrSubstring(bn, blockFilter))
@@ -1106,13 +1609,13 @@ namespace AIEngineer.AutoCAD
                     }
                     else
                     {
-                        // Auto-match typical lighting fixture block names or E-LTG layers
                         string lyrUp = (ent.Layer ?? "").ToUpperInvariant();
                         string bnUp = bn.ToUpperInvariant();
                         bool looksLighting = lyrUp.Contains("LTG") || lyrUp.Contains("LIGHT") || lyrUp.Contains("LUMIN") ||
                                              bnUp.Contains("LED") || bnUp.Contains("LIGHT") || bnUp.Contains("LAMP") ||
                                              bnUp.Contains("LUMIN") || bnUp.Contains("FIXT") || bnUp.Contains("DOWNLIGHT") ||
-                                             bnUp.Contains("PANEL");
+                                             bnUp.Contains("PANEL") ||
+                                             (inLegendDb && string.Equals(legSpec.Category, "lighting", StringComparison.OrdinalIgnoreCase));
                         if (!looksLighting) continue;
                     }
 
@@ -1128,8 +1631,46 @@ namespace AIEngineer.AutoCAD
                     {
                         if (IsPointInPolygon2D(rooms[r].VerticesM, xm, ym))
                         {
-                            fixturesPerRoomM[r].Add(new double[] { xm, ym, mountH, rotDeg });
+                            fixturesPerRoom[r].Add(new KeyValuePair<string, double[]>(bn, new double[] { xm, ym, defMountH, rotDeg }));
                             totalLumExported++;
+
+                            DialuxLuminaireReviewRow lRow;
+                            if (!lumDefs.TryGetValue(bn, out lRow))
+                            {
+                                double w = defWatts;
+                                double lm = defLumens;
+                                bool hasSpec = false;
+                                if (inLegendDb && legSpec != null && legSpec.Watt.HasValue && legSpec.Watt.Value > 0.0)
+                                {
+                                    w = legSpec.Watt.Value;
+                                    lm = Math.Round(w * 100.0, 0);
+                                    hasSpec = true;
+                                }
+                                PhotometricProfile prof = ParsePhotometricFile(iesPath, lm, w, bn);
+                                if (!string.IsNullOrWhiteSpace(iesPath) && prof != null)
+                                {
+                                    w = prof.Watts;
+                                    lm = prof.TotalLumens;
+                                    hasSpec = true;
+                                }
+                                lRow = new DialuxLuminaireReviewRow
+                                {
+                                    BlockName = bn,
+                                    Qty = 0,
+                                    Watt = w,
+                                    Lumens = lm,
+                                    LengthM = prof != null ? prof.LengthM : 0.60,
+                                    WidthM = prof != null ? prof.WidthM : 0.60,
+                                    HeightM = prof != null ? prof.HeightM : 0.05,
+                                    IesPath = iesPath ?? "",
+                                    Manufacturer = prof != null ? prof.Manufacturer : "Generic",
+                                    Photometry = prof,
+                                    HasVerifiedLegendSpec = hasSpec,
+                                    SpecStatus = hasSpec ? "من جدول الليجند" : "ناقص في الليجند (عدّل W / IES)"
+                                };
+                                lumDefs[bn] = lRow;
+                            }
+                            lRow.Qty++;
                             break;
                         }
                     }
@@ -1137,9 +1678,186 @@ namespace AIEngineer.AutoCAD
                 tr.Commit();
             }
 
+            List<DialuxRoomReviewRow> roomRows = new List<DialuxRoomReviewRow>(rooms.Count);
+            for (int r = 0; r < rooms.Count; r++)
+            {
+                RoomPolygonInfo rm = rooms[r];
+                LightingStandardRule std = ResolveLightingStandard(rm.Name, stdPref, null);
+                double rCeilH = defRoomH;
+                double rMountH = defMountH;
+                double rWorkH = defWorkplaneM;
+                double rRefC = reflCeil, rRefW = reflWall, rRefF = reflFloor;
+                bool confirmed = explicitRoomH.HasValue;
+
+                Dictionary<string, object> savedP;
+                if (savedRoomPrefs.TryGetValue(rm.Name, out savedP) && savedP != null)
+                {
+                    if (savedP.ContainsKey("ceiling_height_m")) { rCeilH = GetDouble(savedP, "ceiling_height_m", rCeilH); confirmed = true; }
+                    if (savedP.ContainsKey("mounting_height_m")) rMountH = GetDouble(savedP, "mounting_height_m", rCeilH);
+                    if (savedP.ContainsKey("workplane_m")) rWorkH = GetDouble(savedP, "workplane_m", rWorkH);
+                    if (savedP.ContainsKey("refl_ceiling")) rRefC = GetDouble(savedP, "refl_ceiling", rRefC);
+                    if (savedP.ContainsKey("refl_walls")) rRefW = GetDouble(savedP, "refl_walls", rRefW);
+                    if (savedP.ContainsKey("refl_floor")) rRefF = GetDouble(savedP, "refl_floor", rRefF);
+                }
+
+                roomRows.Add(new DialuxRoomReviewRow
+                {
+                    Index = r + 1,
+                    RoomName = rm.Name,
+                    Handle = rm.Handle,
+                    AreaM2 = Math.Round(rm.AreaM2, 2),
+                    SpaceCategory = std.SpaceCategory,
+                    TargetLux = std.TargetLux,
+                    CeilingHeightM = rCeilH,
+                    MountingHeightM = Math.Min(rCeilH, rMountH),
+                    WorkplaneM = rWorkH,
+                    ReflCeiling = rRefC,
+                    ReflWalls = rRefW,
+                    ReflFloor = rRefF,
+                    FixtureCount = fixturesPerRoom[r].Count,
+                    HeightConfirmed = confirmed,
+                    StatusNote = confirmed ? "محفوظ / مؤكد" : "افتراضي - يحتاج مراجعة الارتفاع"
+                });
+            }
+
+            // Apply programmatic overrides (room_overrides[] & luminaire_overrides[])
+            List<object> roomOverrides = ExtractDictObjectList(args, "room_overrides");
+            for (int oi = 0; oi < roomOverrides.Count; oi++)
+            {
+                Dictionary<string, object> ov = roomOverrides[oi] as Dictionary<string, object>;
+                if (ov == null) continue;
+                string targetRm = (GetStr(ov, "room_name") ?? GetStr(ov, "name") ?? "").Trim();
+                for (int ri = 0; ri < roomRows.Count; ri++)
+                {
+                    if (!string.Equals(roomRows[ri].RoomName, targetRm, StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(roomRows[ri].Handle, targetRm, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    double? ch = GetNullableDouble(ov, "ceiling_height_m");
+                    double? mh = GetNullableDouble(ov, "mounting_height_m");
+                    double? wp = GetNullableDouble(ov, "workplane_m");
+                    double? lx = GetNullableDouble(ov, "target_lux");
+                    string sp = GetStr(ov, "space_category");
+                    if (ch.HasValue && ch.Value >= 1.8) roomRows[ri].CeilingHeightM = ch.Value;
+                    if (mh.HasValue && mh.Value >= 1.5) roomRows[ri].MountingHeightM = Math.Min(roomRows[ri].CeilingHeightM, mh.Value);
+                    else if (ch.HasValue) roomRows[ri].MountingHeightM = ch.Value;
+                    if (wp.HasValue && wp.Value >= 0.0) roomRows[ri].WorkplaneM = wp.Value;
+                    if (lx.HasValue && lx.Value > 10.0) roomRows[ri].TargetLux = lx.Value;
+                    if (!string.IsNullOrWhiteSpace(sp)) roomRows[ri].SpaceCategory = sp.Trim();
+                    roomRows[ri].HeightConfirmed = true;
+                    roomRows[ri].StatusNote = "مؤكد بالتعديل";
+                }
+            }
+
+            List<object> lumOverrides = ExtractDictObjectList(args, "luminaire_overrides");
+            for (int oi = 0; oi < lumOverrides.Count; oi++)
+            {
+                Dictionary<string, object> ov = lumOverrides[oi] as Dictionary<string, object>;
+                if (ov == null) continue;
+                string bn = (GetStr(ov, "block_name") ?? GetStr(ov, "name") ?? "").Trim();
+                DialuxLuminaireReviewRow lRow;
+                if (!lumDefs.TryGetValue(bn, out lRow)) continue;
+                double? wt = GetNullableDouble(ov, "watt");
+                double? lm = GetNullableDouble(ov, "lumens");
+                string mt = GetStr(ov, "mounting_type");
+                string ies = GetStr(ov, "ies_path") ?? GetStr(ov, "ldt_path");
+                if (wt.HasValue && wt.Value > 0.0) lRow.Watt = wt.Value;
+                if (lm.HasValue && lm.Value > 0.0) lRow.Lumens = lm.Value;
+                if (!string.IsNullOrWhiteSpace(mt)) lRow.MountingType = mt.Trim();
+                if (!string.IsNullOrWhiteSpace(ies)) lRow.IesPath = ies.Trim();
+                if (!string.IsNullOrEmpty(lRow.IesPath) && File.Exists(lRow.IesPath))
+                    lRow.Photometry = ParsePhotometricFile(lRow.IesPath, lRow.Lumens, lRow.Watt, lRow.BlockName);
+                lRow.HasVerifiedLegendSpec = lRow.Watt > 0.0;
+                lRow.SpecStatus = "مؤكد يدوياً";
+            }
+
             if (string.IsNullOrWhiteSpace(stfPath))
                 stfPath = ExcelTableInterop.ResolveDefaultExportPath(doc, "dialux_project", ".stf");
-            if (browse)
+
+            if (interactiveDialog && !previewMissingOnly)
+            {
+                List<DialuxLuminaireReviewRow> lumList = new List<DialuxLuminaireReviewRow>(lumDefs.Values);
+                using (DialuxExportReviewForm dlg = new DialuxExportReviewForm(roomRows, lumList, stfPath, mf))
+                {
+                    if (dlg.ShowDialog() != DialogResult.OK)
+                        return Err("تم إلغاء تصدير DIALux من نافذة المراجعة.");
+                    stfPath = dlg.SelectedStfPath;
+                    mf = dlg.SelectedMaintenanceFactor;
+                    saveToProjectDb = dlg.SaveToProjectDb;
+                }
+            }
+
+            List<string> missingRooms = new List<string>();
+            List<object> roomSummaryDicts = new List<object>(roomRows.Count);
+            for (int r = 0; r < roomRows.Count; r++)
+            {
+                DialuxRoomReviewRow rr = roomRows[r];
+                if (!rr.HeightConfirmed) missingRooms.Add(rr.RoomName);
+                roomSummaryDicts.Add(new Dictionary<string, object>
+                {
+                    { "room_name", rr.RoomName },
+                    { "area_m2", rr.AreaM2 },
+                    { "space_category", rr.SpaceCategory },
+                    { "ceiling_height_m", rr.CeilingHeightM },
+                    { "mounting_height_m", rr.MountingHeightM },
+                    { "workplane_m", rr.WorkplaneM },
+                    { "target_lux", rr.TargetLux },
+                    { "fixture_count", rr.FixtureCount },
+                    { "height_confirmed", rr.HeightConfirmed },
+                    { "status", rr.StatusNote }
+                });
+            }
+
+            List<string> missingLumBlocks = new List<string>();
+            List<object> lumSummaryDicts = new List<object>(lumDefs.Count);
+            foreach (DialuxLuminaireReviewRow lr in lumDefs.Values)
+            {
+                if (lr.MissingSpec) missingLumBlocks.Add(lr.BlockName);
+                lumSummaryDicts.Add(new Dictionary<string, object>
+                {
+                    { "block_name", lr.BlockName },
+                    { "qty", lr.Qty },
+                    { "watt", lr.Watt },
+                    { "lumens", lr.Lumens },
+                    { "mounting_type", lr.MountingType },
+                    { "ies_path", lr.IesPath },
+                    { "has_verified_legend_spec", lr.HasVerifiedLegendSpec },
+                    { "status", lr.SpecStatus }
+                });
+            }
+
+            Dictionary<string, object> missingSummary = new Dictionary<string, object>
+            {
+                { "rooms_with_default_height", missingRooms },
+                { "luminaires_missing_legend_spec", missingLumBlocks },
+                { "missing_count", missingRooms.Count + missingLumBlocks.Count }
+            };
+
+            if (previewMissingOnly)
+            {
+                return Ok(new Dictionary<string, object>
+                {
+                    { "preview_only", true },
+                    { "rooms_count", roomRows.Count },
+                    { "luminaires_count", totalLumExported },
+                    { "missing_count", missingRooms.Count + missingLumBlocks.Count },
+                    { "missing_parameters_summary", missingSummary },
+                    { "rooms_summary", roomSummaryDicts },
+                    { "luminaires_summary", lumSummaryDicts },
+                    { "suggested_defaults", new Dictionary<string, object> {
+                        { "ceiling_height_m", defRoomH }, { "mounting_height_m", defMountH },
+                        { "workplane_m", defWorkplaneM }, { "maintenance_factor", mf },
+                        { "reflectances", new[] { reflCeil, reflWall, reflFloor } }
+                    } },
+                    { "message", string.Format(
+                        CultureInfo.InvariantCulture,
+                        "معاينة DIALux: {0} غرفة و{1} كشاف ({2} نوع). ارتفاعات غرف افتراضية: [{3}] | كشافات بدون مواصفة Legend مؤكدة: [{4}]. عدّل القيم عبر room_overrides/luminaire_overrides أو النافذة التفاعلية ثم صدّر.",
+                        roomRows.Count, totalLumExported, lumDefs.Count,
+                        missingRooms.Count > 0 ? string.Join("، ", missingRooms.ToArray()) : "لا يوجد",
+                        missingLumBlocks.Count > 0 ? string.Join("، ", missingLumBlocks.ToArray()) : "لا يوجد") }
+                });
+            }
+
+            if (browse && !interactiveDialog)
             {
                 using (SaveFileDialog dlg = new SaveFileDialog())
                 {
@@ -1153,15 +1871,74 @@ namespace AIEngineer.AutoCAD
                 }
             }
 
+            // Persist confirmed room heights & luminaire Watt/VA specs back to project DB
+            if (saveToProjectDb)
+            {
+                Dictionary<string, Dictionary<string, object>> toSaveRooms =
+                    new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+                for (int r = 0; r < roomRows.Count; r++)
+                {
+                    DialuxRoomReviewRow rr = roomRows[r];
+                    if (!rr.HeightConfirmed) continue;
+                    toSaveRooms[rr.RoomName] = new Dictionary<string, object>
+                    {
+                        { "ceiling_height_m", rr.CeilingHeightM },
+                        { "mounting_height_m", rr.MountingHeightM },
+                        { "workplane_m", rr.WorkplaneM },
+                        { "space_category", rr.SpaceCategory },
+                        { "refl_ceiling", rr.ReflCeiling },
+                        { "refl_walls", rr.ReflWalls },
+                        { "refl_floor", rr.ReflFloor }
+                    };
+                }
+                if (toSaveRooms.Count > 0) SaveDialuxRoomPrefs(doc, toSaveRooms);
+
+                List<object> verifiedLumItems = new List<object>();
+                foreach (DialuxLuminaireReviewRow lr in lumDefs.Values)
+                {
+                    if (!lr.HasVerifiedLegendSpec || lr.Watt <= 0.0) continue;
+                    verifiedLumItems.Add(new Dictionary<string, object>
+                    {
+                        { "block_name", lr.BlockName },
+                        { "watt", lr.Watt },
+                        { "va", Math.Round(lr.Watt / 0.90, 2) },
+                        { "power_factor", 0.90 },
+                        { "category", "lighting" },
+                        { "source", "dialux_review" }
+                    });
+                }
+                if (verifiedLumItems.Count > 0)
+                {
+                    ExecuteTool(doc, "manage_project_legend_db", new Dictionary<string, object>
+                    {
+                        { "action", "set_items" },
+                        { "items", verifiedLumItems }
+                    });
+                }
+            }
+
+            // Sync each room's fixture mounting height into export coordinates
+            for (int r = 0; r < rooms.Count && r < roomRows.Count; r++)
+            {
+                double mh = roomRows[r].MountingHeightM;
+                List<KeyValuePair<string, double[]>> rLums = fixturesPerRoom[r];
+                for (int k = 0; k < rLums.Count; k++) rLums[k].Value[2] = mh;
+            }
+
             string projName = Path.GetFileNameWithoutExtension(doc.Name ?? "AutoCAD_Lighting");
-            string writtenStf = WriteDialuxStfFile(stfPath, projName, rooms, fixturesPerRoomM, phot, roomH, workplaneM, reflCeil, reflWall, reflFloor, mf);
+            string writtenStf = WriteDialuxStfFile(stfPath, projName, rooms, fixturesPerRoom, lumDefs, roomRows, mf);
 
             Dictionary<string, object> result = new Dictionary<string, object>
             {
                 { "stf_path", writtenStf },
                 { "rooms_exported", rooms.Count },
                 { "luminaires_exported", totalLumExported },
+                { "luminaire_types_exported", lumDefs.Count },
                 { "units_converted_from", db.Insunits.ToString() },
+                { "effective_units_per_m", unitsPerM },
+                { "missing_parameters_summary", missingSummary },
+                { "rooms_summary", roomSummaryDicts },
+                { "luminaires_summary", lumSummaryDicts },
                 { "how_to_import_in_dialux", "In DIALux evo / DIALux 4: File -> Import -> STF file (.stf), then click Calculate to generate official DIALux PDF reports." }
             };
 

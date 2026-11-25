@@ -95,11 +95,13 @@ $assembly = Join-Path $resolvedOutput "AIEngineer.AutoCAD.Context.dll"
     (Join-Path $pluginRoot "CadPanelAndQaTools.cs") `
     (Join-Path $pluginRoot "CadPanelManufacturingTools.cs") `
     (Join-Path $pluginRoot "CadProjectLegendDb.cs") `
+    (Join-Path $pluginRoot "CadGuidedInventoryTools.cs") `
     (Join-Path $pluginRoot "CadVisualCaptureTools.cs") `
     (Join-Path $pluginRoot "CadTextAndAttributesTools.cs") `
     (Join-Path $pluginRoot "CadGeometryQaAndLayoutTools.cs") `
     (Join-Path $pluginRoot "CadLightingAndDialuxTools.cs") `
     (Join-Path $pluginRoot "CadLvCalculationsTools.cs") `
+    (Join-Path $pluginRoot "CadDistributionNetworkTools.cs") `
     (Join-Path $pluginRoot "VoiceAssistant.cs") `
     (Join-Path $pluginRoot "DirectCadAgent.cs") `
     (Join-Path $pluginRoot "PaletteCommands.cs")
@@ -145,11 +147,13 @@ $panelAssembly = Join-Path $resolvedOutput "AIEngineer.AutoCAD.PanelManufacturin
     (Join-Path $pluginRoot "CadPanelAndQaTools.cs") `
     (Join-Path $pluginRoot "CadPanelManufacturingTools.cs") `
     (Join-Path $pluginRoot "CadProjectLegendDb.cs") `
+    (Join-Path $pluginRoot "CadGuidedInventoryTools.cs") `
     (Join-Path $pluginRoot "CadVisualCaptureTools.cs") `
     (Join-Path $pluginRoot "CadTextAndAttributesTools.cs") `
     (Join-Path $pluginRoot "CadGeometryQaAndLayoutTools.cs") `
     (Join-Path $pluginRoot "CadLightingAndDialuxTools.cs") `
     (Join-Path $pluginRoot "CadLvCalculationsTools.cs") `
+    (Join-Path $pluginRoot "CadDistributionNetworkTools.cs") `
     (Join-Path $pluginRoot "VoiceAssistant.cs") `
     (Join-Path $pluginRoot "DirectCadAgent.cs")
 if ($LASTEXITCODE -ne 0) {

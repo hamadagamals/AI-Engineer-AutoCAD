@@ -305,8 +305,10 @@ namespace AIEngineer.AutoCAD
                 new CopperBusbarSpec { Designation = "50x10 Cu", WidthMm = 50, ThicknessMm = 10, Runs = 1, MaxAmps35K = 850, ResistanceMohmPerM = 0.039 },
                 new CopperBusbarSpec { Designation = "60x10 Cu", WidthMm = 60, ThicknessMm = 10, Runs = 1, MaxAmps35K = 1000, ResistanceMohmPerM = 0.033 },
                 new CopperBusbarSpec { Designation = "80x10 Cu", WidthMm = 80, ThicknessMm = 10, Runs = 1, MaxAmps35K = 1250, ResistanceMohmPerM = 0.025 },
+                new CopperBusbarSpec { Designation = "100x10 Cu", WidthMm = 100, ThicknessMm = 10, Runs = 1, MaxAmps35K = 1500, ResistanceMohmPerM = 0.0193 },
                 new CopperBusbarSpec { Designation = "2x(60x10) Cu", WidthMm = 60, ThicknessMm = 10, Runs = 2, MaxAmps35K = 1700, ResistanceMohmPerM = 0.017 },
-                new CopperBusbarSpec { Designation = "2x(80x10) Cu", WidthMm = 80, ThicknessMm = 10, Runs = 2, MaxAmps35K = 2150, ResistanceMohmPerM = 0.013 }
+                new CopperBusbarSpec { Designation = "2x(80x10) Cu", WidthMm = 80, ThicknessMm = 10, Runs = 2, MaxAmps35K = 2150, ResistanceMohmPerM = 0.013 },
+                new CopperBusbarSpec { Designation = "2x(100x10) Cu", WidthMm = 100, ThicknessMm = 10, Runs = 2, MaxAmps35K = 2500, ResistanceMohmPerM = 0.00965 }
             });
             cat.Enclosures.AddRange(new EnclosureSpec[]
             {
@@ -621,18 +623,44 @@ namespace AIEngineer.AutoCAD
             List<CopperBusbarSpec> bars = (catalog != null && catalog.Busbars.Count > 0) ? catalog.Busbars : BuildDefaultCatalog().Busbars;
             if (!string.IsNullOrWhiteSpace(rawSpec))
             {
-                Match m = Regex.Match(rawSpec.Trim(), @"(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)", RegexOptions.None, TimeSpan.FromMilliseconds(200));
-                if (m.Success)
+                string trimmed = rawSpec.Trim();
+                int reqRuns = 1;
+                double reqW = 0.0;
+                double reqT = 0.0;
+                bool matched = false;
+
+                Match mMulti = Regex.Match(trimmed, @"^\s*(\d+)\s*[xX*]\s*\(?\s*(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)\s*\)?", RegexOptions.None, TimeSpan.FromMilliseconds(200));
+                if (mMulti.Success)
                 {
-                    double reqW = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-                    double reqT = double.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
-                    double reqArea = reqW * reqT;
+                    reqRuns = Math.Max(1, int.Parse(mMulti.Groups[1].Value, CultureInfo.InvariantCulture));
+                    reqW = double.Parse(mMulti.Groups[2].Value, CultureInfo.InvariantCulture);
+                    reqT = double.Parse(mMulti.Groups[3].Value, CultureInfo.InvariantCulture);
+                    matched = true;
+                }
+                else
+                {
+                    Match mSingle = Regex.Match(trimmed, @"(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)", RegexOptions.None, TimeSpan.FromMilliseconds(200));
+                    if (mSingle.Success)
+                    {
+                        reqRuns = 1;
+                        reqW = double.Parse(mSingle.Groups[1].Value, CultureInfo.InvariantCulture);
+                        reqT = double.Parse(mSingle.Groups[2].Value, CultureInfo.InvariantCulture);
+                        matched = true;
+                    }
+                }
+
+                if (matched)
+                {
+                    double reqArea = reqRuns * reqW * reqT;
                     CopperBusbarSpec best = null;
                     double bestDiff = double.MaxValue;
                     for (int i = 0; i < bars.Count; i++)
                     {
                         double bArea = bars[i].WidthMm * bars[i].ThicknessMm * bars[i].Runs;
-                        double diff = Math.Abs(bArea - reqArea) * 2.0 + Math.Abs(bars[i].WidthMm - reqW) + Math.Abs(bars[i].ThicknessMm - reqT) * 3.0;
+                        double diff = Math.Abs(bArea - reqArea) * 2.0
+                                    + Math.Abs(bars[i].Runs - reqRuns) * 80.0
+                                    + Math.Abs(bars[i].WidthMm - reqW)
+                                    + Math.Abs(bars[i].ThicknessMm - reqT) * 3.0;
                         if (diff < bestDiff)
                         {
                             bestDiff = diff;
@@ -2887,6 +2915,16 @@ namespace AIEngineer.AutoCAD
                 db.UpdateExt(true);
                 tr.Commit();
 
+                if (createdIds.Count > 0 || erasedIds.Count > 0)
+                {
+                    CadUndoEntry undo = new CadUndoEntry();
+                    undo.ToolName = "design_panel_manufacturing_layout";
+                    undo.Summary = "Snap DIN Rail & Reroute " + plan.PanelName;
+                    undo.CreatedIds.AddRange(createdIds);
+                    undo.ErasedIds.AddRange(erasedIds);
+                    PushUndoEntry(doc, undo);
+                }
+
                 return Ok(new Dictionary<string, object>
                 {
                     { "mode", "snap_and_reroute" },
@@ -2912,6 +2950,7 @@ namespace AIEngineer.AutoCAD
             int updatedCount = 0;
             List<string> selHandles = GetSelectedHandleStrings(doc);
             HashSet<string> selSet = selHandles.Count > 0 ? new HashSet<string>(selHandles, StringComparer.OrdinalIgnoreCase) : null;
+            List<ModifiedEntitySnapshot> modSnaps = new List<ModifiedEntitySnapshot>();
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
@@ -2934,6 +2973,23 @@ namespace AIEngineer.AutoCAD
                     Polyline pl = tr.GetObject(oid, OpenMode.ForWrite) as Polyline;
                     if (pl != null)
                     {
+                        ModifiedEntitySnapshot snap = new ModifiedEntitySnapshot();
+                        snap.Id = pl.ObjectId;
+                        snap.OldLayer = pl.Layer;
+                        snap.OldColor = CaptureColor(pl.Color);
+                        double oldBusWid = 0.0;
+                        try { oldBusWid = pl.ConstantWidth; }
+                        catch
+                        {
+                            try { if (pl.NumberOfVertices > 0) oldBusWid = pl.GetStartWidthAt(0); } catch { oldBusWid = 0.0; }
+                        }
+                        snap.HadPolylineWidth = true;
+                        snap.OldConstantWidth = oldBusWid;
+                        snap.HadPanelXData = true;
+                        snap.OldPanelXDataRegApp = PanelBusbarRegApp;
+                        snap.OldPanelXDataAscii = xd;
+                        modSnaps.Add(snap);
+
                         pl.ConstantWidth = stdBar.WidthMm * mmToDwg;
                         pl.XData = new ResultBuffer(
                             new TypedValue((int)DxfCode.ExtendedDataRegAppName, PanelBusbarRegApp),
@@ -2944,6 +3000,15 @@ namespace AIEngineer.AutoCAD
                     }
                 }
                 tr.Commit();
+            }
+
+            if (modSnaps.Count > 0)
+            {
+                CadUndoEntry undo = new CadUndoEntry();
+                undo.ToolName = "design_panel_manufacturing_layout";
+                undo.Summary = "Resize Cu Busbar -> " + stdBar.Designation;
+                undo.ModifiedSnapshots.AddRange(modSnaps);
+                PushUndoEntry(doc, undo);
             }
 
             return Ok(new Dictionary<string, object>
@@ -3091,6 +3156,16 @@ namespace AIEngineer.AutoCAD
                 tr.Commit();
             }
 
+            if (createdIds.Count > 0 || erasedIds.Count > 0)
+            {
+                CadUndoEntry undo = new CadUndoEntry();
+                undo.ToolName = "design_panel_manufacturing_layout";
+                undo.Summary = "Trace Panel Connections " + target;
+                undo.CreatedIds.AddRange(createdIds);
+                undo.ErasedIds.AddRange(erasedIds);
+                PushUndoEntry(doc, undo);
+            }
+
             return Ok(new Dictionary<string, object>
             {
                 { "mode", "trace_connections" },
@@ -3194,6 +3269,16 @@ namespace AIEngineer.AutoCAD
                     }
                 }
                 tr.Commit();
+            }
+
+            if (createdIds.Count > 0 || erasedIds.Count > 0)
+            {
+                CadUndoEntry undo = new CadUndoEntry();
+                undo.ToolName = "design_panel_manufacturing_layout";
+                undo.Summary = "Generate SLD From Panel " + plan.PanelName;
+                undo.CreatedIds.AddRange(createdIds);
+                undo.ErasedIds.AddRange(erasedIds);
+                PushUndoEntry(doc, undo);
             }
 
             return Ok(new Dictionary<string, object>
@@ -4492,6 +4577,7 @@ namespace AIEngineer.AutoCAD
                     return;
                 }
                 int count2d = 0, count3d = 0, wireCount = 0;
+                using (DocumentLock docLock = doc.LockDocument())
                 using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
                 {
                     BlockTableRecord ms = (BlockTableRecord)tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(doc.Database), OpenMode.ForRead);
@@ -4551,23 +4637,31 @@ namespace AIEngineer.AutoCAD
             return res;
         }
 
+        private static string SafeVal(Dictionary<string, object> d, string key)
+        {
+            object v;
+            return (d != null && d.TryGetValue(key, out v) && v != null) ? v.ToString() : "";
+        }
+
         private string FormatPanelActionSummary(string mode, Dictionary<string, object> res)
         {
             if (res == null) return "OK";
             if (mode == "trace_connections")
             {
                 StringBuilder sb = new StringBuilder();
-                sb.Append("Target=" + res["target"] + " | In=" + res["incoming_count"] + " | Out=" + res["outgoing_count"]);
-                List<string> chain = res.ContainsKey("downstream_chain") ? res["downstream_chain"] as List<string> : null;
+                sb.Append("Target=" + SafeVal(res, "target") + " | In=" + SafeVal(res, "incoming_count") + " | Out=" + SafeVal(res, "outgoing_count"));
+                object chainObj;
+                List<string> chain = (res.TryGetValue("downstream_chain", out chainObj)) ? chainObj as List<string> : null;
                 if (chain != null && chain.Count > 0) sb.Append(" | Chain: " + string.Join(" -> ", chain.ToArray()));
-                List<object> outs = res.ContainsKey("outgoing_connections") ? res["outgoing_connections"] as List<object> : null;
+                object outsObj;
+                List<object> outs = (res.TryGetValue("outgoing_connections", out outsObj)) ? outsObj as List<object> : null;
                 if (outs != null)
                 {
                     foreach (object wo in outs)
                     {
                         Dictionary<string, object> wd = wo as Dictionary<string, object>;
                         if (wd != null)
-                            sb.Append("\r\n   • " + wd["wire_no"] + ": " + wd["from"] + " -> " + wd["to"] + " (" + wd["size_mm2"] + "mm2 " + wd["phase"] + ", " + wd["length_mm"] + "mm)");
+                            sb.Append("\r\n   • " + SafeVal(wd, "wire_no") + ": " + SafeVal(wd, "from") + " -> " + SafeVal(wd, "to") + " (" + SafeVal(wd, "size_mm2") + "mm2 " + SafeVal(wd, "phase") + ", " + SafeVal(wd, "length_mm") + "mm)");
                     }
                 }
                 return sb.ToString();
@@ -4576,32 +4670,33 @@ namespace AIEngineer.AutoCAD
             {
                 return string.Format(CultureInfo.InvariantCulture,
                     "Std={0} ({1}x{2}mm, {3}A) | Updated 2D Bars={4}",
-                    res["selected_standard_busbar"], res["standard_width_mm"], res["standard_thickness_mm"],
-                    res["max_amps_35k"], res["updated_2d_busbars_count"]);
+                    SafeVal(res, "selected_standard_busbar"), SafeVal(res, "standard_width_mm"), SafeVal(res, "standard_thickness_mm"),
+                    SafeVal(res, "max_amps_35k"), SafeVal(res, "updated_2d_busbars_count"));
             }
             if (mode == "snap_and_reroute")
             {
                 return string.Format(CultureInfo.InvariantCulture,
                     "Snapped={0}, MaxDeltaY={1}mm, ZeroCollision={2}, Components={3}, Wires={4}",
-                    res["snapped_components_count"], res["max_y_snap_delta_mm"],
-                    res["zero_collision_verified"], res["components_count"], res["wires_count"]);
+                    SafeVal(res, "snapped_components_count"), SafeVal(res, "max_y_snap_delta_mm"),
+                    SafeVal(res, "zero_collision_verified"), SafeVal(res, "components_count"), SafeVal(res, "wires_count"));
             }
             if (mode == "set_view_preset")
             {
-                List<string> on = res["layers_on"] as List<string>;
-                List<string> off = res["layers_off"] as List<string>;
-                return "Preset=" + res["view_preset"] + " | ON=" + (on != null ? on.Count : 0) + " | OFF=" + (off != null ? off.Count : 0);
+                object onObj, offObj;
+                List<string> on = res.TryGetValue("layers_on", out onObj) ? onObj as List<string> : null;
+                List<string> off = res.TryGetValue("layers_off", out offObj) ? offObj as List<string> : null;
+                return "Preset=" + SafeVal(res, "view_preset") + " | ON=" + (on != null ? on.Count : 0) + " | OFF=" + (off != null ? off.Count : 0);
             }
             if (mode == "sld_from_panel")
             {
-                return "Panel=" + res["panel_name"] + " -> SLD Synced (" + res["components_synced"] + " components)";
+                return "Panel=" + SafeVal(res, "panel_name") + " -> SLD Synced (" + SafeVal(res, "components_synced") + " components)";
             }
             if (mode == "panel_from_sld" || mode == "3d_from_2d")
             {
                 return string.Format(CultureInfo.InvariantCulture,
                     "Panel={0} | 2D={1} | 3D={2} | Components={3} | Wires={4}",
-                    res["panel_name"], res["layout_2d_drawn"], res["assembly_3d_drawn"],
-                    res["components_count"], res["wires_count"]);
+                    SafeVal(res, "panel_name"), SafeVal(res, "layout_2d_drawn"), SafeVal(res, "assembly_3d_drawn"),
+                    SafeVal(res, "components_count"), SafeVal(res, "wires_count"));
             }
             return "OK";
         }

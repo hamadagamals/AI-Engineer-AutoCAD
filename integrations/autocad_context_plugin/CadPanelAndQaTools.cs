@@ -17,6 +17,7 @@ namespace AIEngineer.AutoCAD
             public int WayIndex;
             public string CircuitName;
             public string PanelName;
+            public string Discipline = "";
             public int MatchedBlocksCount;
             public double LengthMeters;
             public double ConnectedVa;
@@ -155,6 +156,44 @@ namespace AIEngineer.AutoCAD
             string installMethod,
             double ambientTempC)
         {
+            bool dummyNeeds;
+            List<Dictionary<string, object>> dummyMiss;
+            return BuildBalancedPanelSchedule(
+                doc, panelName, rawCircuits, fixtureVa, voltageLnV, voltageLlV, powerFactor,
+                demandFactor, sparePercent, feederLengthM, maxVdPercent, material, insulation, installMethod, ambientTempC,
+                false, out dummyNeeds, out dummyMiss);
+        }
+
+        private static BalancedPanelSchedule BuildBalancedPanelSchedule(
+            Document doc,
+            string panelName,
+            List<TracedCircuitSummary> rawCircuits,
+            double fixtureVa,
+            double voltageLnV,
+            double voltageLlV,
+            double powerFactor,
+            double demandFactor,
+            double sparePercent,
+            double feederLengthM,
+            double maxVdPercent,
+            string material,
+            string insulation,
+            string installMethod,
+            double ambientTempC,
+            bool strictLegendSpecs,
+            out bool needsUserSpecs,
+            out List<Dictionary<string, object>> missingSpecBlocks)
+        {
+            needsUserSpecs = false;
+            missingSpecBlocks = new List<Dictionary<string, object>>();
+            Dictionary<string, int> missingCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            List<TracedCircuitSummary> sortedCircuits = new List<TracedCircuitSummary>(rawCircuits ?? new List<TracedCircuitSummary>());
+            sortedCircuits.Sort(delegate(TracedCircuitSummary a, TracedCircuitSummary b)
+            {
+                return CompareCircuitKeysNatural(a.PanelName, a.CircuitName, b.PanelName, b.CircuitName);
+            });
+
             BalancedPanelSchedule panel = new BalancedPanelSchedule();
             panel.PanelName = panelName;
             panel.VoltageLnV = voltageLnV;
@@ -171,11 +210,11 @@ namespace AIEngineer.AutoCAD
             };
 
             List<BalancedCircuitWay> sizedWays = new List<BalancedCircuitWay>();
-            for (int i = 0; i < rawCircuits.Count; i++)
+            for (int i = 0; i < sortedCircuits.Count; i++)
             {
-                TracedCircuitSummary c = rawCircuits[i];
+                TracedCircuitSummary c = sortedCircuits[i];
                 int circPhases = 1;
-                double estVa = Math.Max(40.0, c.MatchedBlocksCount * Math.Max(10.0, fixtureVa));
+                double estVa = strictLegendSpecs ? 0.0 : Math.Max(40.0, c.MatchedBlocksCount * Math.Max(10.0, fixtureVa));
                 bool useExactKw = false;
                 double exactKw = 0.0;
                 if (c.CountsByBlock != null && c.CountsByBlock.ContainsKey("__VA__"))
@@ -190,9 +229,19 @@ namespace AIEngineer.AutoCAD
                     Dictionary<string, object> dbRows, dbBrk;
                     List<string> dbMiss;
                     ComputeCircuitLoadFromProjectDb(
-                        doc, c.CountsByBlock, null, null, fixtureVa, powerFactor,
+                        doc, c.CountsByBlock, null, null, fixtureVa, powerFactor, strictLegendSpecs,
                         out dbKw, out dbKva, out dbAssumed, out dbSrc, out dbRows, out dbMiss, out dbBrk);
-                    if (dbSrc == "project_legend_db" || dbSrc == "partial_legend_db")
+                    if (dbMiss != null && dbMiss.Count > 0)
+                    {
+                        needsUserSpecs = true;
+                        for (int mi = 0; mi < dbMiss.Count; mi++)
+                        {
+                            string mb = dbMiss[mi];
+                            int addCnt = (c.CountsByBlock.ContainsKey(mb) && c.CountsByBlock[mb] > 0) ? c.CountsByBlock[mb] : 0;
+                            missingCounts[mb] = missingCounts.ContainsKey(mb) ? missingCounts[mb] + addCnt : addCnt;
+                        }
+                    }
+                    if (dbSrc == "project_legend_db" || dbSrc == "partial_legend_db" || dbSrc == "partial_pending_user_specs")
                     {
                         if (dbKva > 1e-6) estVa = Math.Max(10.0, Math.Round(dbKva * 1000.0, 1));
                         if (dbKw > 1e-6) { exactKw = dbKw; useExactKw = true; }
@@ -201,9 +250,14 @@ namespace AIEngineer.AutoCAD
                 if (c.CountsByBlock != null && c.CountsByBlock.ContainsKey("__PHASES__"))
                     circPhases = c.CountsByBlock["__PHASES__"] == 3 ? 3 : 1;
 
-                string loadType = circPhases == 3 ? "power" : "lighting";
+                string disc = !string.IsNullOrWhiteSpace(c.Discipline)
+                    ? c.Discipline.Trim().ToLowerInvariant()
+                    : InferCircuitDiscipline(doc, c.CircuitName, c.WireLayer, c.CountsByBlock);
+                if (disc == "general" || string.IsNullOrEmpty(disc))
+                    disc = circPhases == 3 ? "power" : "lighting";
+                string loadType = (disc == "power" || circPhases == 3) ? "power" : "lighting";
                 double circV = circPhases == 3 ? voltageLlV : voltageLnV;
-                double circMaxVd = circPhases == 3 ? Math.Max(maxVdPercent, 5.0) : maxVdPercent;
+                double circMaxVd = loadType == "power" ? Math.Max(maxVdPercent, 5.0) : maxVdPercent;
                 double circLen = Math.Max(5.0, c.LengthMeters);
                 string cName = !string.IsNullOrWhiteSpace(c.CircuitName)
                     ? c.CircuitName
@@ -234,6 +288,7 @@ namespace AIEngineer.AutoCAD
                     WayIndex = i + 1,
                     CircuitName = cName,
                     PanelName = panelName,
+                    Discipline = disc,
                     MatchedBlocksCount = c.MatchedBlocksCount,
                     LengthMeters = Math.Round(c.LengthMeters, 2),
                     ConnectedVa = Math.Round(estVa, 1),
@@ -241,6 +296,15 @@ namespace AIEngineer.AutoCAD
                     PhaseLabel = circPhases == 3 ? "RYB" : "R",
                     IsSpare = false,
                     Calc = calc
+                });
+            }
+
+            foreach (KeyValuePair<string, int> mkv in missingCounts)
+            {
+                missingSpecBlocks.Add(new Dictionary<string, object>
+                {
+                    { "block_name", mkv.Key },
+                    { "count", mkv.Value }
                 });
             }
 
@@ -867,6 +931,8 @@ namespace AIEngineer.AutoCAD
             bool exportExcel = GetBool(args, "export_excel", false);
             bool zoom = GetBool(args, "zoom", true);
             bool honorSelection = GetBool(args, "use_selected", false);
+            bool strictLegendSpecs = GetBool(args, "strict_legend_specs", false);
+            bool approvedOnly = GetBool(args, "approved_only", false);
             string sourceMode = (GetStr(args, "source") ?? "auto").Trim().ToLowerInvariant();
 
             List<TracedCircuitSummary> sourceCircuits = ParseExplicitPanelCircuitsArg(
@@ -882,24 +948,28 @@ namespace AIEngineer.AutoCAD
 
             using (DocumentLock docLock = doc.LockDocument())
             {
-                if (sourceCircuits.Count == 0 && (sourceMode == "saved_memory" || sourceMode == "memory" || sourceMode == "saved"))
+                if (sourceCircuits.Count == 0 && (sourceMode == "saved_memory" || sourceMode == "memory" || sourceMode == "saved" || sourceMode == "merged_project"))
                 {
-                    List<SavedCircuitRecord> savedList = GetAllSavedCircuitRecords(doc);
+                    List<SavedCircuitRecord> savedList = GetMergedSavedCircuitRecords(doc, approvedOnly);
                     if (savedList.Count == 0)
-                        return Err("لا توجد لينيات محفوظة في ذاكرة المشروع حتى الآن. استخرج اللينيات أولاً أو استخدم source: 'auto'.");
+                        return Err(approvedOnly
+                            ? "لا توجد لينيات معتمدة في ذاكرة المشروع حتى الآن. أكمل الجرد التفاعلي واعتمد اللينيات أولاً."
+                            : "لا توجد لينيات محفوظة في ذاكرة المشروع حتى الآن. استخرج اللينيات أولاً أو استخدم source: 'auto'.");
                     for (int si = 0; si < savedList.Count; si++)
                     {
                         SavedCircuitRecord sr = savedList[si];
+                        int mCnt = Math.Max(sr.MatchedBlocksCount, sr.MatchedBlockHandles != null ? sr.MatchedBlockHandles.Count : 0);
                         sourceCircuits.Add(new TracedCircuitSummary
                         {
                             CircuitName = sr.CircuitName,
                             PanelName = ExtractPanelNameFallback(sr.CircuitName, sr.PanelName),
+                            Discipline = sr.Discipline ?? "",
                             TerminationType = sr.TerminationType,
                             WireLayer = sr.WireLayer,
                             WireColorKey = sr.WireColorKey,
                             PathCurvesCount = sr.PathHandles != null ? sr.PathHandles.Count : 0,
                             LengthMeters = sr.LengthMeters,
-                            MatchedBlocksCount = sr.MatchedBlockHandles != null ? sr.MatchedBlockHandles.Count : 0,
+                            MatchedBlocksCount = mCnt,
                             CountsByBlock = new Dictionary<string, int>(sr.CountsByBlock ?? new Dictionary<string, int>(), StringComparer.OrdinalIgnoreCase)
                         });
                     }
@@ -975,19 +1045,61 @@ namespace AIEngineer.AutoCAD
                 if (panelOrder.Count == 0)
                     return Err("لم يتم العثور على لوحات مطابقة للاسم '" + (panelFilter ?? "") + "'.");
 
-                panelOrder.Sort(StringComparer.OrdinalIgnoreCase);
+                panelOrder.Sort(CompareNaturalTokens);
 
                 List<BalancedPanelSchedule> panels = new List<BalancedPanelSchedule>();
                 int totalActiveCircuits = 0;
+                bool anyNeedsUserSpecs = false;
+                Dictionary<string, int> mergedMissingCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 for (int pi = 0; pi < panelOrder.Count; pi++)
                 {
                     string pn = panelOrder[pi];
+                    bool panelNeedsSpecs;
+                    List<Dictionary<string, object>> panelMissing;
                     BalancedPanelSchedule built = BuildBalancedPanelSchedule(
                         doc, pn, groupedByPanel[pn], fixtureVa, voltageLnV, voltageLlV, powerFactor,
                         demandFactor, sparePercent, feederLengthM, maxVdPercent,
-                        material, insulation, installMethod, ambientTempC);
+                        material, insulation, installMethod, ambientTempC,
+                        strictLegendSpecs, out panelNeedsSpecs, out panelMissing);
+                    if (panelNeedsSpecs) anyNeedsUserSpecs = true;
+                    if (panelMissing != null)
+                    {
+                        for (int mi = 0; mi < panelMissing.Count; mi++)
+                        {
+                            string mb = GetStr(panelMissing[mi], "block_name");
+                            int mc = GetInt(panelMissing[mi], "count", 0);
+                            if (!string.IsNullOrWhiteSpace(mb))
+                                mergedMissingCounts[mb] = mergedMissingCounts.ContainsKey(mb) ? mergedMissingCounts[mb] + mc : mc;
+                        }
+                    }
                     panels.Add(built);
                     totalActiveCircuits += built.ActiveWaysCount;
+                }
+
+                List<Dictionary<string, object>> allMissingSpecBlocks = new List<Dictionary<string, object>>();
+                foreach (KeyValuePair<string, int> mkv in mergedMissingCounts)
+                {
+                    allMissingSpecBlocks.Add(new Dictionary<string, object>
+                    {
+                        { "block_name", mkv.Key },
+                        { "count", mkv.Value }
+                    });
+                }
+
+                if (strictLegendSpecs && anyNeedsUserSpecs && allMissingSpecBlocks.Count > 0)
+                {
+                    List<string> missingNames = new List<string>(mergedMissingCounts.Keys);
+                    return Ok(new Dictionary<string, object>
+                    {
+                        { "blocked_for_missing_specs", true },
+                        { "needs_user_specs", true },
+                        { "strict_legend_specs", true },
+                        { "missing_spec_blocks", allMissingSpecBlocks },
+                        { "panels_count", panels.Count },
+                        { "circuits_count", totalActiveCircuits },
+                        { "message", "توجد بلوكات غير مسجلة بقاعدة بيانات الـ Legend (" + string.Join(", ", missingNames.ToArray()) +
+                            ") ولم يتم افتراض أي قيم لها. اسأل المهندس عن قدرتها بالوات/VA أو احفظها عبر manage_project_legend_db ثم أعد التوليد." }
+                    });
                 }
 
                 bool scheduleDrawn = false;
@@ -1091,6 +1203,7 @@ namespace AIEngineer.AutoCAD
                         {
                             { "way", w.WayIndex },
                             { "circuit_name", w.CircuitName },
+                            { "discipline", w.Discipline ?? "" },
                             { "is_spare", w.IsSpare },
                             { "phase", w.PhaseLabel },
                             { "matched_blocks_count", w.MatchedBlocksCount },
@@ -1146,7 +1259,9 @@ namespace AIEngineer.AutoCAD
                     { "sld_layer", "_AI_SLD" },
                     { "sld_created_count", sldCreatedCount },
                     { "effective_units_per_m", Round(effectiveUnitsPerM) },
-                    { "unit_scale_inferred", scaleInferred }
+                    { "unit_scale_inferred", scaleInferred },
+                    { "needs_user_specs", anyNeedsUserSpecs },
+                    { "missing_spec_blocks", allMissingSpecBlocks }
                 };
                 if (!string.IsNullOrEmpty(scaleWarning)) res["unit_scale_warning"] = scaleWarning;
 

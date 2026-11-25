@@ -280,6 +280,43 @@ namespace AIEngineer.AutoCAD
             return finalPath;
         }
 
+        public static string WriteWorkbook(string targetPath, List<ExcelSheetData> sheets)
+        {
+            if (string.IsNullOrWhiteSpace(targetPath))
+                throw new ArgumentException("Output Excel file path is required.");
+            if (sheets == null || sheets.Count == 0)
+                throw new ArgumentException("At least one worksheet is required.");
+
+            string fullPath = ResolveSafeOutputPath(targetPath, new string[] { ".xlsx" }, ".xlsx", "workbook");
+            string dir = Path.GetDirectoryName(fullPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+            string finalPath = fullPath;
+            string tmpPath = fullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                WriteXlsxWorkbook(tmpPath, sheets);
+                try
+                {
+                    if (File.Exists(finalPath)) File.Delete(finalPath);
+                    File.Move(tmpPath, finalPath);
+                }
+                catch (IOException)
+                {
+                    string stem = Path.GetFileNameWithoutExtension(fullPath);
+                    finalPath = Path.Combine(
+                        dir ?? ".",
+                        stem + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) + ".xlsx");
+                    File.Move(tmpPath, finalPath);
+                }
+            }
+            finally
+            {
+                try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+            }
+            return finalPath;
+        }
+
         public static bool TryOpenWithShell(string filePath)
         {
             if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return false;
@@ -545,6 +582,248 @@ namespace AIEngineer.AutoCAD
                 }
                 ws.Append("</worksheet>");
                 WriteZipEntry(zip, "xl/worksheets/sheet1.xml", ws.ToString());
+            }
+        }
+
+        private static string BuildWorksheetXml(ExcelSheetData data)
+        {
+            int colCount = data.Headers != null ? data.Headers.Count : 0;
+            if (data.Rows != null)
+            {
+                for (int r = 0; r < data.Rows.Count; r++)
+                    if (data.Rows[r] != null && data.Rows[r].Count > colCount) colCount = data.Rows[r].Count;
+            }
+            if (data.FooterRow != null && data.FooterRow.Count > colCount) colCount = data.FooterRow.Count;
+            if (colCount <= 0) colCount = 1;
+
+            double[] colWidths = new double[colCount];
+            for (int c = 0; c < colCount; c++) colWidths[c] = 12.0;
+
+            Action<int, string> trackWidth = delegate(int colIdx, string val)
+            {
+                if (colIdx < 0 || colIdx >= colCount || string.IsNullOrEmpty(val)) return;
+                int maxLine = 0;
+                string[] lines = val.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                for (int li = 0; li < lines.Length; li++)
+                    if (lines[li].Length > maxLine) maxLine = lines[li].Length;
+                double w = Math.Min(60.0, Math.Max(10.0, maxLine * 1.25 + 4.0));
+                if (w > colWidths[colIdx]) colWidths[colIdx] = w;
+            };
+
+            if (data.Headers != null)
+                for (int c = 0; c < data.Headers.Count; c++) trackWidth(c, data.Headers[c]);
+            if (data.Rows != null)
+                for (int r = 0; r < data.Rows.Count; r++)
+                    if (data.Rows[r] != null)
+                        for (int c = 0; c < data.Rows[r].Count; c++) trackWidth(c, data.Rows[r][c]);
+            if (data.FooterRow != null)
+                for (int c = 0; c < data.FooterRow.Count; c++) trackWidth(c, data.FooterRow[c]);
+
+            bool hasTitle = !string.IsNullOrWhiteSpace(data.Title);
+            bool hasHeaders = data.Headers != null && data.Headers.Count > 0;
+            bool isRtl = IsSpreadsheetArabic(data);
+
+            StringBuilder ws = new StringBuilder();
+            ws.Append("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>");
+            ws.Append("<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">");
+            int freezeRows = (hasTitle ? 1 : 0) + (hasHeaders ? 1 : 0);
+            ws.Append("<sheetViews><sheetView workbookViewId=\"0\"").Append(isRtl ? " rightToLeft=\"1\"" : "").Append(">");
+            if (freezeRows > 0)
+            {
+                ws.Append("<pane ySplit=\"").Append(freezeRows.ToString(CultureInfo.InvariantCulture))
+                  .Append("\" topLeftCell=\"A").Append((freezeRows + 1).ToString(CultureInfo.InvariantCulture))
+                  .Append("\" activePane=\"bottomLeft\" state=\"frozen\"/>");
+            }
+            ws.Append("</sheetView></sheetViews>");
+
+            ws.Append("<cols>");
+            for (int c = 0; c < colCount; c++)
+            {
+                ws.Append("<col min=\"").Append((c + 1).ToString(CultureInfo.InvariantCulture))
+                  .Append("\" max=\"").Append((c + 1).ToString(CultureInfo.InvariantCulture))
+                  .Append("\" width=\"").Append(colWidths[c].ToString("0.00", CultureInfo.InvariantCulture))
+                  .Append("\" customWidth=\"1\"/>");
+            }
+            ws.Append("</cols><sheetData>");
+
+            int rowNum = 1;
+            if (hasTitle)
+            {
+                ws.Append("<row r=\"").Append(rowNum.ToString(CultureInfo.InvariantCulture)).Append("\" ht=\"28\" customHeight=\"1\">");
+                for (int c = 0; c < colCount; c++)
+                {
+                    string cellRef = ColIndexToLetter(c) + rowNum.ToString(CultureInfo.InvariantCulture);
+                    if (c == 0)
+                        AppendInlineCell(ws, cellRef, 1, data.Title);
+                    else
+                        ws.Append("<c r=\"").Append(cellRef).Append("\" s=\"1\"/>");
+                }
+                ws.Append("</row>");
+                rowNum++;
+            }
+
+            if (hasHeaders)
+            {
+                ws.Append("<row r=\"").Append(rowNum.ToString(CultureInfo.InvariantCulture)).Append("\" ht=\"23\" customHeight=\"1\">");
+                for (int c = 0; c < colCount; c++)
+                {
+                    string cellRef = ColIndexToLetter(c) + rowNum.ToString(CultureInfo.InvariantCulture);
+                    string hVal = (c < data.Headers.Count && data.Headers[c] != null) ? data.Headers[c] : "";
+                    AppendInlineCell(ws, cellRef, 2, hVal);
+                }
+                ws.Append("</row>");
+                rowNum++;
+            }
+
+            if (data.Rows != null)
+            {
+                for (int r = 0; r < data.Rows.Count; r++)
+                {
+                    List<string> row = data.Rows[r];
+                    ws.Append("<row r=\"").Append(rowNum.ToString(CultureInfo.InvariantCulture)).Append("\">");
+                    for (int c = 0; c < colCount; c++)
+                    {
+                        string cellRef = ColIndexToLetter(c) + rowNum.ToString(CultureInfo.InvariantCulture);
+                        string val = (row != null && c < row.Count && row[c] != null) ? row[c] : "";
+                        AppendAutoTypedCell(ws, cellRef, 3, 4, val);
+                    }
+                    ws.Append("</row>");
+                    rowNum++;
+                }
+            }
+
+            if (data.FooterRow != null && data.FooterRow.Count > 0)
+            {
+                ws.Append("<row r=\"").Append(rowNum.ToString(CultureInfo.InvariantCulture)).Append("\" ht=\"22\" customHeight=\"1\">");
+                for (int c = 0; c < colCount; c++)
+                {
+                    string cellRef = ColIndexToLetter(c) + rowNum.ToString(CultureInfo.InvariantCulture);
+                    string val = (c < data.FooterRow.Count && data.FooterRow[c] != null) ? data.FooterRow[c] : "";
+                    AppendAutoTypedCell(ws, cellRef, 5, 5, val);
+                }
+                ws.Append("</row>");
+            }
+
+            ws.Append("</sheetData>");
+            if (hasTitle && colCount > 1)
+            {
+                ws.Append("<mergeCells count=\"1\"><mergeCell ref=\"A1:")
+                  .Append(ColIndexToLetter(colCount - 1)).Append("1\"/></mergeCells>");
+            }
+            ws.Append("</worksheet>");
+            return ws.ToString();
+        }
+
+        private static void WriteXlsxWorkbook(string path, List<ExcelSheetData> sheets)
+        {
+            if (sheets == null || sheets.Count == 0)
+                throw new ArgumentException("At least one worksheet is required.");
+
+            HashSet<string> usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<string> sheetNames = new List<string>(sheets.Count);
+            for (int i = 0; i < sheets.Count; i++)
+            {
+                ExcelSheetData sd = sheets[i] ?? new ExcelSheetData();
+                string raw = SanitizeSheetName(string.IsNullOrWhiteSpace(sd.SheetName) ? ("Sheet" + (i + 1).ToString(CultureInfo.InvariantCulture)) : sd.SheetName);
+                string cand = raw;
+                int suffix = 2;
+                while (!usedNames.Add(cand))
+                {
+                    string suf = "_" + suffix.ToString(CultureInfo.InvariantCulture);
+                    cand = (raw.Length + suf.Length > 31 ? raw.Substring(0, 31 - suf.Length) : raw) + suf;
+                    suffix++;
+                }
+                sheetNames.Add(cand);
+            }
+
+            StringBuilder ctOverrides = new StringBuilder();
+            StringBuilder wbSheets = new StringBuilder();
+            StringBuilder wbRels = new StringBuilder();
+            for (int i = 0; i < sheets.Count; i++)
+            {
+                int sid = i + 1;
+                ctOverrides.Append("<Override PartName=\"/xl/worksheets/sheet").Append(sid.ToString(CultureInfo.InvariantCulture))
+                    .Append(".xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>");
+                wbSheets.Append("<sheet name=\"").Append(XmlEsc(sheetNames[i])).Append("\" sheetId=\"")
+                    .Append(sid.ToString(CultureInfo.InvariantCulture)).Append("\" r:id=\"rId")
+                    .Append(sid.ToString(CultureInfo.InvariantCulture)).Append("\"/>");
+                wbRels.Append("<Relationship Id=\"rId").Append(sid.ToString(CultureInfo.InvariantCulture))
+                    .Append("\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet")
+                    .Append(sid.ToString(CultureInfo.InvariantCulture)).Append(".xml\"/>");
+            }
+            int styleRelId = sheets.Count + 1;
+            wbRels.Append("<Relationship Id=\"rId").Append(styleRelId.ToString(CultureInfo.InvariantCulture))
+                .Append("\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>");
+
+            using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+            using (ZipArchive zip = new ZipArchive(fs, ZipArchiveMode.Create))
+            {
+                WriteZipEntry(zip, "[Content_Types].xml",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+                    "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">" +
+                    "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.relationships+xml\"/>" +
+                    "<Default Extension=\"xml\" ContentType=\"application/xml\"/>" +
+                    "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>" +
+                    ctOverrides.ToString() +
+                    "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>" +
+                    "</Types>");
+
+                WriteZipEntry(zip, "_rels/.rels",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+                    "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>" +
+                    "</Relationships>");
+
+                WriteZipEntry(zip, "xl/workbook.xml",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+                    "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">" +
+                    "<sheets>" + wbSheets.ToString() + "</sheets>" +
+                    "</workbook>");
+
+                WriteZipEntry(zip, "xl/_rels/workbook.xml.rels",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+                    wbRels.ToString() +
+                    "</Relationships>");
+
+                WriteZipEntry(zip, "xl/styles.xml",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+                    "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" +
+                    "<fonts count=\"4\">" +
+                    "<font><sz val=\"11\"/><name val=\"Arial\"/></font>" +
+                    "<font><b/><sz val=\"13\"/><color rgb=\"FFFFFFFF\"/><name val=\"Arial\"/></font>" +
+                    "<font><b/><sz val=\"11\"/><color rgb=\"FF1F4E78\"/><name val=\"Arial\"/></font>" +
+                    "<font><b/><sz val=\"11\"/><color rgb=\"FF000000\"/><name val=\"Arial\"/></font>" +
+                    "</fonts>" +
+                    "<fills count=\"5\">" +
+                    "<fill><patternFill patternType=\"none\"/></fill>" +
+                    "<fill><patternFill patternType=\"gray125\"/></fill>" +
+                    "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF1F4E78\"/></patternFill></fill>" +
+                    "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFD9E1F2\"/></patternFill></fill>" +
+                    "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFF2F2F2\"/></patternFill></fill>" +
+                    "</fills>" +
+                    "<borders count=\"2\">" +
+                    "<border><left/><right/><top/><bottom/><diagonal/></border>" +
+                    "<border><left style=\"thin\"><color rgb=\"FFB4B4B4\"/></left><right style=\"thin\"><color rgb=\"FFB4B4B4\"/></right><top style=\"thin\"><color rgb=\"FFB4B4B4\"/></top><bottom style=\"thin\"><color rgb=\"FFB4B4B4\"/></bottom><diagonal/></border>" +
+                    "</borders>" +
+                    "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>" +
+                    "<cellXfs count=\"6\">" +
+                    "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>" +
+                    "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"2\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\"/></xf>" +
+                    "<xf numFmtId=\"0\" fontId=\"2\" fillId=\"3\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" wrapText=\"1\"/></xf>" +
+                    "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" wrapText=\"1\"/></xf>" +
+                    "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\"/></xf>" +
+                    "<xf numFmtId=\"0\" fontId=\"3\" fillId=\"4\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\"/></xf>" +
+                    "</cellXfs>" +
+                    "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>" +
+                    "</styleSheet>");
+
+                for (int i = 0; i < sheets.Count; i++)
+                {
+                    ExcelSheetData sd = sheets[i] ?? new ExcelSheetData();
+                    string xml = BuildWorksheetXml(sd);
+                    WriteZipEntry(zip, "xl/worksheets/sheet" + (i + 1).ToString(CultureInfo.InvariantCulture) + ".xml", xml);
+                }
             }
         }
 

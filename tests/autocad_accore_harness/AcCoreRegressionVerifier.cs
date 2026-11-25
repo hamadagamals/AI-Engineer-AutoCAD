@@ -136,7 +136,7 @@ namespace AcCoreRegressionHarness
                 int coreSchemaErrors = 0;
                 int newToolDescErrors = 0;
                 HashSet<string> strictTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-                    "find_blocks_along_path", "trace_all_circuits", "generate_panel_schedule_and_sld", "audit_electrical_drawing", "manage_project_legend_db", "capture_visual_view", "design_panel_manufacturing_layout"
+                    "find_blocks_along_path", "trace_all_circuits", "generate_panel_schedule_and_sld", "audit_electrical_drawing", "manage_project_legend_db", "guided_circuit_inventory", "capture_visual_view", "design_panel_manufacturing_layout", "build_distribution_network_and_sld"
                 };
 
                 foreach (Dictionary<string, object> s in specs)
@@ -168,12 +168,12 @@ namespace AcCoreRegressionHarness
                     }
                 }
                 ed.WriteMessage("\nAUTOCAD_TOOLS=" + specs.Count + "|SCHEMA_ERRORS=" + (coreSchemaErrors + newToolDescErrors) + "\n");
-                AssertTrue(specs.Count == 40, "Expected 40 tools, got " + specs.Count);
+                AssertTrue(specs.Count == 42, "Expected 42 tools, got " + specs.Count);
                 AssertTrue(coreSchemaErrors == 0 && newToolDescErrors == 0, "Schema errors found");
 
                 MethodInfo selectSpecs = agentType.GetMethod("SelectRelevantToolSpecs", flags);
                 List<string> rCirc = new List<string>();
-                foreach (Dictionary<string, object> rs in (List<Dictionary<string, object>>)selectSpecs.Invoke(null, new object[] { "\u062a\u062a\u0628\u0639 \u0645\u0633\u0627\u0631 \u0627\u0644\u0644\u064a\u0646\u064a\u0627 \u0648\u0627\u0633\u062a\u062e\u0631\u062c \u0639\u062f\u062f \u0627\u0644\u0628\u0644\u0648\u0643\u0627\u062a" }))
+                foreach (Dictionary<string, object> rs in (List<Dictionary<string, object>>)selectSpecs.Invoke(null, new object[] { "\u062a\u062a\u0628\u0639 \u0645\u0633\u0627\u0631 \u0627\u0644\u0644\u064a\u0646\u064a\u0627 \u0648\u0627\u0633\u062e\u0631\u062c \u0639\u062f\u062f \u0627\u0644\u0628\u0644\u0648\u0643\u0627\u062a" }))
                     rCirc.Add(GetStrVal(rs, "name"));
                 List<string> rPanel = new List<string>();
                 foreach (Dictionary<string, object> rs in (List<Dictionary<string, object>>)selectSpecs.Invoke(null, new object[] { "\u0627\u0639\u0645\u0644 \u062c\u062f\u0648\u0644 \u0627\u0644\u0644\u0648\u062d\u0629 \u0648\u0627\u0644\u0645\u062e\u0637\u0637 \u0627\u0644\u0627\u062d\u0627\u062f\u064a SLD \u0645\u0639 \u062a\u0648\u0632\u064a\u0639 \u0627\u0644\u0641\u0627\u0632\u0627\u062a" }))
@@ -184,12 +184,20 @@ namespace AcCoreRegressionHarness
                 List<string> rMfg = new List<string>();
                 foreach (Dictionary<string, object> rs in (List<Dictionary<string, object>>)selectSpecs.Invoke(null, new object[] { "\u062a\u0635\u0646\u064a\u0639 \u062f\u0648\u0644\u0627\u0628 \u0644\u0648\u062d\u0629 \u0643\u0647\u0631\u0628\u0627\u0621 3d \u0645\u0639 \u0628\u0627\u0631\u0627\u062a \u0646\u062d\u0627\u0633 \u0648\u062a\u0648\u0632\u064a\u0639 \u062d\u0631\u0627\u0631\u064a" }))
                     rMfg.Add(GetStrVal(rs, "name"));
+                List<string> rInv = new List<string>();
+                foreach (Dictionary<string, object> rs in (List<Dictionary<string, object>>)selectSpecs.Invoke(null, new object[] { "\u0627\u0628\u062f\u0623 \u062c\u0631\u062f \u0627\u0644\u0644\u064a\u0646\u064a\u0627\u062a \u0644\u0648\u062d\u0629 \u0628\u0644\u0648\u062d\u0629" }))
+                    rInv.Add(GetStrVal(rs, "name"));
+                List<string> rDist = new List<string>();
+                foreach (Dictionary<string, object> rs in (List<Dictionary<string, object>>)selectSpecs.Invoke(null, new object[] { "\u0645\u062e\u0637\u0637 \u0643\u0627\u0628\u0644\u0627\u062a \u0627\u0644\u0645\u062d\u0648\u0644 RMU \u0648\u0627\u0644\u0645\u0648\u0644\u062f ATS \u0648\u0627\u0644\u0644\u0627\u0646\u062f\u0633\u0643\u064a\u0628 Master SLD" }))
+                    rDist.Add(GetStrVal(rs, "name"));
 
-                ed.WriteMessage("\nROUTER_COUNTS=" + rCirc.Count + "," + rPanel.Count + "," + rQa.Count + "," + rMfg.Count + "\n");
-                AssertTrue(rCirc.Contains("find_blocks_along_path") && rCirc.Contains("trace_all_circuits") && rCirc.Contains("manage_project_legend_db"), "Circuit router missing tools");
+                ed.WriteMessage("\nROUTER_COUNTS=" + rCirc.Count + "," + rPanel.Count + "," + rQa.Count + "," + rMfg.Count + "," + rInv.Count + "," + rDist.Count + "\n");
+                AssertTrue(rCirc.Contains("find_blocks_along_path") && rCirc.Contains("trace_all_circuits") && rCirc.Contains("manage_project_legend_db") && rCirc.Contains("guided_circuit_inventory"), "Circuit router missing tools");
                 AssertTrue(rPanel.Contains("generate_panel_schedule_and_sld") && rPanel.Contains("calculate_lv_electrical"), "Panel router missing tools");
                 AssertTrue(rQa.Contains("audit_electrical_drawing"), "QA router missing tool");
                 AssertTrue(rMfg.Contains("design_panel_manufacturing_layout"), "Panel Mfg router missing tool");
+                AssertTrue(rInv.Contains("guided_circuit_inventory") && rInv.Contains("manage_project_legend_db"), "Guided inventory router missing tools");
+                AssertTrue(rDist.Contains("build_distribution_network_and_sld"), "Distribution network router missing build_distribution_network_and_sld");
 
                 // 2. JIT Method Preparation
                 Type execType = ctxAsm.GetType("AIEngineer.AutoCAD.CadToolExecutor");
@@ -200,13 +208,22 @@ namespace AcCoreRegressionHarness
                     "TraceAllCircuits", "ScanAllCircuitsInternal", "ComputeDrawingFixtureMetrics",
                     "CollectAllCircuitCandidateCurveIds", "TraceSingleCircuitComponentCached", "BuildCircuitScheduleSheet",
                     "GeneratePanelScheduleAndSld", "AuditElectricalDrawing", "DrawSingleLineDiagram", "BuildBalancedPanelSchedule",
-                    "ManageProjectLegendDb", "CaptureVisualView", "DesignPanelManufacturingLayout"
+                    "ManageProjectLegendDb", "GuidedCircuitInventory", "CaptureVisualView", "DesignPanelManufacturingLayout",
+                    "BuildDistributionNetworkAndSld"
                 };
+                MethodInfo[] allExecMethods = execType.GetMethods(flags);
                 foreach (string jm in jitMethods)
                 {
-                    MethodInfo mi = execType.GetMethod(jm, flags);
-                    AssertTrue(mi != null, "Missing JIT method " + jm);
-                    RuntimeHelpers.PrepareMethod(mi.MethodHandle);
+                    int preparedCount = 0;
+                    for (int miIdx = 0; miIdx < allExecMethods.Length; miIdx++)
+                    {
+                        if (string.Equals(allExecMethods[miIdx].Name, jm, StringComparison.Ordinal))
+                        {
+                            RuntimeHelpers.PrepareMethod(allExecMethods[miIdx].MethodHandle);
+                            preparedCount++;
+                        }
+                    }
+                    AssertTrue(preparedCount > 0, "Missing JIT method " + jm);
                 }
                 ed.WriteMessage("\nJIT_PHASE2_OK\n");
 
@@ -1082,12 +1099,30 @@ namespace AcCoreRegressionHarness
                 ed.WriteMessage("\nTEST13D=OK|STD=" + GetStrVal(r13d, "selected_standard_busbar") + "\n");
                 AssertTrue(GetBoolVal(r13d, "ok") && GetStrVal(r13d, "selected_standard_busbar") == "30x5 Cu", "Test 13D failed resize_busbar");
 
+                Dictionary<string, object> r13dMulti = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "design_panel_manufacturing_layout",
+                    new Dictionary<string, object> { { "mode", "resize_busbar" }, { "target_busbar_size", "2x60x10" } }
+                });
+                AssertTrue(GetBoolVal(r13dMulti, "ok") && GetStrVal(r13dMulti, "selected_standard_busbar") == "2x(60x10) Cu", "Test 13D failed multi-run 2x60x10 resize_busbar");
+
+                Dictionary<string, object> r13dUndo = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "undo_last_action",
+                    new Dictionary<string, object> { { "steps", 1 } }
+                });
+                AssertTrue(GetBoolVal(r13dUndo, "ok"), "Test 13D undo resize_busbar failed");
+
                 Dictionary<string, object> r13e = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
                     doc, "design_panel_manufacturing_layout",
                     new Dictionary<string, object> { { "mode", "snap_and_reroute" }, { "panel_name", "MCC-01" }, { "zoom", false } }
                 });
                 ed.WriteMessage("\nTEST13E=OK|ZCOL=" + GetBoolVal(r13e, "zero_collision_verified") + "\n");
                 AssertTrue(GetBoolVal(r13e, "ok") && GetBoolVal(r13e, "zero_collision_verified"), "Test 13E failed snap_and_reroute");
+
+                Dictionary<string, object> r13Hist = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "undo_last_action",
+                    new Dictionary<string, object> { { "action", "list_history" } }
+                });
+                AssertTrue(GetBoolVal(r13Hist, "ok") && GetIntVal(r13Hist, "history_count") >= 3, "Test 13E missing interactive panel undo history");
 
                 Dictionary<string, object> r13f = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
                     doc, "design_panel_manufacturing_layout",
@@ -1119,6 +1154,375 @@ namespace AcCoreRegressionHarness
                     AssertTrue(GetBoolVal(rPre, "ok"), "Test 13G set_view_preset failed for " + allPresets[pi]);
                 }
                 ed.WriteMessage("\nTEST13G=OK|AIENGPANEL_PRESETS=8\n");
+
+                // 8. Test 14: Phase 6 Guided Circuit Inventory, Cross-Plan Lighting+Power Merge & Zero-Hallucination Spec Gate
+                using (Transaction trClean14 = db.TransactionManager.StartTransaction())
+                {
+                    BlockTableRecord ms = (BlockTableRecord)trClean14.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
+                    foreach (ObjectId oid in ms)
+                    {
+                        Entity ent = trClean14.GetObject(oid, OpenMode.ForWrite) as Entity;
+                        if (ent != null && !ent.IsErased) ent.Erase(true);
+                    }
+                    trClean14.Commit();
+                }
+
+                // Clear Legend DB catalog so TEST14B verifies strict zero-hallucination block when specs are missing
+                execTool.Invoke(null, new object[] {
+                    doc, "manage_project_legend_db",
+                    new Dictionary<string, object> { { "action", "clear_catalog" } }
+                });
+
+                string brokenBranchHandle14 = "";
+                string wrongWireHandle14 = "";
+                string randomInspectWire14 = "";
+                string pwrWireHandle14 = "";
+                using (Transaction tr14 = db.TransactionManager.StartTransaction())
+                {
+                    LayerTable lt14 = (LayerTable)tr14.GetObject(db.LayerTableId, OpenMode.ForRead);
+                    EnsureLayer(tr14, lt14, "E-LIGHTING", 6);
+                    EnsureLayer(tr14, lt14, "E-POWER", 4);
+                    EnsureLayer(tr14, lt14, "E-FIXTURES", 7);
+
+                    BlockTable bt14 = (BlockTable)tr14.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    ObjectId sockBtr14 = EnsureRectBlock(tr14, bt14, "SOCK_2P", 0.30, 0.20, 4);
+                    BlockTableRecord ms14 = (BlockTableRecord)tr14.GetObject(bt14[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                    // Circuit DB-1/1 (Lighting): 1 F1 main + 1 F1 on disconnected broken branch + wrong stray wire
+                    InsertBlock(ms14, tr14, f1Btr, new Point3d(2.0, 2.0, 0), "E-FIXTURES");
+                    AddLine(ms14, tr14, new Point3d(2.30, 2.0, 0), new Point3d(6.0, 2.0, 0), "E-LIGHTING", 6);
+                    InsertBlock(ms14, tr14, arrowBtr, new Point3d(6.0, 2.0, 0), "E-LIGHTING");
+                    AddText(ms14, tr14, new Point3d(6.2, 2.15, 0), "DB-1/1", 0.18, "E-LIGHTING");
+
+                    // Broken branch (>2m gap) connecting to an extra F1
+                    ObjectId brkId14 = AddLine(ms14, tr14, new Point3d(10.0, 2.0, 0), new Point3d(12.0, 2.0, 0), "E-LIGHTING", 6);
+                    AddLine(ms14, tr14, new Point3d(12.0, 2.0, 0), new Point3d(14.0, 2.0, 0), "E-LIGHTING", 6);
+                    InsertBlock(ms14, tr14, f1Btr, new Point3d(14.30, 2.0, 0), "E-FIXTURES");
+                    brokenBranchHandle14 = tr14.GetObject(brkId14, OpenMode.ForRead).Handle.ToString();
+
+                    // Wrong stray wire + F1E far enough from DB-1/1 (> tagSearchRadius) so it stays unnamed until removed in TEST14C
+                    ObjectId wrgId14 = AddLine(ms14, tr14, new Point3d(2.0, -4.0, 0), new Point3d(5.0, -4.0, 0), "E-LIGHTING", 5);
+                    InsertBlock(ms14, tr14, f1eBtr, new Point3d(5.30, -4.0, 0), "E-FIXTURES");
+                    wrongWireHandle14 = tr14.GetObject(wrgId14, OpenMode.ForRead).Handle.ToString();
+
+                    // Circuit DB-1/5 (Lighting)
+                    InsertBlock(ms14, tr14, f1Btr, new Point3d(2.0, 8.0, 0), "E-FIXTURES");
+                    ObjectId r5WireId = AddLine(ms14, tr14, new Point3d(2.30, 8.0, 0), new Point3d(6.0, 8.0, 0), "E-LIGHTING", 6);
+                    InsertBlock(ms14, tr14, arrowBtr, new Point3d(6.0, 8.0, 0), "E-LIGHTING");
+                    AddText(ms14, tr14, new Point3d(6.2, 8.15, 0), "DB-1/5", 0.18, "E-LIGHTING");
+                    randomInspectWire14 = tr14.GetObject(r5WireId, OpenMode.ForRead).Handle.ToString();
+
+                    // Circuit DB-1/10 (Lighting) to test numeric sort (1, 5, 10)
+                    InsertBlock(ms14, tr14, f1Btr, new Point3d(2.0, 14.0, 0), "E-FIXTURES");
+                    AddLine(ms14, tr14, new Point3d(2.30, 14.0, 0), new Point3d(6.0, 14.0, 0), "E-LIGHTING", 6);
+                    InsertBlock(ms14, tr14, arrowBtr, new Point3d(6.0, 14.0, 0), "E-LIGHTING");
+                    AddText(ms14, tr14, new Point3d(6.2, 14.15, 0), "DB-1/10", 0.18, "E-LIGHTING");
+
+                    // Circuit DB-1/2 (Power) for separate-discipline scan + numeric merge (1, 2, 5, 10)
+                    InsertBlock(ms14, tr14, sockBtr14, new Point3d(25.0, 2.0, 0), "E-POWER");
+                    ObjectId pwrId14 = AddLine(ms14, tr14, new Point3d(25.30, 2.0, 0), new Point3d(29.0, 2.0, 0), "E-POWER", 4);
+                    InsertBlock(ms14, tr14, arrowBtr, new Point3d(29.0, 2.0, 0), "E-POWER");
+                    AddText(ms14, tr14, new Point3d(29.2, 2.15, 0), "DB-1/2", 0.18, "E-POWER");
+                    pwrWireHandle14 = tr14.GetObject(pwrId14, OpenMode.ForRead).Handle.ToString();
+
+                    // Orphan fixture not wired to any circuit
+                    InsertBlock(ms14, tr14, f1Btr, new Point3d(40.0, 20.0, 0), "E-FIXTURES");
+
+                    tr14.Commit();
+                }
+
+                // TEST14A: Start guided inventory for lighting only, expect natural numeric order 1, 5, 10 & legend_ready=false
+                Dictionary<string, object> r14a = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "start" }, { "discipline", "lighting" }, { "strict_legend_specs", true }, { "zoom", false } }
+                });
+                Dictionary<string, object> cur14a = r14a.ContainsKey("current_circuit") ? r14a["current_circuit"] as Dictionary<string, object> : null;
+                AssertTrue(GetBoolVal(r14a, "ok") && GetBoolVal(r14a, "active") && cur14a != null && GetStrVal(cur14a, "circuit_name") == "DB-1/1", "Test 14A failed start");
+                AssertTrue(!GetBoolVal(r14a, "legend_ready") && GetBoolVal(r14a, "needs_user_specs"), "Test 14A expected needs_user_specs=true");
+                System.Collections.IEnumerable qPrev14 = r14a.ContainsKey("queue_preview") ? r14a["queue_preview"] as System.Collections.IEnumerable : null;
+                List<string> qNames14 = new List<string>();
+                if (qPrev14 != null) { foreach (object qo in qPrev14) if (qo != null) qNames14.Add(qo.ToString()); }
+                AssertTrue(qNames14.Count >= 3 && qNames14[0].StartsWith("DB-1/1 ") && qNames14[1].StartsWith("DB-1/5 ") && qNames14[2].StartsWith("DB-1/10 "), "Test 14A numeric order mismatch: " + string.Join(", ", qNames14.ToArray()));
+                ed.WriteMessage("\nTEST14A=OK|QUEUE=" + string.Join(",", qNames14.ToArray()) + "\n");
+
+                // TEST14B: Strict Zero-Hallucination Gate blocks approval when specs missing (0 VA/kW, never 40 VA)
+                Dictionary<string, object> r14b = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "approve_next" }, { "zoom", false } }
+                });
+                Dictionary<string, object> cur14b = r14b.ContainsKey("current_circuit") ? r14b["current_circuit"] as Dictionary<string, object> : null;
+                AssertTrue(GetBoolVal(r14b, "ok") && GetBoolVal(r14b, "blocked_for_missing_specs") && GetBoolVal(r14b, "needs_user_specs"), "Test 14B did not block missing specs");
+                AssertTrue(cur14b != null && Convert.ToDouble(cur14b["load_kva"], CultureInfo.InvariantCulture) == 0.0, "Test 14B assumed load instead of 0");
+                ed.WriteMessage("\nTEST14B=OK|BLOCKED_NO_40VA_HALLUCINATION\n");
+
+                // TEST14C: add_selection traces broken branch forward; remove_selection excludes wrong curve permanently across refresh
+                Dictionary<string, object> r14cAdd = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "add_selection" }, { "handles", new string[] { brokenBranchHandle14, wrongWireHandle14 } }, { "zoom", false } }
+                });
+                Dictionary<string, object> cur14c1 = r14cAdd["current_circuit"] as Dictionary<string, object>;
+                AssertTrue(GetBoolVal(r14cAdd, "ok") && GetIntVal(cur14c1, "matched_blocks_count") >= 2, "Test 14C add_selection failed");
+
+                Dictionary<string, object> r14cRem = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "remove_selection" }, { "handles", new string[] { wrongWireHandle14 } }, { "zoom", false } }
+                });
+                Dictionary<string, object> r14cRef = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "refresh" }, { "zoom", false } }
+                });
+                Dictionary<string, object> cur14c2 = r14cRef["current_circuit"] as Dictionary<string, object>;
+                AssertTrue(GetBoolVal(r14cRem, "ok") && GetBoolVal(r14cRef, "ok") && GetIntVal(cur14c2, "excluded_handles_count") >= 1 && GetIntVal(cur14c2, "matched_blocks_count") == 2, "Test 14C remove+refresh failed");
+                ed.WriteMessage("\nTEST14C=OK|BLOCKS=" + GetIntVal(cur14c2, "matched_blocks_count") + "|EXCL=" + GetIntVal(cur14c2, "excluded_handles_count") + "\n");
+
+                // TEST14E (mid-session): inspect_selection inspects DB-1/5 without advancing queue current_index (still 0 on DB-1/1)
+                Dictionary<string, object> r14e = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "inspect_selection" }, { "handles", new string[] { randomInspectWire14 } }, { "zoom", false } }
+                });
+                Dictionary<string, object> st14e = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "status" } }
+                });
+                AssertTrue(GetBoolVal(r14e, "ok") && GetStrVal(r14e, "circuit_name") == "DB-1/5" && GetIntVal(st14e, "current_index") == 0, "Test 14E random inspect altered active index");
+                ed.WriteMessage("\nTEST14E=OK|RANDOM_INSPECT=DB-1/5|IDX=0\n");
+
+                // TEST14D: Save Legend DB specs then approve DB-1/1 -> advances to DB-1/5, then approve DB-1/5 & DB-1/10
+                execTool.Invoke(null, new object[] {
+                    doc, "manage_project_legend_db",
+                    new Dictionary<string, object>
+                    {
+                        { "action", "set_items" },
+                        { "items", new object[]
+                            {
+                                new Dictionary<string, object> { { "block_name", "F1" }, { "watt", 36.0 }, { "category", "lighting" }, { "description", "LED Panel 60x60 36W" } },
+                                new Dictionary<string, object> { { "block_name", "F1E" }, { "watt", 42.0 }, { "is_emergency", true }, { "category", "lighting" } },
+                                new Dictionary<string, object> { { "block_name", "SOCK_2P" }, { "watt", 250.0 }, { "category", "socket" }, { "description", "Double Socket 250W" } }
+                            }
+                        }
+                    }
+                });
+                Dictionary<string, object> r14d = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "approve_next" }, { "zoom", false } }
+                });
+                Dictionary<string, object> nxt14d = r14d["current_circuit"] as Dictionary<string, object>;
+                AssertTrue(GetBoolVal(r14d, "ok") && GetBoolVal(r14d, "approved") && GetStrVal(r14d, "approved_circuit") == "DB-1/1" && nxt14d != null && GetStrVal(nxt14d, "circuit_name") == "DB-1/5", "Test 14D approve_next failed");
+                execTool.Invoke(null, new object[] { doc, "guided_circuit_inventory", new Dictionary<string, object> { { "action", "approve_next" }, { "zoom", false } } });
+                execTool.Invoke(null, new object[] { doc, "guided_circuit_inventory", new Dictionary<string, object> { { "action", "approve_next" }, { "zoom", false } } });
+                ed.WriteMessage("\nTEST14D=OK|APPROVED_LIGHTING=1,5,10\n");
+
+                // TEST14F: Inspect & save Power circuit DB-1/2 and verify unified numeric merge (1, 2, 5, 10) in Panel Schedule + SLD
+                Dictionary<string, object> r14fPwr = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "inspect_selection" }, { "handles", new string[] { pwrWireHandle14 } }, { "save_to_panel", true }, { "zoom", false } }
+                });
+                AssertTrue(GetBoolVal(r14fPwr, "ok") && GetBoolVal(r14fPwr, "saved_to_panel") && GetStrVal(r14fPwr, "discipline") == "power", "Test 14F power circuit save failed");
+
+                Dictionary<string, object> r14fSched = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "generate_panel_schedule_and_sld",
+                    new Dictionary<string, object> { { "source", "saved_memory" }, { "approved_only", true }, { "panel_name", "DB-1" }, { "strict_legend_specs", true }, { "draw_panel_schedule", false }, { "draw_sld", false }, { "zoom", false } }
+                });
+                AssertTrue(GetBoolVal(r14fSched, "ok") && !GetBoolVal(r14fSched, "needs_user_specs"), "Test 14F merged schedule failed");
+                List<Dictionary<string, object>> ps14List = new List<Dictionary<string, object>>();
+                System.Collections.IEnumerable ps14Enum = r14fSched.ContainsKey("panels") ? r14fSched["panels"] as System.Collections.IEnumerable : null;
+                if (ps14Enum != null) { foreach (object po in ps14Enum) if (po is Dictionary<string, object>) ps14List.Add((Dictionary<string, object>)po); }
+                AssertTrue(ps14List.Count >= 1, "Test 14F missing panel list");
+                Dictionary<string, object> db1Panel = ps14List[0];
+                List<Dictionary<string, object>> db1Circs = new List<Dictionary<string, object>>();
+                System.Collections.IEnumerable c14Enum = db1Panel.ContainsKey("circuits") ? db1Panel["circuits"] as System.Collections.IEnumerable : null;
+                if (c14Enum != null) { foreach (object co in c14Enum) if (co is Dictionary<string, object>) db1Circs.Add((Dictionary<string, object>)co); }
+                AssertTrue(db1Circs.Count >= 4, "Test 14F missing merged circuits");
+                AssertTrue(GetStrVal(db1Circs[0], "circuit_name") == "DB-1/1" &&
+                           GetStrVal(db1Circs[1], "circuit_name") == "DB-1/2" &&
+                           GetStrVal(db1Circs[2], "circuit_name") == "DB-1/5" &&
+                           GetStrVal(db1Circs[3], "circuit_name") == "DB-1/10", "Test 14F numeric ordering 1,2,5,10 failed");
+                ed.WriteMessage("\nTEST14F=OK|MERGED_ORDER=1,2,5,10\n");
+
+                // TEST14G: audit_remaining reports orphan fixtures and exact missing circuit gaps (3,4,6,7,8,9)
+                Dictionary<string, object> r14g = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "audit_remaining" }, { "highlight", false }, { "zoom", false } }
+                });
+                AssertTrue(GetBoolVal(r14g, "ok") && GetIntVal(r14g, "orphan_fixtures_count") >= 1, "Test 14G missed orphan fixture");
+                ed.WriteMessage("\nTEST14G=OK|ORPHANS=" + GetIntVal(r14g, "orphan_fixtures_count") + "\n");
+
+                // 9. Test 15: Phase 7 Commercial Polish — XData COPY Recovery, MV/LV + Landscape Master SLD, DIALux Review & Wizard
+                // TEST15A: Verify AIENG_CIRCUIT_TAG XData on DB-1/1, simulate COPY + erase old handles, and recall saved circuit
+                int xdataTagged15a = 0;
+                using (Transaction tr15a = db.TransactionManager.StartTransaction())
+                {
+                    BlockTableRecord ms15 = (BlockTableRecord)tr15a.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
+                    List<Entity> db11Orig = new List<Entity>();
+                    foreach (ObjectId oid in ms15)
+                    {
+                        if (oid.IsErased) continue;
+                        Entity ent = tr15a.GetObject(oid, OpenMode.ForRead) as Entity;
+                        if (ent == null) continue;
+                        ResultBuffer rb = ent.GetXDataForApplication("AIENG_CIRCUIT_TAG");
+                        if (rb == null) continue;
+                        TypedValue[] tvs = rb.AsArray();
+                        for (int ti = 0; ti < tvs.Length; ti++)
+                        {
+                            string xs = tvs[ti].Value != null ? tvs[ti].Value.ToString() : "";
+                            if (xs.IndexOf("|DB-1/1|", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                db11Orig.Add(ent);
+                                break;
+                            }
+                        }
+                    }
+                    xdataTagged15a = db11Orig.Count;
+                    AssertTrue(xdataTagged15a >= 2, "Test 15A expected >= 2 XData-tagged entities for DB-1/1");
+                    for (int ei = 0; ei < db11Orig.Count; ei++)
+                    {
+                        Entity orig = db11Orig[ei];
+                        Entity copyEnt = orig.Clone() as Entity;
+                        if (copyEnt != null)
+                        {
+                            copyEnt.TransformBy(Matrix3d.Displacement(new Vector3d(100.0, 100.0, 0.0)));
+                            ms15.AppendEntity(copyEnt);
+                            tr15a.AddNewlyCreatedDBObject(copyEnt, true);
+                        }
+                        orig.UpgradeOpen();
+                        orig.Erase(true);
+                    }
+                    tr15a.Commit();
+                }
+
+                Dictionary<string, object> r15a = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", "recall" }, { "circuit_name", "DB-1/1" }, { "zoom", false } }
+                });
+                Dictionary<string, object> cur15a = r15a.ContainsKey("current_circuit") ? r15a["current_circuit"] as Dictionary<string, object> : null;
+                AssertTrue(GetBoolVal(r15a, "ok") && GetBoolVal(r15a, "recalled") && GetBoolVal(r15a, "recovered_via_xdata") && cur15a != null && GetStrVal(cur15a, "circuit_name") == "DB-1/1",
+                    "Test 15A XData recall recovery failed");
+                ed.WriteMessage("\nTEST15A=OK|TAGGED=" + xdataTagged15a + "|RECOVERED_XDATA=" + GetBoolVal(r15a, "recovered_via_xdata") + "\n");
+
+                // TEST15B: Strict Zero-Hallucination Gate on missing downstream panel load
+                Dictionary<string, object> r15b = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "build_distribution_network_and_sld",
+                    new Dictionary<string, object>
+                    {
+                        { "source", "explicit" },
+                        { "strict_loads", true },
+                        { "draw_in_cad", false },
+                        { "export_excel", false },
+                        { "nodes", new object[]
+                            {
+                                new Dictionary<string, object> { { "name", "RMU-1" }, { "kind", "rmu" } },
+                                new Dictionary<string, object> { { "name", "TX-1" }, { "kind", "transformer" }, { "parent", "RMU-1" } },
+                                new Dictionary<string, object> { { "name", "MDB-1" }, { "kind", "mdb" }, { "parent", "TX-1" } },
+                                new Dictionary<string, object> { { "name", "DB-UNKNOWN" }, { "kind", "db" }, { "parent", "MDB-1" }, { "feeder_length_m", 30.0 } }
+                            }
+                        }
+                    }
+                });
+                AssertTrue(GetBoolVal(r15b, "ok") && GetBoolVal(r15b, "blocked_for_missing_loads") && GetBoolVal(r15b, "needs_user_loads"),
+                    "Test 15B expected blocked_for_missing_loads=true");
+                ed.WriteMessage("\nTEST15B=OK|STRICT_MISSING_LOAD_GATE\n");
+
+                // TEST15C: Full RMU->TX->MDB->ATS/GEN->SMDB->DB(DB hydrated) + Landscape Feeder Pillar -> Master SLD + Excel
+                string xl15c = Path.Combine(Path.GetTempPath(), "accore_master_dist_15c.xlsx");
+                try { if (File.Exists(xl15c)) File.Delete(xl15c); } catch { }
+                Dictionary<string, object> r15c = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "build_distribution_network_and_sld",
+                    new Dictionary<string, object>
+                    {
+                        { "source", "explicit" },
+                        { "strict_loads", true },
+                        { "draw_in_cad", true },
+                        { "export_excel", true },
+                        { "excel_path", xl15c },
+                        { "zoom", false },
+                        { "nodes", new object[]
+                            {
+                                new Dictionary<string, object> { { "name", "RMU-1" }, { "kind", "rmu" } },
+                                new Dictionary<string, object> { { "name", "TX-1" }, { "kind", "transformer" }, { "parent", "RMU-1" }, { "feeder_length_m", 15.0 } },
+                                new Dictionary<string, object> { { "name", "MDB-1" }, { "kind", "mdb" }, { "parent", "TX-1" }, { "feeder_length_m", 12.0 } },
+                                new Dictionary<string, object> { { "name", "ATS-1" }, { "kind", "ats" }, { "parent", "MDB-1" }, { "feeder_length_m", 10.0 }, { "is_emergency", true } },
+                                new Dictionary<string, object> { { "name", "GEN-1" }, { "kind", "generator" }, { "parent", "ATS-1" }, { "feeder_length_m", 18.0 }, { "is_emergency", true } },
+                                new Dictionary<string, object> { { "name", "SMDB-1" }, { "kind", "smdb" }, { "parent", "MDB-1" }, { "feeder_length_m", 20.0 } },
+                                new Dictionary<string, object> { { "name", "DB-1" }, { "kind", "db" }, { "parent", "SMDB-1" }, { "feeder_length_m", 25.0 } },
+                                new Dictionary<string, object> { { "name", "FP-LAND-1" }, { "kind", "feeder_pillar" }, { "parent", "MDB-1" }, { "feeder_length_m", 65.0 }, { "load_kw", 18.0 }, { "is_landscape", true }, { "install_method", "buried" } }
+                            }
+                        }
+                    }
+                });
+                AssertTrue(GetBoolVal(r15c, "ok") && GetIntVal(r15c, "nodes_count") >= 6 &&
+                           GetIntVal(r15c, "landscape_feeders_count") >= 1 && GetDblVal(r15c, "transformer_kva") >= 100.0 &&
+                           GetDblVal(r15c, "generator_kva") > 0.0 && GetDblVal(r15c, "ats_rating_a") > 0.0 &&
+                           GetBoolVal(r15c, "drawn_in_cad") && GetIntVal(r15c, "cad_entities_created") > 0 &&
+                           GetBoolVal(r15c, "excel_exported") && File.Exists(xl15c),
+                    "Test 15C master distribution build failed");
+                execTool.Invoke(null, new object[] { doc, "undo_last_action", new Dictionary<string, object> { { "steps", 1 } } });
+                try { if (File.Exists(xl15c)) File.Delete(xl15c); } catch { }
+                ed.WriteMessage("\nTEST15C=OK|NODES=" + GetIntVal(r15c, "nodes_count") + "|TX_KVA=" + GetDblVal(r15c, "transformer_kva") + "|LAND=" + GetIntVal(r15c, "landscape_feeders_count") + "\n");
+
+                // TEST15D: DIALux missing-parameter preview & override + STF export verification
+                using (Transaction tr15d = db.TransactionManager.StartTransaction())
+                {
+                    LayerTable lt15 = (LayerTable)tr15d.GetObject(db.LayerTableId, OpenMode.ForRead);
+                    EnsureLayer(tr15d, lt15, "A-AREA", 3);
+                    BlockTable bt15 = (BlockTable)tr15d.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    ObjectId lumNewBtr = EnsureRectBlock(tr15d, bt15, "LUM_NEW", 0.30, 0.30, 2);
+                    BlockTableRecord ms15d = (BlockTableRecord)tr15d.GetObject(bt15[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+                    Polyline rmPl = new Polyline(4);
+                    rmPl.AddVertexAt(0, new Point2d(60.0, 0.0), 0, 0, 0);
+                    rmPl.AddVertexAt(1, new Point2d(66.0, 0.0), 0, 0, 0);
+                    rmPl.AddVertexAt(2, new Point2d(66.0, 5.0), 0, 0, 0);
+                    rmPl.AddVertexAt(3, new Point2d(60.0, 5.0), 0, 0, 0);
+                    rmPl.Closed = true;
+                    rmPl.Layer = "A-AREA";
+                    ms15d.AppendEntity(rmPl);
+                    tr15d.AddNewlyCreatedDBObject(rmPl, true);
+                    AddText(ms15d, tr15d, new Point3d(63.0, 2.5, 0), "Office 101", 0.25, "A-AREA");
+                    InsertBlock(ms15d, tr15d, lumNewBtr, new Point3d(62.0, 2.5, 0), "E-LIGHTING");
+                    tr15d.Commit();
+                }
+
+                string stf15d = Path.Combine(Path.GetTempPath(), "accore_dialux_15d.stf");
+                try { if (File.Exists(stf15d)) File.Delete(stf15d); } catch { }
+                Dictionary<string, object> r15dPrev = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "export_dialux_stf",
+                    new Dictionary<string, object> { { "preview_missing_only", true }, { "file_path", stf15d } }
+                });
+                Dictionary<string, object> miss15d = r15dPrev.ContainsKey("missing_parameters_summary") ? r15dPrev["missing_parameters_summary"] as Dictionary<string, object> : null;
+                AssertTrue(GetBoolVal(r15dPrev, "ok") && miss15d != null && GetIntVal(miss15d, "missing_count") >= 1,
+                    "Test 15D preview_missing_only expected missing_count >= 1");
+
+                Dictionary<string, object> r15dExp = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "export_dialux_stf",
+                    new Dictionary<string, object>
+                    {
+                        { "file_path", stf15d },
+                        { "save_to_project_db", true },
+                        { "room_overrides", new object[]
+                            {
+                                new Dictionary<string, object> { { "room_name", "Office 101" }, { "ceiling_height_m", 3.4 }, { "mounting_height_m", 3.4 }, { "workplane_m", 0.80 } }
+                            }
+                        },
+                        { "luminaire_overrides", new object[]
+                            {
+                                new Dictionary<string, object> { { "block_name", "LUM_NEW" }, { "watt", 40.0 }, { "lumens", 4200.0 } }
+                            }
+                        }
+                    }
+                });
+                AssertTrue(GetBoolVal(r15dExp, "ok") && File.Exists(stf15d), "Test 15D DIALux STF export failed");
+                string stfBody = File.ReadAllText(stf15d);
+                AssertTrue(stfBody.IndexOf("Height=3.400", StringComparison.Ordinal) >= 0 &&
+                           stfBody.IndexOf("[LUMINAIRE.L1]", StringComparison.Ordinal) >= 0 &&
+                           stfBody.IndexOf("Load=40", StringComparison.Ordinal) >= 0 &&
+                           stfBody.IndexOf("Flux=4200", StringComparison.Ordinal) >= 0,
+                    "Test 15D STF output missing overridden height/luminaire specs");
+                try { if (File.Exists(stf15d)) File.Delete(stf15d); } catch { }
+                ed.WriteMessage("\nTEST15D=OK|STF_OVERRIDES_SAVED\n");
+
+                // TEST15E: Verify DialuxWizardCommands exported in Context assembly
+                Type dialuxCmdType = execType.Assembly.GetType("AIEngineer.AutoCAD.DialuxWizardCommands");
+                AssertTrue(dialuxCmdType != null && dialuxCmdType.GetMethod("RunDialuxExportWizard") != null, "Test 15E missing AIENGDIALUX command class");
+                ed.WriteMessage("\nTEST15E=OK|AIENGDIALUX=PRESENT\n");
 
                 ed.WriteMessage("\nACCORE_REGRESSION_PASS\n");
             }

@@ -11,7 +11,9 @@ using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.Runtime;
 
+#if !PANEL_MFG_STANDALONE
 [assembly: CommandClass(typeof(AIEngineer.AutoCAD.DrawingExecutionCommands))]
+#endif
 
 namespace AIEngineer.AutoCAD
 {
@@ -160,6 +162,7 @@ namespace AIEngineer.AutoCAD
             }
         }
 
+#if !PANEL_MFG_STANDALONE
         [CommandMethod("AIENGDRAWHOUSE", CommandFlags.Session)]
         [CommandMethod("AIENGDRAW150", CommandFlags.Session)]
         public void DrawHouseCommand()
@@ -215,6 +218,7 @@ namespace AIEngineer.AutoCAD
                 doc.Editor.WriteMessage("\n[AI-Engineer] تعذر رسم التوزيع الكهربائي: " + error + "\n");
             }
         }
+#endif
 
         public static bool DrawElectricalDistribution(Document doc, out string errorMessage)
         {

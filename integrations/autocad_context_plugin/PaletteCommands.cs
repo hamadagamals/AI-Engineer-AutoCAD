@@ -650,21 +650,28 @@ namespace AIEngineer.AutoCAD
 
     internal sealed class CopilotPaletteControl : UserControl
     {
+        private readonly Panel _headerAccent = new Panel();
+        private readonly Panel _headerPanel = new Panel();
+        private readonly Label _headerTitle = new Label();
+        private readonly Label _headerBadge = new Label();
+        private readonly Panel _configCard = new Panel();
+        private readonly Panel _transcriptCard = new Panel();
+        private readonly Panel _composerCard = new Panel();
         private readonly ComboBox _language = new ComboBox();
         private readonly ComboBox _providerCombo = new ComboBox();
         private readonly ComboBox _modelCombo = new ComboBox();
         private readonly Button _apiSettings = new Button();
-        private readonly Label _coordSortLabel = new Label();
-        private readonly ComboBox _coordSortCombo = new ComboBox();
-        private readonly FlowLayoutPanel _sortRow = new FlowLayoutPanel();
-        private readonly FlowLayoutPanel _quickBar = new FlowLayoutPanel();
-        private readonly Button _qVisual = new Button();
-        private readonly Button _qLighting = new Button();
-        private readonly Button _qTakeoff = new Button();
-        private readonly Button _qLvCalc = new Button();
-        private readonly Button _qLegend = new Button();
-        private readonly Button _qLoads = new Button();
-        private readonly Button _qQa = new Button();
+        private readonly Label _presetLabel = new Label();
+        private readonly ComboBox _commandPresetCombo = new ComboBox();
+        private readonly FlowLayoutPanel _presetRow = new FlowLayoutPanel();
+        private readonly FlowLayoutPanel _inventoryBar = new FlowLayoutPanel();
+        private readonly Label _invStatusLabel = new Label();
+        private readonly Button _invOk = new Button();
+        private readonly Button _invAdd = new Button();
+        private readonly Button _invRemove = new Button();
+        private readonly Button _invRefresh = new Button();
+        private readonly Button _invSkip = new Button();
+        private readonly Button _invStop = new Button();
         private readonly Label _context = new Label();
         private readonly Label _uncertainty = new Label();
         private readonly TextBox _transcript = new TextBox();
@@ -692,6 +699,7 @@ namespace AIEngineer.AutoCAD
         private readonly System.Windows.Forms.Timer _voiceTimer = new System.Windows.Forms.Timer();
         private bool _voiceTranscribing;
         private bool _suppressProviderEvents;
+        private bool _suppressPresetEvents;
         private string _sessionId;
         private string _ownerKey;
         private string _pendingReviewId;
@@ -726,36 +734,85 @@ namespace AIEngineer.AutoCAD
         private void BuildLayout()
         {
             Dock = DockStyle.Fill;
-            Padding = new Padding(8);
+            Padding = new Padding(8, 6, 8, 6);
             TableLayoutPanel layout = new TableLayoutPanel();
             layout.Dock = DockStyle.Fill;
             layout.ColumnCount = 1;
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            layout.RowCount = 11;
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowCount = 6;
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 0: _headerPanel
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 1: _configCard
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // 2: _transcriptCard
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 3: _inventoryBar
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 4: _composerCard
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 5: _status
+
+            // Branded Header Panel
+            _headerAccent.Dock = DockStyle.Top;
+            _headerAccent.Height = 3;
+
+            _headerTitle.Text = "⚡ AI-Engineer Pro";
+            _headerTitle.AutoSize = true;
+            _headerTitle.Margin = new Padding(2, 4, 6, 2);
+            try { _headerTitle.Font = new Font("Segoe UI", 10F, FontStyle.Bold); } catch { }
+
+            _headerBadge.Text = "● READY";
+            _headerBadge.AutoSize = true;
+            _headerBadge.Padding = new Padding(6, 2, 6, 2);
+            _headerBadge.Margin = new Padding(2, 4, 6, 2);
+            try { _headerBadge.Font = new Font("Segoe UI", 7.5F, FontStyle.Bold); } catch { }
 
             _language.DropDownStyle = ComboBoxStyle.DropDownList;
             _language.Width = 68;
-            _language.DropDownWidth = 96;
+            _language.DropDownWidth = 92;
             _language.Margin = new Padding(2);
             _language.Items.Add("العربية");
             _language.Items.Add("English");
             _language.SelectedIndex = 0;
             _language.SelectedIndexChanged += delegate { ApplyLanguage(); };
 
+            _apiSettings.Text = "🔑 API";
+            _apiSettings.AutoSize = true;
+            _apiSettings.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _apiSettings.Margin = new Padding(2);
+            _apiSettings.Padding = new Padding(5, 2, 5, 2);
+            _apiSettings.Click += delegate
+            {
+                using (ApiKeysDialog dlg = new ApiKeysDialog(_directConfig, IsArabic))
+                {
+                    if (dlg.ShowDialog(this) == DialogResult.OK)
+                    {
+                        _directConfig = DirectAiConfig.Load();
+                        SyncProviderModelUi();
+                        RefreshContext();
+                        UpdateActionState();
+                    }
+                }
+            };
+
+            FlowLayoutPanel headerFlow = new FlowLayoutPanel();
+            headerFlow.Dock = DockStyle.Fill;
+            headerFlow.AutoSize = true;
+            headerFlow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            headerFlow.WrapContents = true;
+            headerFlow.Padding = new Padding(6, 4, 6, 4);
+            headerFlow.Controls.Add(_headerTitle);
+            headerFlow.Controls.Add(_headerBadge);
+            headerFlow.Controls.Add(_language);
+            headerFlow.Controls.Add(_apiSettings);
+            headerFlow.Controls.Add(_refresh);
+
+            _headerPanel.Dock = DockStyle.Fill;
+            _headerPanel.AutoSize = true;
+            _headerPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _headerPanel.Margin = new Padding(0, 0, 0, 4);
+            _headerPanel.Controls.Add(headerFlow);
+            _headerPanel.Controls.Add(_headerAccent);
+
+            // Connection & Drawing Context Card
             _providerCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            _providerCombo.Width = 176;
-            _providerCombo.DropDownWidth = 225;
+            _providerCombo.Width = 165;
+            _providerCombo.DropDownWidth = 220;
             _providerCombo.Margin = new Padding(2);
             _providerCombo.Items.Add("Gemini Direct (API)");
             _providerCombo.Items.Add("Claude Direct (API)");
@@ -772,7 +829,7 @@ namespace AIEngineer.AutoCAD
             };
 
             _modelCombo.DropDownStyle = ComboBoxStyle.DropDown;
-            _modelCombo.Width = 176;
+            _modelCombo.Width = 175;
             _modelCombo.DropDownWidth = 235;
             _modelCombo.Margin = new Padding(2);
             _modelCombo.Leave += delegate
@@ -784,82 +841,76 @@ namespace AIEngineer.AutoCAD
                 }
             };
 
-            _apiSettings.Text = "🔑 API";
-            _apiSettings.AutoSize = true;
-            _apiSettings.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            _apiSettings.Margin = new Padding(2);
-            _apiSettings.Padding = new Padding(4, 2, 4, 2);
-            _apiSettings.Click += delegate
-            {
-                using (ApiKeysDialog dlg = new ApiKeysDialog(_directConfig, IsArabic))
-                {
-                    if (dlg.ShowDialog(this) == DialogResult.OK)
-                    {
-                        _directConfig = DirectAiConfig.Load();
-                        SyncProviderModelUi();
-                        RefreshContext();
-                        UpdateActionState();
-                    }
-                }
-            };
-
-            FlowLayoutPanel topRow = new FlowLayoutPanel();
-            topRow.Dock = DockStyle.Fill;
-            topRow.AutoSize = true;
-            topRow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            topRow.WrapContents = true;
-            topRow.MaximumSize = new Size(220, 0);
-            topRow.Margin = new Padding(0, 2, 0, 2);
-            topRow.Controls.Add(_providerCombo);
-            topRow.Controls.Add(_language);
-
-            FlowLayoutPanel modelRow = new FlowLayoutPanel();
-            modelRow.Dock = DockStyle.Fill;
-            modelRow.AutoSize = true;
-            modelRow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            modelRow.WrapContents = true;
-            modelRow.MaximumSize = new Size(220, 0);
-            modelRow.Margin = new Padding(0, 2, 0, 2);
-            modelRow.Controls.Add(_modelCombo);
-            modelRow.Controls.Add(_apiSettings);
-
-            _coordSortLabel.AutoSize = true;
-            _coordSortLabel.Margin = new Padding(2, 5, 2, 2);
-            _coordSortCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            _coordSortCombo.Width = 158;
-            _coordSortCombo.DropDownWidth = 225;
-            _coordSortCombo.Margin = new Padding(2);
-            _coordSortCombo.SelectedIndexChanged += delegate
-            {
-                if (_suppressProviderEvents) return;
-                _directConfig.PreferredCoordSortOrder = IndexToSortOrder(_coordSortCombo.SelectedIndex);
-                _directConfig.Save();
-                SetStatus((IsArabic ? "اتجاه ترقيم الإحداثيات: " : "Coordinate numbering order: ") +
-                          DirectAiConfig.DescribeSortOrderPref(_directConfig.PreferredCoordSortOrder, IsArabic));
-            };
-
-            _sortRow.Dock = DockStyle.Fill;
-            _sortRow.AutoSize = true;
-            _sortRow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            _sortRow.WrapContents = true;
-            _sortRow.MaximumSize = new Size(220, 0);
-            _sortRow.Margin = new Padding(0, 1, 0, 2);
-            _sortRow.Controls.Add(_coordSortLabel);
-            _sortRow.Controls.Add(_coordSortCombo);
-
             _context.AutoSize = true;
-            _context.MaximumSize = new Size(260, 0);
+            _context.MaximumSize = new Size(340, 0);
+            _context.Margin = new Padding(2, 3, 2, 1);
             _uncertainty.AutoSize = true;
-            _uncertainty.MaximumSize = new Size(260, 0);
+            _uncertainty.MaximumSize = new Size(340, 0);
+            _uncertainty.Margin = new Padding(2, 1, 2, 2);
             _uncertainty.ForeColor = Color.DarkOrange;
+
+            FlowLayoutPanel configProvidersRow = new FlowLayoutPanel();
+            configProvidersRow.Dock = DockStyle.Top;
+            configProvidersRow.AutoSize = true;
+            configProvidersRow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            configProvidersRow.WrapContents = true;
+            configProvidersRow.Margin = new Padding(0);
+            configProvidersRow.Controls.Add(_providerCombo);
+            configProvidersRow.Controls.Add(_modelCombo);
+
+            FlowLayoutPanel contextButtons = new FlowLayoutPanel();
+            contextButtons.Dock = DockStyle.Top;
+            contextButtons.AutoSize = true;
+            contextButtons.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            contextButtons.WrapContents = true;
+            contextButtons.Margin = new Padding(0, 2, 0, 0);
+            contextButtons.Controls.Add(_start);
+            contextButtons.Controls.Add(_includeDrawingContext);
+
+            TableLayoutPanel configStack = new TableLayoutPanel();
+            configStack.Dock = DockStyle.Fill;
+            configStack.AutoSize = true;
+            configStack.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            configStack.ColumnCount = 1;
+            configStack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            configStack.RowCount = 4;
+            configStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            configStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            configStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            configStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            configStack.Controls.Add(configProvidersRow, 0, 0);
+            configStack.Controls.Add(_context, 0, 1);
+            configStack.Controls.Add(_uncertainty, 0, 2);
+            configStack.Controls.Add(contextButtons, 0, 3);
+
+            _configCard.Dock = DockStyle.Fill;
+            _configCard.AutoSize = true;
+            _configCard.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _configCard.Padding = new Padding(7, 5, 7, 5);
+            _configCard.Margin = new Padding(0, 0, 0, 5);
+            _configCard.Controls.Add(configStack);
+
+            // Transcript Card
             _transcript.Dock = DockStyle.Fill;
             _transcript.Multiline = true;
             _transcript.ReadOnly = true;
             _transcript.ScrollBars = ScrollBars.Vertical;
+            _transcript.BorderStyle = BorderStyle.None;
+            try { _transcript.Font = new Font("Segoe UI", 9.5F, FontStyle.Regular); } catch { }
+
+            _transcriptCard.Dock = DockStyle.Fill;
+            _transcriptCard.Padding = new Padding(6);
+            _transcriptCard.Margin = new Padding(0, 0, 0, 5);
+            _transcriptCard.Controls.Add(_transcript);
+
+            // Message Input & Actions
             _message.Dock = DockStyle.Fill;
             _message.Multiline = true;
             _message.MaxLength = 16384;
+            _message.Height = 72;
             _message.ScrollBars = ScrollBars.Vertical;
+            _message.Margin = new Padding(0, 4, 0, 4);
+            try { _message.Font = new Font("Segoe UI", 9.5F, FontStyle.Regular); } catch { }
             _message.KeyDown += async delegate(object sender, KeyEventArgs e)
             {
                 if (e.KeyCode == Keys.Enter && !e.Shift && !e.Control)
@@ -869,7 +920,8 @@ namespace AIEngineer.AutoCAD
                 }
             };
             _status.AutoSize = true;
-            _status.MaximumSize = new Size(260, 0);
+            _status.MaximumSize = new Size(340, 0);
+            _status.Margin = new Padding(2, 3, 2, 0);
 
             Button[] compactButtons = new Button[] { _refresh, _start, _send, _voiceMic, _commitDrawing, _rollbackDrawing, _cancel };
             foreach (Button btn in compactButtons)
@@ -877,12 +929,14 @@ namespace AIEngineer.AutoCAD
                 btn.AutoSize = true;
                 btn.AutoSizeMode = AutoSizeMode.GrowAndShrink;
                 btn.Margin = new Padding(2);
-                btn.Padding = new Padding(4, 2, 4, 2);
+                btn.Padding = new Padding(6, 3, 6, 3);
+                btn.FlatStyle = FlatStyle.Flat;
+                btn.Cursor = Cursors.Hand;
             }
             _includeDrawingContext.AutoSize = true;
             _includeDrawingContext.Margin = new Padding(2);
             _voiceAutoSend.AutoSize = true;
-            _voiceAutoSend.Margin = new Padding(4, 5, 2, 2);
+            _voiceAutoSend.Margin = new Padding(2, 3, 8, 1);
             _voiceAutoSend.Checked = _directConfig != null ? _directConfig.VoiceAutoSend : true;
             _voiceAutoSend.CheckedChanged += delegate
             {
@@ -891,7 +945,7 @@ namespace AIEngineer.AutoCAD
                 _directConfig.Save();
             };
             _voiceSpeakReply.AutoSize = true;
-            _voiceSpeakReply.Margin = new Padding(4, 5, 2, 2);
+            _voiceSpeakReply.Margin = new Padding(2, 3, 6, 1);
             _voiceSpeakReply.Checked = _directConfig != null ? _directConfig.VoiceSpeakReplies : true;
             _voiceSpeakReply.CheckedChanged += delegate
             {
@@ -901,7 +955,7 @@ namespace AIEngineer.AutoCAD
                 if (!_voiceSpeakReply.Checked) VoiceSpeechOutput.Stop();
             };
             _attachVisualSelection.AutoSize = true;
-            _attachVisualSelection.Margin = new Padding(4, 5, 2, 2);
+            _attachVisualSelection.Margin = new Padding(4, 5, 4, 2);
             _attachVisualSelection.Checked = false;
             _voiceTimer.Interval = 300;
             _voiceTimer.Tick += async delegate
@@ -920,15 +974,6 @@ namespace AIEngineer.AutoCAD
                 }
             };
 
-            FlowLayoutPanel contextButtons = new FlowLayoutPanel();
-            contextButtons.Dock = DockStyle.Fill;
-            contextButtons.AutoSize = true;
-            contextButtons.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            contextButtons.WrapContents = true;
-            contextButtons.Margin = new Padding(0, 2, 0, 2);
-            contextButtons.Controls.Add(_refresh);
-            contextButtons.Controls.Add(_start);
-            contextButtons.Controls.Add(_includeDrawingContext);
             FlowLayoutPanel actionButtons = new FlowLayoutPanel();
             actionButtons.Dock = DockStyle.Fill;
             actionButtons.AutoSize = true;
@@ -937,111 +982,130 @@ namespace AIEngineer.AutoCAD
             actionButtons.Margin = new Padding(0, 2, 0, 2);
             actionButtons.Controls.Add(_send);
             actionButtons.Controls.Add(_voiceMic);
-            actionButtons.Controls.Add(_voiceAutoSend);
-            actionButtons.Controls.Add(_voiceSpeakReply);
             actionButtons.Controls.Add(_attachVisualSelection);
             actionButtons.Controls.Add(_commitDrawing);
             actionButtons.Controls.Add(_rollbackDrawing);
             actionButtons.Controls.Add(_cancel);
 
-            _quickBar.Dock = DockStyle.Fill;
-            _quickBar.AutoSize = true;
-            _quickBar.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            _quickBar.WrapContents = true;
-            _quickBar.Margin = new Padding(0, 3, 0, 2);
-            Button[] quickButtons = new Button[] { _qVisual, _qLighting, _qTakeoff, _qLvCalc, _qLegend, _qLoads, _qQa };
-            foreach (Button qb in quickButtons)
+            FlowLayoutPanel voiceFooterRow = new FlowLayoutPanel();
+            voiceFooterRow.Dock = DockStyle.Fill;
+            voiceFooterRow.AutoSize = true;
+            voiceFooterRow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            voiceFooterRow.WrapContents = true;
+            voiceFooterRow.Margin = new Padding(0, 2, 0, 0);
+            voiceFooterRow.Controls.Add(_voiceAutoSend);
+            voiceFooterRow.Controls.Add(_voiceSpeakReply);
+
+            _inventoryBar.Dock = DockStyle.Fill;
+            _inventoryBar.AutoSize = true;
+            _inventoryBar.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _inventoryBar.WrapContents = true;
+            _inventoryBar.Padding = new Padding(6, 4, 6, 4);
+            _inventoryBar.Margin = new Padding(0, 0, 0, 5);
+            _inventoryBar.Visible = false;
+            _invStatusLabel.AutoSize = true;
+            _invStatusLabel.Margin = new Padding(2, 5, 6, 2);
+            _inventoryBar.Controls.Add(_invStatusLabel);
+            Button[] invButtons = new Button[] { _invOk, _invAdd, _invRemove, _invRefresh, _invSkip, _invStop };
+            foreach (Button ib in invButtons)
             {
-                qb.AutoSize = true;
-                qb.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-                qb.Margin = new Padding(2);
-                qb.Padding = new Padding(5, 2, 5, 2);
-                qb.FlatStyle = FlatStyle.Flat;
-                qb.Cursor = Cursors.Hand;
-                _quickBar.Controls.Add(qb);
+                ib.AutoSize = true;
+                ib.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                ib.Margin = new Padding(2);
+                ib.Padding = new Padding(5, 2, 5, 2);
+                ib.FlatStyle = FlatStyle.Flat;
+                ib.Cursor = Cursors.Hand;
+                _inventoryBar.Controls.Add(ib);
             }
-            _qVisual.Click += delegate
+            _invOk.Click += delegate { RunGuidedInventoryBarAction("approve_next"); };
+            _invAdd.Click += delegate { RunGuidedInventoryBarAction("add_selection"); };
+            _invRemove.Click += delegate { RunGuidedInventoryBarAction("remove_selection"); };
+            _invRefresh.Click += delegate { RunGuidedInventoryBarAction("refresh"); };
+            _invSkip.Click += delegate { RunGuidedInventoryBarAction("skip"); };
+            _invStop.Click += delegate { RunGuidedInventoryBarAction("stop"); };
+
+            _presetLabel.AutoSize = true;
+            _presetLabel.Margin = new Padding(2, 5, 4, 2);
+            _commandPresetCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            _commandPresetCombo.Width = 240;
+            _commandPresetCombo.DropDownWidth = 340;
+            _commandPresetCombo.Margin = new Padding(2);
+            _commandPresetCombo.SelectedIndexChanged += delegate
             {
-                _attachVisualSelection.Checked = true;
-                InsertEditablePrompt(
-                    "شوف الجزء اللي أنا محدده بصرياً وحلله بدقة (ولو ليجند استخرج مواصفات وقدرات كل بلوك واحفظها في قاعدة البيانات)",
-                    "Visually inspect my selected CAD area and analyze it accurately (if it's a Legend, extract every block's specs/wattage and save to Project DB)");
+                if (_suppressPresetEvents || _suppressProviderEvents) return;
+                int selIdx = _commandPresetCombo.SelectedIndex;
+                if (selIdx <= 0 || selIdx > CommandPresetRows.Length) return;
+                string[] row = CommandPresetRows[selIdx - 1];
+                if (row[4] == "1") _attachVisualSelection.Checked = true;
+                InsertEditablePrompt(row[2], row[3]);
+                _suppressPresetEvents = true;
+                try { _commandPresetCombo.SelectedIndex = 0; }
+                finally { _suppressPresetEvents = false; }
             };
-            _qLighting.Click += delegate
-            {
-                InsertEditablePrompt(
-                    "وزّع الإنارة في الغرف حسب الكود المصري (ECP) واحسب اللكس وصدّر الجدول لإكسيل",
-                    "Distribute lighting in closed rooms per ECP standard, calculate Lux, and export schedule to Excel");
-            };
-            _qTakeoff.Click += delegate
-            {
-                InsertEditablePrompt(
-                    "احسب حصر الكميات (أطوال المسارات حسب الطبقة ومساحات الغرف وأعداد البلوكات) مع هالك 10% وصدّر لإكسيل",
-                    "Run full BOQ quantity takeoff (cable lengths by layer, room areas, block counts) with 10% waste and export to Excel");
-            };
-            _qLvCalc.Click += delegate
-            {
-                InsertEditablePrompt(
-                    "احسب الكابل والقاطع وهبوط الجهد وقصر الدائرة لحمل 3 فاز 25 ك.وات طول 45 متر نحاس XLPE عند 40 درجة وارسم الجدول وصدّر لإكسيل",
-                    "Calculate LV cable size, breaker rating, voltage drop, PE, and short-circuit for 3-phase 25 kW load, 45m Cu/XLPE at 40C, draw table and export to Excel");
-            };
-            _qLegend.Click += delegate
-            {
-                InsertEditablePrompt(
-                    "اعمل جدول مفاتيح البلوكات (Legend) خارج حدود الرسم مع صورة كل بلوك والوصف والعدد",
-                    "Draw a formatted Block Legend outside the drawing bounds with thumbnails, descriptions, and counts");
-            };
-            _qLoads.Click += delegate
-            {
-                InsertEditablePrompt(
-                    "استخرج جدول الأحمال الكهربائية من بلوكات اللوحة مع تتبع مسارات التغذية وصدّره لإكسيل",
-                    "Extract the electrical panel load schedule from circuit blocks with feeder lengths and export to Excel");
-            };
-            _qQa.Click += delegate
-            {
-                InsertEditablePrompt(
-                    "افحص اللوحة واحذف البلوكات المكررة والخطوط المتراكبة ونظّف الرسم بالكامل",
-                    "Run QA/QC cleanup: audit duplicate blocks, overkill overlapping lines, and purge unused definitions");
-            };
+
+            _presetRow.Dock = DockStyle.Fill;
+            _presetRow.AutoSize = true;
+            _presetRow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _presetRow.WrapContents = true;
+            _presetRow.Margin = new Padding(0);
+            _presetRow.Controls.Add(_presetLabel);
+            _presetRow.Controls.Add(_commandPresetCombo);
+
+            TableLayoutPanel composerStack = new TableLayoutPanel();
+            composerStack.Dock = DockStyle.Fill;
+            composerStack.AutoSize = true;
+            composerStack.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            composerStack.ColumnCount = 1;
+            composerStack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            composerStack.RowCount = 4;
+            composerStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            composerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 74));
+            composerStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            composerStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            composerStack.Controls.Add(_presetRow, 0, 0);
+            composerStack.Controls.Add(_message, 0, 1);
+            composerStack.Controls.Add(actionButtons, 0, 2);
+            composerStack.Controls.Add(voiceFooterRow, 0, 3);
+
+            _composerCard.Dock = DockStyle.Fill;
+            _composerCard.AutoSize = true;
+            _composerCard.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _composerCard.Padding = new Padding(7, 6, 7, 6);
+            _composerCard.Margin = new Padding(0, 0, 0, 2);
+            _composerCard.Controls.Add(composerStack);
 
             layout.SizeChanged += delegate
             {
-                int clientW = Math.Max(160, layout.ClientSize.Width);
-                int wrapW = Math.Max(160, clientW - 10);
+                int clientW = Math.Max(220, layout.ClientSize.Width);
+                int wrapW = Math.Max(200, clientW - 18);
                 Size maxSz = new Size(wrapW, 0);
-                Size rowMaxSz = new Size(Math.Max(160, clientW - 4), 0);
-                topRow.MaximumSize = rowMaxSz;
-                modelRow.MaximumSize = rowMaxSz;
-                _sortRow.MaximumSize = rowMaxSz;
-                _quickBar.MaximumSize = rowMaxSz;
+                Size rowMaxSz = new Size(Math.Max(200, clientW - 10), 0);
+                headerFlow.MaximumSize = rowMaxSz;
+                configProvidersRow.MaximumSize = rowMaxSz;
+                _inventoryBar.MaximumSize = rowMaxSz;
+                _presetRow.MaximumSize = rowMaxSz;
                 contextButtons.MaximumSize = rowMaxSz;
                 actionButtons.MaximumSize = rowMaxSz;
-                int singleComboW = Math.Min(215, Math.Max(168, wrapW - 4));
-                _providerCombo.Width = (wrapW >= 254) ? 176 : singleComboW;
-                int apiPrefW = (_apiSettings.PreferredSize.Width > 0 ? _apiSettings.PreferredSize.Width : _apiSettings.Width) + 8;
-                _modelCombo.Width = (wrapW - apiPrefW >= 168)
-                    ? Math.Min(215, wrapW - apiPrefW)
-                    : singleComboW;
-                int sortLblPrefW = (_coordSortLabel.PreferredSize.Width > 0 ? _coordSortLabel.PreferredSize.Width : 38) + 8;
-                _coordSortCombo.Width = (wrapW - sortLblPrefW >= 145)
-                    ? Math.Min(215, wrapW - sortLblPrefW)
-                    : singleComboW;
+                voiceFooterRow.MaximumSize = rowMaxSz;
+                int halfW = Math.Max(135, (wrapW - 10) / 2);
+                _providerCombo.Width = Math.Min(210, halfW);
+                _modelCombo.Width = Math.Min(230, halfW);
+                int presetLblPrefW = (_presetLabel.PreferredSize.Width > 0 ? _presetLabel.PreferredSize.Width : 92) + 10;
+                _commandPresetCombo.Width = (wrapW - presetLblPrefW >= 145)
+                    ? Math.Min(360, wrapW - presetLblPrefW)
+                    : Math.Max(155, wrapW - 6);
+                _invStatusLabel.MaximumSize = maxSz;
                 _context.MaximumSize = maxSz;
                 _uncertainty.MaximumSize = maxSz;
                 _status.MaximumSize = maxSz;
             };
 
-            layout.Controls.Add(topRow, 0, 0);
-            layout.Controls.Add(modelRow, 0, 1);
-            layout.Controls.Add(_sortRow, 0, 2);
-            layout.Controls.Add(_context, 0, 3);
-            layout.Controls.Add(_uncertainty, 0, 4);
-            layout.Controls.Add(contextButtons, 0, 5);
-            layout.Controls.Add(_transcript, 0, 6);
-            layout.Controls.Add(_quickBar, 0, 7);
-            layout.Controls.Add(_message, 0, 8);
-            layout.Controls.Add(actionButtons, 0, 9);
-            layout.Controls.Add(_status, 0, 10);
+            layout.Controls.Add(_headerPanel, 0, 0);
+            layout.Controls.Add(_configCard, 0, 1);
+            layout.Controls.Add(_transcriptCard, 0, 2);
+            layout.Controls.Add(_inventoryBar, 0, 3);
+            layout.Controls.Add(_composerCard, 0, 4);
+            layout.Controls.Add(_status, 0, 5);
             Controls.Add(layout);
             ApplyModernDarkTheme();
 
@@ -1122,6 +1186,22 @@ namespace AIEngineer.AutoCAD
 
         private string SelectedModel { get { return (_modelCombo.Text ?? "").Trim(); } }
 
+        private static readonly string[][] CommandPresetRows = new string[][]
+        {
+            new string[] { "📋 جرد اللينيات التفاعلي (إنارة أولاً)", "📋 Guided Inventory (Lighting First)", "ابدأ جرد اللينيات التفاعلي لمخطط الإنارة لوحة بلوحة ولينيا بلينيا وانتظر موافقتي على كل لينيا", "Start guided circuit inventory for Lighting plan panel-by-panel and wait for my approval on each circuit", "0" },
+            new string[] { "⚡ جرد لينيات الباور ودمجها مع الإنارة", "⚡ Guided Power Inventory & Merge", "ابدأ جرد لينيات الباور وادمجها مع لينيات الإنارة المحفوظة لكل لوحة بالترتيب الرقمي", "Start guided circuit inventory for Power plan and merge circuits numerically with saved Lighting circuits per panel", "0" },
+            new string[] { "🔁 استدعاء وتعديل لينية محفوظة بالاسم", "🔁 Recall & Edit Saved Circuit", "استدعي اللينيا المحفوظة (...) للتعديل مع استرجاعها عبر XData حتى لو اتعمل لها Copy", "Recall saved circuit (...) for interactive editing (with XData recovery if copied)", "0" },
+            new string[] { "🔍 فحص لينيا عشوائية محددة الآن", "🔍 Inspect Random Selected Circuit", "افحص اللينيا المحددة حالياً في الرسم واستخرج بياناتها وقدرتها من جدول الـ Legend بدون افتراض قيم", "Inspect the currently selected circuit in AutoCAD and extract its data and verified Legend DB load without assumptions", "0" },
+            new string[] { "📑 استخراج وحفظ قدرات الـ Legend", "📑 Extract & Save Legend Specs", "استخرج كل بلوكات وقدرات جدول الـ Legend المحدد بصرياً واحفظها في قاعدة بيانات المشروع، واسألني عن أي بلوك غير واضح", "Extract all blocks and Watt/VA specs from the selected Legend table visually and save to Project DB, asking me for any unclear block", "1" },
+            new string[] { "🔎 فحص التغطية واللينيات الناقصة", "🔎 Coverage & Missing Circuit Gaps Audit", "اعمل فحص تغطية للمخطط وكشف الكشافات غير المجرودة وأرقام اللينيات الناقصة في كل لوحة", "Run drawing coverage audit to highlight un-inventoried orphan fixtures and report missing circuit numbers per panel", "0" },
+            new string[] { "📊 جدول اللوحات المدمج + SLD + Excel", "📊 Merged Panel Schedule + SLD + Excel", "أنشئ جدول اللوحات المدمج (إنارة + باور بالترتيب الرقمي) والمخطط الأحادي SLD وصدره لملف Excel من اللينيات المعتمدة", "Generate merged Lighting+Power Panel Schedule, SLD, and Excel workbook from approved circuits in numeric order", "0" },
+            new string[] { "🔌 مسار الكابلات + SLD + حسابات المشروع", "🔌 Cable Routing, Master SLD & Landscape", "حلل مسارات الكابلات الرئيسية والـ Landscape وارسم الـ Master SLD واحسب المحول وATS والقواطع وهبوط الجهد وتيار القصر مع التصدير لإكسيل", "Analyze cable routing & Landscape feeders, draw Master SLD, size Transformer/ATS/breakers/cables/VD/Isc, and export Excel", "0" },
+            new string[] { "💡 معالج تصدير DIALux (جدول الارتفاعات والناقص)", "💡 DIALux Export Wizard (Heights & Specs)", "افحص الغرف والكشافات لتصدير DIALux وأظهر جدول الارتفاعات والبنود الناقصة (مع القيم الافتراضية للتعديل) ثم صدّر .stf", "Inspect rooms & luminaires for DIALux, show missing heights/IES defaults to edit, and export .stf", "0" },
+            new string[] { "👁️ فحص بصري للجزء المحدد", "👁️ Visual Inspection of Selection", "شوف الجزء المحدد بصرياً واشرح لي محتواه والبلوكات الموجودة فيه بدقة", "Visually inspect my selected CAD area and explain its exact entities and block names accurately", "1" },
+            new string[] { "🧮 حساب الكابل والقاطع وهبوط الجهد", "🧮 LV Cable, Breaker & VD Calculation", "احسب الكابل والقاطع وهبوط الجهد لدائرة قدرة (...) وات طول (...) متر (عدّل القيم هنا)", "Calculate LV cable size, breaker rating, and voltage drop for circuit load (...) W, length (...) m (edit values here)", "0" },
+            new string[] { "🧹 فحص وتنظيف المخطط QA/QC", "🧹 Drawing QA/QC Audit & Cleanup", "افحص المخطط واكشف البلوكات المكررة والخطوط المتراكبة والأخطاء الهندسية", "Audit the drawing for duplicate blocks, overlapping lines, and electrical QA/QC issues", "0" }
+        };
+
         private void SyncProviderModelUi()
         {
             _suppressProviderEvents = true;
@@ -1133,7 +1213,7 @@ namespace AIEngineer.AutoCAD
                 else if (p == DirectAiConfig.ProviderLocal) _providerCombo.SelectedIndex = 3;
                 else _providerCombo.SelectedIndex = 0;
                 PopulateModelPresets();
-                PopulateSortOrderCombo();
+                PopulateCommandPresets();
             }
             finally
             {
@@ -1141,56 +1221,26 @@ namespace AIEngineer.AutoCAD
             }
         }
 
-        private static string IndexToSortOrder(int index)
+        private void PopulateCommandPresets()
         {
-            if (index == 1) return DirectAiConfig.SortOrderLeftToRight;
-            if (index == 2) return DirectAiConfig.SortOrderRightToLeft;
-            if (index == 3) return DirectAiConfig.SortOrderTopToBottom;
-            if (index == 4) return DirectAiConfig.SortOrderBottomToTop;
-            return DirectAiConfig.SortOrderAsk;
-        }
-
-        private static int SortOrderToIndex(string sortOrder)
-        {
-            string norm = DirectAiConfig.NormalizeSortOrderPref(sortOrder);
-            if (norm == DirectAiConfig.SortOrderLeftToRight) return 1;
-            if (norm == DirectAiConfig.SortOrderRightToLeft) return 2;
-            if (norm == DirectAiConfig.SortOrderTopToBottom) return 3;
-            if (norm == DirectAiConfig.SortOrderBottomToTop) return 4;
-            return 0;
-        }
-
-        private void PopulateSortOrderCombo()
-        {
-            bool prevSuppress = _suppressProviderEvents;
-            _suppressProviderEvents = true;
+            bool prevSuppress = _suppressPresetEvents;
+            _suppressPresetEvents = true;
             try
             {
-                int targetIdx = SortOrderToIndex(_directConfig != null ? _directConfig.PreferredCoordSortOrder : DirectAiConfig.SortOrderAsk);
-                _coordSortLabel.Text = IsArabic ? "الترقيم:" : "Order:";
-                _coordSortCombo.Items.Clear();
-                if (IsArabic)
+                _presetLabel.Text = IsArabic ? "اختصارات الأوامر:" : "Quick Commands:";
+                _commandPresetCombo.Items.Clear();
+                _commandPresetCombo.Items.Add(IsArabic
+                    ? "— اختر وظيفة لإدراج أمر قابل للتعديل —"
+                    : "— Pick a command draft to edit —");
+                for (int i = 0; i < CommandPresetRows.Length; i++)
                 {
-                    _coordSortCombo.Items.Add("حسب الشات (اسألني)");
-                    _coordSortCombo.Items.Add("من الشمال لليمين (L → R)");
-                    _coordSortCombo.Items.Add("من اليمين للشمال (R → L)");
-                    _coordSortCombo.Items.Add("من فوق لتحت (T → B)");
-                    _coordSortCombo.Items.Add("من تحت لفوق (B → T)");
+                    _commandPresetCombo.Items.Add(IsArabic ? CommandPresetRows[i][0] : CommandPresetRows[i][1]);
                 }
-                else
-                {
-                    _coordSortCombo.Items.Add("Per chat (Ask me)");
-                    _coordSortCombo.Items.Add("Left to Right (L → R)");
-                    _coordSortCombo.Items.Add("Right to Left (R → L)");
-                    _coordSortCombo.Items.Add("Top to Bottom (T → B)");
-                    _coordSortCombo.Items.Add("Bottom to Top (B → T)");
-                }
-                if (targetIdx < 0 || targetIdx >= _coordSortCombo.Items.Count) targetIdx = 0;
-                _coordSortCombo.SelectedIndex = targetIdx;
+                _commandPresetCombo.SelectedIndex = 0;
             }
             finally
             {
-                _suppressProviderEvents = prevSuppress;
+                _suppressPresetEvents = prevSuppress;
             }
         }
 
@@ -1221,20 +1271,36 @@ namespace AIEngineer.AutoCAD
 
         private void ApplyModernDarkTheme()
         {
-            Color bgMain = Color.FromArgb(34, 37, 42);
-            Color bgSurface = Color.FromArgb(43, 48, 56);
-            Color bgInput = Color.FromArgb(26, 29, 33);
-            Color fgMain = Color.FromArgb(230, 237, 243);
-            Color fgMuted = Color.FromArgb(155, 166, 178);
-            Color borderCol = Color.FromArgb(62, 70, 82);
+            Color bgMain = Color.FromArgb(15, 18, 24);
+            Color bgHeader = Color.FromArgb(20, 25, 34);
+            Color bgCard = Color.FromArgb(26, 31, 41);
+            Color bgSurface = Color.FromArgb(38, 45, 58);
+            Color bgInput = Color.FromArgb(18, 22, 29);
+            Color fgMain = Color.FromArgb(234, 240, 246);
+            Color fgMuted = Color.FromArgb(148, 163, 184);
+            Color borderCol = Color.FromArgb(51, 61, 77);
             Color accentBlue = Color.FromArgb(37, 99, 235);
-            Color chipBg = Color.FromArgb(47, 54, 65);
+            Color invPanelBg = Color.FromArgb(23, 37, 62);
 
             BackColor = bgMain;
             ForeColor = fgMain;
             try { Font = new Font("Segoe UI", 9F, FontStyle.Regular); } catch { }
 
-            ComboBox[] combos = new ComboBox[] { _language, _providerCombo, _modelCombo, _coordSortCombo };
+            _headerPanel.BackColor = bgHeader;
+            _headerPanel.BorderStyle = BorderStyle.FixedSingle;
+            _headerAccent.BackColor = Color.FromArgb(59, 130, 246);
+            _headerTitle.ForeColor = Color.FromArgb(240, 246, 252);
+            _headerBadge.BackColor = Color.FromArgb(20, 83, 45);
+            _headerBadge.ForeColor = Color.FromArgb(134, 239, 172);
+
+            _configCard.BackColor = bgCard;
+            _configCard.BorderStyle = BorderStyle.FixedSingle;
+            _transcriptCard.BackColor = bgInput;
+            _transcriptCard.BorderStyle = BorderStyle.FixedSingle;
+            _composerCard.BackColor = bgCard;
+            _composerCard.BorderStyle = BorderStyle.FixedSingle;
+
+            ComboBox[] combos = new ComboBox[] { _language, _providerCombo, _modelCombo, _commandPresetCombo };
             foreach (ComboBox cb in combos)
             {
                 cb.BackColor = bgSurface;
@@ -1244,20 +1310,24 @@ namespace AIEngineer.AutoCAD
 
             _transcript.BackColor = bgInput;
             _transcript.ForeColor = fgMain;
-            _transcript.BorderStyle = BorderStyle.FixedSingle;
+            _transcript.BorderStyle = BorderStyle.None;
             _message.BackColor = bgInput;
             _message.ForeColor = fgMain;
             _message.BorderStyle = BorderStyle.FixedSingle;
 
             _context.ForeColor = fgMuted;
-            _coordSortLabel.ForeColor = fgMuted;
+            _presetLabel.ForeColor = Color.FromArgb(147, 197, 253);
             _status.ForeColor = fgMuted;
             _includeDrawingContext.ForeColor = fgMain;
             _voiceAutoSend.ForeColor = fgMain;
             _voiceSpeakReply.ForeColor = fgMain;
             _attachVisualSelection.ForeColor = Color.FromArgb(125, 249, 255);
 
-            Button[] stdBtns = new Button[] { _apiSettings, _refresh, _start, _cancel, _voiceMic };
+            _inventoryBar.BackColor = invPanelBg;
+            _inventoryBar.BorderStyle = BorderStyle.FixedSingle;
+            _invStatusLabel.ForeColor = Color.FromArgb(125, 249, 255);
+
+            Button[] stdBtns = new Button[] { _apiSettings, _refresh, _start, _cancel, _voiceMic, _invAdd, _invRemove, _invRefresh, _invSkip };
             foreach (Button b in stdBtns)
             {
                 b.BackColor = bgSurface;
@@ -1267,20 +1337,23 @@ namespace AIEngineer.AutoCAD
                 b.Cursor = Cursors.Hand;
             }
 
+            _invOk.BackColor = Color.FromArgb(22, 101, 52);
+            _invOk.ForeColor = Color.White;
+            _invOk.FlatStyle = FlatStyle.Flat;
+            _invOk.FlatAppearance.BorderColor = Color.FromArgb(34, 197, 94);
+            _invOk.Cursor = Cursors.Hand;
+
+            _invStop.BackColor = Color.FromArgb(153, 27, 27);
+            _invStop.ForeColor = Color.White;
+            _invStop.FlatStyle = FlatStyle.Flat;
+            _invStop.FlatAppearance.BorderColor = Color.FromArgb(239, 68, 68);
+            _invStop.Cursor = Cursors.Hand;
+
             _send.BackColor = accentBlue;
             _send.ForeColor = Color.White;
             _send.FlatStyle = FlatStyle.Flat;
-            _send.FlatAppearance.BorderColor = Color.FromArgb(59, 130, 246);
+            _send.FlatAppearance.BorderColor = Color.FromArgb(96, 165, 250);
             _send.Cursor = Cursors.Hand;
-
-            Button[] chips = new Button[] { _qVisual, _qLighting, _qTakeoff, _qLvCalc, _qLegend, _qLoads, _qQa };
-            foreach (Button qb in chips)
-            {
-                qb.BackColor = chipBg;
-                qb.ForeColor = fgMain;
-                qb.FlatStyle = FlatStyle.Flat;
-                qb.FlatAppearance.BorderColor = borderCol;
-            }
         }
 
         private bool IsArabic { get { return _language.SelectedIndex == 0; } }
@@ -1289,18 +1362,19 @@ namespace AIEngineer.AutoCAD
         {
             RightToLeft rtl = IsArabic ? RightToLeft.Yes : RightToLeft.No;
             if (RightToLeft != rtl) RightToLeft = rtl;
-            PopulateSortOrderCombo();
-            _sortRow.Visible = IsDirectMode;
-            _quickBar.Visible = IsDirectMode;
+            PopulateCommandPresets();
+            _presetRow.Visible = IsDirectMode;
             _attachVisualSelection.Visible = IsDirectMode;
-            _qVisual.Text = IsArabic ? "👁️ رؤية بصرياً" : "👁️ Visual Check";
-            _qLighting.Text = IsArabic ? "💡 إنارة" : "💡 Lighting";
-            _qTakeoff.Text = IsArabic ? "📐 حصر كميات" : "📐 BOQ";
-            _qLvCalc.Text = IsArabic ? "⚡ كابل/قاطع" : "⚡ LV Calc";
-            _qLegend.Text = IsArabic ? "📋 ليجند" : "📋 Legend";
-            _qLoads.Text = IsArabic ? "📊 أحمال" : "📊 Loads";
-            _qQa.Text = IsArabic ? "🧹 تنظيف QA" : "🧹 QA";
-            _refresh.Text = IsArabic ? "تحديث السياق" : "Refresh context";
+            _start.Visible = !IsDirectMode;
+            _includeDrawingContext.Visible = !IsDirectMode;
+            _headerTitle.Text = "⚡ AI-Engineer Pro";
+            _invOk.Text = "✅ OK";
+            _invAdd.Text = IsArabic ? "➕ أضف" : "➕ Add";
+            _invRemove.Text = IsArabic ? "➖ شيل" : "➖ Remove";
+            _invRefresh.Text = IsArabic ? "🔄 تحديث" : "🔄 Refresh";
+            _invSkip.Text = IsArabic ? "⏭ تخطي" : "⏭ Skip";
+            _invStop.Text = IsArabic ? "⏹ إنهاء" : "⏹ Stop";
+            _refresh.Text = IsArabic ? "↻ تحديث" : "↻ Refresh";
             _send.Text = IsArabic ? "اسأل AI" : "Ask AI";
             _voiceAutoSend.Text = IsArabic ? "إرسال تلقائي" : "Auto-send";
             _voiceSpeakReply.Text = IsArabic ? "🔊 نطق الرد" : "🔊 Speak";
@@ -1319,7 +1393,6 @@ namespace AIEngineer.AutoCAD
             _commitDrawing.AutoSize = true;
             _rollbackDrawing.AutoSize = true;
             _includeDrawingContext.Text = IsArabic ? "استخدام سياق الرسم" : "Use drawing context";
-            _includeDrawingContext.Visible = !IsDirectMode;
             _prepareReview.Text = IsArabic ? "معاينة إرسال AI" : "Preview AI egress";
             _approveReview.Text = IsArabic ? "موافقة وسؤال" : "Approve and ask";
             _rejectReview.Text = IsArabic ? "رفض" : "Reject";
@@ -1334,6 +1407,9 @@ namespace AIEngineer.AutoCAD
             if (IsDirectMode)
             {
                 bool hasKey = !string.IsNullOrWhiteSpace(_directConfig.GetApiKey(SelectedProvider));
+                _headerBadge.Text = hasKey ? (IsArabic ? "● جاهز" : "● READY") : (IsArabic ? "▲ مفتاح مفقود" : "▲ NEEDS KEY");
+                _headerBadge.BackColor = hasKey ? Color.FromArgb(20, 83, 45) : Color.FromArgb(120, 53, 15);
+                _headerBadge.ForeColor = hasKey ? Color.FromArgb(134, 239, 172) : Color.FromArgb(253, 224, 71);
                 try
                 {
                     Autodesk.AutoCAD.ApplicationServices.Document doc =
@@ -1348,8 +1424,8 @@ namespace AIEngineer.AutoCAD
                             string units = info.ContainsKey("insunits_name") ? Convert.ToString(info["insunits_name"], CultureInfo.InvariantCulture) : "Unknown";
                             string total = info.ContainsKey("total_entities") ? Convert.ToString(info["total_entities"], CultureInfo.InvariantCulture) : "0";
                             _context.Text = IsArabic
-                                ? "اتصال مباشر (" + SelectedProvider + "): " + fname + " | عناصر: " + total + " | الوحدات: " + units
-                                : "Direct (" + SelectedProvider + "): " + fname + " | entities: " + total + " | units: " + units;
+                                ? "📐 " + fname + " | عناصر: " + total + " | وحدات: " + units
+                                : "📐 " + fname + " | entities: " + total + " | units: " + units;
                         }
                         else
                         {
@@ -1366,13 +1442,21 @@ namespace AIEngineer.AutoCAD
                     _context.Text = IsArabic ? "اتصال مباشر بـ AI (" + SelectedProvider + ")" : "Direct AI mode (" + SelectedProvider + ")";
                 }
 
-                _uncertainty.ForeColor = hasKey ? Color.FromArgb(74, 222, 128) : Color.FromArgb(251, 191, 36);
+                _uncertainty.ForeColor = Color.FromArgb(251, 191, 36);
                 _uncertainty.Text = hasKey
-                    ? (IsArabic ? "مفتاح API جاهز — كامل صلاحيات الرسم والتعديل والفحص مفعلة بدون وسيط." : "API key ready — full direct CAD read/write/measure tools enabled.")
+                    ? string.Empty
                     : (IsArabic ? "تنبيه: مفتاح API غير مضبوط لـ " + SelectedProvider + ". اضغط [🔑 API] للإدخال." : "Warning: API key missing for " + SelectedProvider + ". Click [🔑 API].");
+                _uncertainty.Visible = !hasKey;
+                RefreshGuidedInventoryBar();
+                UpdateActionState();
                 return;
             }
+            _headerBadge.Text = IsArabic ? "● محلي" : "● LOCAL";
+            _headerBadge.BackColor = Color.FromArgb(30, 58, 138);
+            _headerBadge.ForeColor = Color.FromArgb(191, 219, 254);
+            RefreshGuidedInventoryBar();
             _uncertainty.ForeColor = Color.DarkOrange;
+            _uncertainty.Visible = true;
             if (_hasSessionSummary && !String.IsNullOrEmpty(_sessionId))
             {
                 ShowSummary();
@@ -1908,6 +1992,96 @@ namespace AIEngineer.AutoCAD
             finally { EndOperation(); }
         }
 
+        private static string TryMapInventoryShortcut(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            string t = text.Trim().ToLowerInvariant();
+            if (t == "اوكي" || t == "أوكي" || t == "ok" || t == "تمام" || t == "موافق" || t == "اعتمد" || t == "التالي")
+                return "approve_next";
+            if (t == "اضف" || t == "أضف" || t == "add" || t == "ضيف" || t == "اضافه" || t == "إضافة")
+                return "add_selection";
+            if (t == "شيل" || t == "احذف" || t == "remove" || t == "امسح" || t == "استبعاد")
+                return "remove_selection";
+            if (t == "تحديث" || t == "ريفريش" || t == "refresh")
+                return "refresh";
+            if (t == "تخطي" || t == "skip")
+                return "skip";
+            if (t == "انهاء" || t == "إنهاء" || t == "ايقاف" || t == "إيقاف" || t == "stop")
+                return "stop";
+            return null;
+        }
+
+        private void RefreshGuidedInventoryBar()
+        {
+            if (!IsDirectMode)
+            {
+                _inventoryBar.Visible = false;
+                return;
+            }
+            try
+            {
+                Autodesk.AutoCAD.ApplicationServices.Document doc =
+                    Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+                Dictionary<string, object> st = doc != null ? CadToolExecutor.GetGuidedInventoryStatus(doc) : null;
+                bool active = st != null && st.ContainsKey("active") && st["active"] is bool && (bool)st["active"];
+                _inventoryBar.Visible = active;
+                if (!active) return;
+
+                string circ = st.ContainsKey("circuit_name") && st["circuit_name"] != null ? st["circuit_name"].ToString() : "-";
+                int idx = st.ContainsKey("current_index") ? Convert.ToInt32(st["current_index"], CultureInfo.InvariantCulture) : 0;
+                int tot = st.ContainsKey("total_count") ? Convert.ToInt32(st["total_count"], CultureInfo.InvariantCulture) : 0;
+                string disc = st.ContainsKey("discipline") && st["discipline"] != null ? st["discipline"].ToString() : "";
+                bool needsSpecs = st.ContainsKey("needs_user_specs") && st["needs_user_specs"] is bool && (bool)st["needs_user_specs"];
+                string discAr = disc == "power" ? "باور" : (disc == "lighting" ? "إنارة" : "عام");
+                string warn = needsSpecs ? (IsArabic ? " ⚠️ قدرات ناقصة" : " ⚠️ missing specs") : "";
+                _invStatusLabel.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "📌 {0} ({1}/{2}){3}{4}",
+                    circ, idx + 1, tot,
+                    string.IsNullOrEmpty(disc) ? "" : (" [" + (IsArabic ? discAr : disc) + "]"),
+                    warn);
+            }
+            catch
+            {
+                _inventoryBar.Visible = false;
+            }
+        }
+
+        private void RunGuidedInventoryBarAction(string action)
+        {
+            if (_busy || _voiceTranscribing) return;
+            try
+            {
+                Autodesk.AutoCAD.ApplicationServices.Document doc =
+                    Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+                if (doc == null)
+                {
+                    SetStatus(IsArabic ? "لا يوجد مخطط مفتوح في أوتوكاد." : "No open drawing in AutoCAD.");
+                    return;
+                }
+                Dictionary<string, object> res = CadToolExecutor.ExecuteTool(
+                    doc,
+                    "guided_circuit_inventory",
+                    new Dictionary<string, object> { { "action", action }, { "zoom", true } });
+                bool ok = res != null && res.ContainsKey("ok") && res["ok"] is bool && (bool)res["ok"];
+                string msg = "";
+                if (ok && res.ContainsKey("message") && res["message"] != null) msg = res["message"].ToString();
+                else if (res != null && res.ContainsKey("error") && res["error"] != null) msg = res["error"].ToString();
+                if (!string.IsNullOrWhiteSpace(msg))
+                {
+                    _transcript.AppendText((IsArabic ? "📌 [الجرد التفاعلي]: " : "📌 [Guided Inventory]: ") + msg + Environment.NewLine + Environment.NewLine);
+                    _transcript.SelectionStart = _transcript.TextLength;
+                    _transcript.ScrollToCaret();
+                    SetStatus(msg);
+                }
+                RefreshGuidedInventoryBar();
+            }
+            catch (System.Exception ex)
+            {
+                ShowError(ex);
+            }
+        }
+
         private async Task SendDirectMessage()
         {
             string content = NormalizeEgressText(_message.Text);
@@ -1932,6 +2106,31 @@ namespace AIEngineer.AutoCAD
                 _transcript.AppendText("engineer: " + content.Trim() + Environment.NewLine + Environment.NewLine);
                 _transcript.SelectionStart = _transcript.TextLength;
                 _transcript.ScrollToCaret();
+
+                Autodesk.AutoCAD.ApplicationServices.Document activeDoc =
+                    Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+                string invShortcut = TryMapInventoryShortcut(content);
+                if (!string.IsNullOrEmpty(invShortcut) && activeDoc != null)
+                {
+                    Dictionary<string, object> invSt = CadToolExecutor.GetGuidedInventoryStatus(activeDoc);
+                    bool invActive = invSt != null && invSt.ContainsKey("active") && invSt["active"] is bool && (bool)invSt["active"];
+                    if (invActive)
+                    {
+                        Dictionary<string, object> invOut = CadToolExecutor.ExecuteTool(
+                            activeDoc,
+                            "guided_circuit_inventory",
+                            new Dictionary<string, object> { { "action", invShortcut }, { "zoom", true } });
+                        string invMsg = (invOut != null && invOut.ContainsKey("message") && invOut["message"] != null)
+                            ? invOut["message"].ToString()
+                            : ((invOut != null && invOut.ContainsKey("error") && invOut["error"] != null) ? invOut["error"].ToString() : "OK");
+                        _transcript.AppendText((IsArabic ? "📌 [الجرد المباشر]: " : "📌 [Guided Inventory]: ") + invMsg + Environment.NewLine + Environment.NewLine);
+                        _transcript.SelectionStart = _transcript.TextLength;
+                        _transcript.ScrollToCaret();
+                        RefreshContext();
+                        SetStatus(invMsg);
+                        return;
+                    }
+                }
 
                 DirectAgentReply reply = await _directSession.SendAsync(
                     this, _directConfig, provider, model, content.Trim(), IsArabic, SetStatus, _attachVisualSelection.Checked);
@@ -2213,25 +2412,46 @@ namespace AIEngineer.AutoCAD
             _voiceSpeakReply.Enabled = true;
             _attachVisualSelection.Enabled = !voiceBlocked;
 
+            bool hasReview = false;
+            try
+            {
+                Autodesk.AutoCAD.ApplicationServices.Document doc =
+                    Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+                if (doc != null) hasReview = DrawingExecutionCommands.HasReviewEntities(doc);
+            }
+            catch { hasReview = false; }
+
             if (IsDirectMode)
             {
+                _start.Visible = false;
+                _includeDrawingContext.Visible = false;
+                _commitDrawing.Visible = hasReview;
+                _rollbackDrawing.Visible = hasReview;
                 _start.Text = IsArabic ? "محادثة جديدة" : "New chat";
                 _providerCombo.Enabled = !voiceBlocked;
                 _modelCombo.Enabled = !voiceBlocked;
-                _coordSortCombo.Enabled = !voiceBlocked;
+                _commandPresetCombo.Enabled = !voiceBlocked;
+                _invOk.Enabled = _invAdd.Enabled = _invRemove.Enabled = _invRefresh.Enabled = _invSkip.Enabled = _invStop.Enabled = !voiceBlocked;
                 _apiSettings.Enabled = !voiceBlocked;
                 if (voiceBlocked)
                 {
                     _start.Enabled = _send.Enabled = _cancel.Enabled = false;
+                    _commitDrawing.Enabled = _rollbackDrawing.Enabled = false;
                     _prepareReview.Enabled = _approveReview.Enabled = _rejectReview.Enabled = false;
                     return;
                 }
                 _start.Enabled = true;
                 _send.Enabled = true;
                 _cancel.Enabled = _directSession.TurnCount > 0;
+                _commitDrawing.Enabled = hasReview;
+                _rollbackDrawing.Enabled = hasReview;
                 _prepareReview.Enabled = _approveReview.Enabled = _rejectReview.Enabled = false;
                 return;
             }
+            _start.Visible = true;
+            _includeDrawingContext.Visible = true;
+            _commitDrawing.Visible = true;
+            _rollbackDrawing.Visible = true;
             _providerCombo.Enabled = !voiceBlocked;
             _apiSettings.Enabled = !voiceBlocked;
             _start.Text = IsArabic
@@ -2240,12 +2460,15 @@ namespace AIEngineer.AutoCAD
             if (voiceBlocked)
             {
                 _start.Enabled = _send.Enabled = _cancel.Enabled = false;
+                _commitDrawing.Enabled = _rollbackDrawing.Enabled = false;
                 _prepareReview.Enabled = _approveReview.Enabled = _rejectReview.Enabled = false;
                 return;
             }
             _start.Enabled = !active;
             _send.Enabled = active;
             _cancel.Enabled = active;
+            _commitDrawing.Enabled = true;
+            _rollbackDrawing.Enabled = true;
             _prepareReview.Enabled = active && !String.IsNullOrEmpty(_lastMessage);
             bool reviewPending = active && !String.IsNullOrEmpty(_pendingReviewId);
             _approveReview.Enabled = reviewPending;

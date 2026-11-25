@@ -86,6 +86,11 @@ namespace AIEngineer.AutoCAD
             public double OldMTextHeight;
             public bool HadPolylineClosed;
             public bool OldClosed;
+            public bool HadPolylineWidth;
+            public double OldConstantWidth;
+            public bool HadPanelXData;
+            public string OldPanelXDataRegApp;
+            public string OldPanelXDataAscii;
         }
 
         private sealed class CadUndoEntry
@@ -151,6 +156,9 @@ namespace AIEngineer.AutoCAD
                     s_loadedSidecarForDb.Remove(key);
                     s_legendCatalogByDb.Remove(key);
                     s_legendLoadedForDb.Remove(key);
+                    s_legendLoadedMtimeByDb.Remove(key);
+                    s_dialuxRoomPrefsByDb.Remove(key);
+                    s_guidedInventoryByDb.Remove(key);
                 }
             }
             catch { }
@@ -350,6 +358,8 @@ namespace AIEngineer.AutoCAD
                         return AuditElectricalDrawing(doc, args);
                     case "manage_project_legend_db":
                         return ManageProjectLegendDb(doc, args);
+                    case "guided_circuit_inventory":
+                        return GuidedCircuitInventory(doc, args);
                     case "capture_visual_view":
                         return CaptureVisualView(doc, args);
                     case "manage_attributes":
@@ -370,6 +380,8 @@ namespace AIEngineer.AutoCAD
                         return ExportDialuxStf(doc, args);
                     case "calculate_lv_electrical":
                         return CalculateLvElectrical(doc, args);
+                    case "build_distribution_network_and_sld":
+                        return BuildDistributionNetworkAndSld(doc, args);
                     case "manage_layers":
                         return ManageLayers(doc, args);
                     case "measure_and_compare":
@@ -439,7 +451,7 @@ namespace AIEngineer.AutoCAD
                 "convert_matching_shapes_to_block", "annotate_block_coordinates", "convert_arrows_to_leaders", "export_to_excel", "import_excel_table",
                 "extract_load_schedule", "quantity_takeoff", "find_blocks_along_path", "manage_attributes", "text_tools",
                 "advanced_geometry_ops", "drawing_qa_cleanup", "layout_and_plot_tools", "manage_block_library",
-                "lighting_design_engine", "export_dialux_stf", "calculate_lv_electrical",
+                "lighting_design_engine", "export_dialux_stf", "calculate_lv_electrical", "build_distribution_network_and_sld",
                 "manage_layers", "measure_and_compare", "duplicate_drawing", "zoom_view", "execute_template",
                 "approve_or_rollback_preview", "get_plugin_diagnostics"
             };
@@ -479,7 +491,10 @@ namespace AIEngineer.AutoCAD
                    string.Equals(layerName, "_AI_CIRCUIT_SCHEDULE", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_LV_CALC_TABLE", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_SLD", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_MASTER_SLD", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_FEEDER_SCHEDULE", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_ELECTRICAL_QA", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(layerName, "_AI_GUIDED_INVENTORY", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(layerName, "_AI_HIGHLIGHT", StringComparison.OrdinalIgnoreCase);
         }
 
@@ -3454,6 +3469,19 @@ namespace AIEngineer.AutoCAD
                             }
                             if (snap.HadPolylineClosed && ent is Polyline)
                                 ((Polyline)ent).Closed = snap.OldClosed;
+                            if (snap.HadPolylineWidth && ent is Polyline)
+                                ((Polyline)ent).ConstantWidth = snap.OldConstantWidth;
+                            if (snap.HadPanelXData && !string.IsNullOrEmpty(snap.OldPanelXDataRegApp) && snap.OldPanelXDataAscii != null)
+                            {
+                                try
+                                {
+                                    EnsureRegApp(db, tr, snap.OldPanelXDataRegApp);
+                                    ent.XData = new ResultBuffer(
+                                        new TypedValue((int)DxfCode.ExtendedDataRegAppName, snap.OldPanelXDataRegApp),
+                                        new TypedValue((int)DxfCode.ExtendedDataAsciiString, snap.OldPanelXDataAscii));
+                                }
+                                catch { }
+                            }
 
                             try { ent.RecordGraphicsModified(true); } catch { }
                             restoredModified++;

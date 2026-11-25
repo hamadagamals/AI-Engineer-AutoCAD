@@ -905,6 +905,7 @@ namespace AIEngineer.AutoCAD
                    n == "generate_panel_schedule_and_sld" ||
                    n == "audit_electrical_drawing" ||
                    n == "manage_project_legend_db" ||
+                   n == "guided_circuit_inventory" ||
                    n == "annotate_block_coordinates" ||
                    n == "convert_arrows_to_leaders" ||
                    n == "modify_entities" ||
@@ -930,6 +931,7 @@ namespace AIEngineer.AutoCAD
                    n == "lighting_design_engine" ||
                    n == "export_dialux_stf" ||
                    n == "calculate_lv_electrical" ||
+                   n == "build_distribution_network_and_sld" ||
                    n == "design_panel_manufacturing_layout";
         }
 
@@ -2367,6 +2369,7 @@ namespace AIEngineer.AutoCAD
                 "- MEP Load Schedules & Quantity Takeoff: `extract_load_schedule` (extract electrical circuit/panel load schedules from blocks + neighbor texts `63A`/`100A`/`15KW`/`4x16mm2` + sample connected feeder path lengths -> AutoCAD & Excel), `quantity_takeoff` (linear cable/pipe lengths by layer, closed room/polygon areas with optional centroid labels, block counts, vertical/waste allowances -> BOQ table & Excel)\n" +
                 "- Lighting Design & DIALux Bridge: `lighting_design_engine` (automated room-by-room lighting calculation & symmetric grid placement using Egyptian Code ECP / EN 12464-1 / CIBSE, real .ies/.ldt photometric file parser, point-by-point Avg/Min Lux & Uniformity U0, 3-phase wiring & CAD/Excel/STF output), `export_dialux_stf` (export AutoCAD rooms + luminaire positions in meters to DIALux .stf + optional clean DWG)\n" +
                 "- Deterministic LV Electrical Calculations (IEC 60364 / ECP): `calculate_lv_electrical` (ALWAYS call this tool — NEVER do mental math and NEVER guess/invent current or kW! When computing lighting circuits, ALWAYS pass `fixture_count` + `fixture_watt`/`fixture_va` + `load_type: \"lighting\"` + `phases: 1`. If fixture wattage is unknown, ask the engineer or explicitly state that a 40 VA/fixture assumption was used — NEVER fabricate loads like 7A/1.54kVA and NEVER override tool-returned `design_current_ib_a`/`voltage_drop_percent`.)\n" +
+                "- Full Project MV/LV Distribution, Cable Routing, Landscape & Master SLD (`build_distribution_network_and_sld`): build complete hierarchy (`RMU -> TX -> MDB -> GEN/ATS -> SMDB -> DB / Feeder Pillar / Landscape Pole`), hydrate DB demand loads from `project_database.json`, size transformers/generators/ATS/buried landscape feeders/bus Isc/cumulative VD%, draw `_AI_MASTER_SLD` + `_AI_FEEDER_SCHEDULE`, and export multi-sheet `.xlsx`.\n" +
                 "- Attributes, Text, Geometry, QA/Cleanup, Block Library & Layouts/PDF: `manage_attributes` (extract/update/sync block attributes via Excel), `text_tools` (batch find/replace, directional auto-numbering, text style/height standardize), `advanced_geometry_ops` (align, distribute, rectangular/polar array, offset, revision_cloud, explode), `drawing_qa_cleanup` (duplicate block detector, overkill duplicate lines, purge unused, standardize ByLayer, DWG revision compare with clouds + Excel diff, FILEDIA/PICKFIRST guard), `layout_and_plot_tools` (list/create scaled Layouts + Viewports + Title Block, batch plot PDF via DWG To PDF.pc3), `manage_block_library` (persistent Wblock save/list/insert company blocks across drawings)\n" +
                 "- Modify & Manage: `modify_entities`, `undo_last_action`, `copy_entities`, `delete_entities`, `manage_layers`, `duplicate_drawing`, `zoom_view`, `approve_or_rollback_preview`\n" +
                 "- Measure & Compare: `measure_and_compare` (distances, center-to-center vs clear edge-to-edge gap, overlap detection, entity group totals/areas/lengths/extents comparison)\n\n" +
@@ -2431,10 +2434,10 @@ namespace AIEngineer.AutoCAD
                 "   - Also note: if the engineer explicitly asks to convert all drawn arrows without selecting a sample, call `convert_arrows_to_leaders(update_coordinates: true)` directly (and never pass `selected_only: true` when no arrow is selected).\n" +
                 "6m. PANEL SCHEDULES, 3-PHASE BALANCING & SINGLE LINE DIAGRAMS (`generate_panel_schedule_and_sld`): Whenever the engineer asks to generate a **Panel Schedule** with automatic **R/Y/B 3-phase balancing**, main incomer/cable sizing (IEC 60364 / ECP), or draw a vector **Single Line Diagram (SLD)** (`جدول أحمال اللوحة`, `توزيع الفازات R Y B`, `المخطط الأحادي`, `SLD`), ALWAYS call `generate_panel_schedule_and_sld(draw_panel_schedule: true, draw_sld: true, export_excel: <if requested>)`! It traces all drawing circuits automatically (or reads an explicit `circuits[]` list), balances 1P circuits across R/Y/B by LPT for minimum imbalance %, adds spares, sizes branch/main breakers and cables via `calculate_lv_electrical` logic, draws `_AI_PANEL_SCHEDULE` + `_AI_SLD`, and supports Excel `.xlsx` export and full Undo.\n" +
                 "6n. CONSULTING ELECTRICAL QA AUDITOR (`audit_electrical_drawing`): Whenever the engineer asks to audit/inspect the electrical drawing for engineering errors (`فحص فني كهربائي`, `كشف الأخطاء`, `كشافات غير موصلة`, `اسماء لينيات مكررة`, `أحمال زائدة`, `تجاوز هبوط الجهد`, `QA audit`), ALWAYS call `audit_electrical_drawing(draw_markers: true, draw_report_table: true, export_excel: <if requested>)`! Never invent defects — report exact `overall_status`, `health_score`, `orphan_fixtures_count`, `overloaded_circuits_count`, `duplicate_names_count`, `vd_violations_count`, `unnamed_circuits_count`, `unit_scale_mismatch`, and item details strictly from the tool output.\n" +
-                "6o. PROJECT LEGEND SPEC DATABASE, STACKED PER-PANEL CIRCUIT TABLES & PERSISTENT DISK STORAGE (`manage_project_legend_db`): NEVER guess fixture wattages (`36W`/`10W`/`45W`) from thin air or loose `query_entities`! ALWAYS use `manage_project_legend_db` as the authoritative catalog:\n" +
-                "   - First call `manage_project_legend_db(action: 'get_catalog')` or `manage_project_legend_db(action: 'extract_from_drawing')` (or ask the engineer to select the Legend schedule and call `action: 'extract_from_selection'`) to extract every block type's Watt/VA/voltage/emergency spec (automatically resolving 'AS ABOVE' rows).\n" +
-                "   - When the engineer states or corrects a block's spec (e.g. '60x60 = 45W', 'APPE = 22W'), immediately persist it via `manage_project_legend_db(action: 'set_item', block_name: '...', watt: ..., description: '...')` — NEVER pretend you saved an 'internal DB' in chat text without calling the tool!\n" +
-                "   - `project_database.json` and `circuit_memory` persist PERMANENTLY ON DISK across AutoCAD & PC restarts (for saved `.dwg` files) and are readable by external tools; also when tracing circuits with `find_blocks_along_path(include_electrical_calc: true)`, mixed fixtures auto-read exact Wattages from the DB and circuit tables stack cleanly by panel column (`stack_by_panel: true` by default — circuits of the SAME panel stack vertically underneath, and a NEW panel starts a column to the right). To build a full Panel Schedule, Cable/Breaker Sizing, and Total Panel Load from verified saved circuits, call `generate_panel_schedule_and_sld(source: 'saved_memory', ...)`!\n" +
+                "6o. PROJECT LEGEND SPEC DATABASE, STACKED PER-PANEL CIRCUIT TABLES & ZERO-HALLUCINATION SPEC GATE (`manage_project_legend_db`): NEVER guess, fabricate, or assume fixture wattages (`36W`/`40 VA`/`45W`)! Whenever ANY block lacks a verified rating in `Project Legend Spec DB` (`needs_user_specs: true` or non-empty `missing_spec_blocks`), STOP and ask the engineer to provide the exact Watt/VA ratings (or ask them to select the Legend schedule for extraction/`capture_visual_view`): \n" +
+                "   - First call `manage_project_legend_db(action: 'get_catalog')` or `manage_project_legend_db(action: 'extract_from_drawing')` (or `action: 'extract_from_selection'`) to extract every block type's Watt/VA/voltage/emergency spec (automatically resolving 'AS ABOVE' rows). Pass `strict_legend_specs: true` on interactive electrical calculations so 40 VA is NEVER silently assumed!\n" +
+                "   - When the engineer states or corrects a block's spec (e.g. '60x60 = 45W', 'APPE = 22W'), immediately persist it via `manage_project_legend_db(action: 'set_item', ...)` / `action: 'set_items'` — NEVER pretend you saved an 'internal DB' in chat text without calling the tool!\n" +
+                "   - `project_database.json` and `circuit_memory` persist PERMANENTLY ON DISK across AutoCAD & PC restarts AND unify sibling DWGs (`Lighting.dwg` + `Power.dwg`) in the same project folder automatically; also when tracing circuits with `find_blocks_along_path(include_electrical_calc: true, strict_legend_specs: true)`, verified blocks read exact Wattages from the DB and stack cleanly by panel column (`stack_by_panel: true`). To build a full merged Panel Schedule, Cable/Breaker Sizing, and SLD from saved/approved circuits, call `generate_panel_schedule_and_sld(source: 'saved_memory', strict_legend_specs: true, ...)`!\n" +
                 "6p. VISUAL INSPECTION OF SELECTION / VIEWPORT (`capture_visual_view`): Whenever the engineer selects any area (a Legend table, tangled circuit intersection, room, panel schedule) and asks you to LOOK / SEE / ANALYZE IT VISUALLY ('شوف الجزء المحدد بصرياً', 'اقرأ الصورة', 'look visually'), OR when automatic text/geometry extraction looks ambiguous: call `capture_visual_view(scope: 'selection' | 'viewport' | 'bbox', annotate_block_names: true)` to render and visually inspect a high-resolution PNG of the exact CAD entities, original text, and cyan `[BlockName]` badges! If you visually read a Legend table, immediately persist all verified block names, descriptions, and wattages into `manage_project_legend_db(action: 'set_items', ...)`!\n" +
                 "6q. INDUSTRIAL SWITCHGEAR & 2D/3D PANEL MANUFACTURING (`design_panel_manufacturing_layout`): Whenever the engineer asks to build/manufacture a physical **2D/3D Electrical Panel Assembly**, resize a copper busbar (`Standard DIN 43671`), snap/align components onto a DIN rail, trace wires/device connections, toggle Z-depth layers, OR convert between **Single Line Diagram (`SLD`)** and **2D/3D Panel**: ALWAYS call `design_panel_manufacturing_layout`!\n" +
                 "   - Zero-Collision + IEC 61439 Thermal + DIN 43671 Busbars: Guarantees zero component/busbar overlap (`zero_collision_verified`), extracts `QFMAIN` phase droppers (`DROP-R/Y/B`) + bolt joints directly from terminal ports, adds 1P/3P Comb Busbars (`use_comb_busbar: true`), checks wire duct fill % (`max_duct_fill_percent`), draws 2D Side Cross-Section (`door_clearance_mm`) + CNC Mounting Plate drill holes (`_AI_CNC_DRILLING`), and organizes 3D `Solid3d` parts across 8 ordered Z-depth layers (`_AI_3D_00_ENCLOSURE` .. `_AI_3D_07_DOOR_DEADFRONT`).\n" +
@@ -2444,10 +2447,19 @@ namespace AIEngineer.AutoCAD
                 "     * `mode: 'resize_busbar'` (`target_busbar_size`: matches nearest standard Cu busbar e.g. '28x6' -> '30x5 Cu' and updates width/rating).\n" +
                 "     * `mode: 'trace_connections'` (`trace_target` or current selection: highlights incoming/outgoing wires and prints exact From -> To device/terminal chain).\n" +
                 "     * `mode: 'sld_from_panel'` / `'panel_from_sld'` (bidirectional Two-Way Sync between `_AI_SLD` and `_AI_PANEL_2D_LAYOUT` + 3D).\n" +
-                "     * `mode: 'set_view_preset'` (`view_preset`: `'full_assembly'`, `'busbars_only'`, `'wiring_uncovered'`, `'cnc_drilling_only'`, `'no_door'`).\n" +
+                "     * `mode: 'set_view_preset'` (`view_preset`: `'full_assembly'`, `'busbars_only'`, `'wiring_uncovered'`, `'no_door'`, `'cnc_drilling_only'`, `'components_only'`, `'2d_only'`, `'3d_only'`).\n" +
+                "6r. INTERACTIVE GUIDED CIRCUIT INVENTORY, CROSS-PLAN LIGHTING+POWER MERGE & RANDOM INSPECTION (`guided_circuit_inventory`): Whenever the engineer says 'ابدأ جرد' / 'جرد اللينيات' / 'start guided inventory':\n" +
+                "   - Start with `guided_circuit_inventory(action: 'start', discipline: 'lighting'|'power'|'all', strict_legend_specs: true)`. It scans panels & circuits in exact numeric order (`1, 2, 5, 7, 10`, lighting first when `'all'`), highlights + selects + zooms onto the first unapproved circuit, and PAUSES for the engineer.\n" +
+                "   - While paused, respond immediately to engineer actions: 'ضيف ده / أضف' -> `action: 'add_selection'` (auto-traces forward from added broken wires!); 'شيل المحدد / الغلط' -> `action: 'remove_selection'` (permanently excludes wrong segments so refresh won't pull them back!); 'ريفريش / تحديث' -> `action: 'refresh'`; rename -> `action: 'rename'`; 'اوكي / تمام / اعتمد' -> `action: 'approve_next'` (verifies Legend DB specs first with zero assumptions, saves to persistent project DB, updates stacked panel boards in numeric order, and jumps to the next circuit!); 'تخطي' -> `'skip'`; 'stop' -> `'stop'`; 'nواقص / تغطية' -> `'audit_remaining'`.\n" +
+                "   - Separate Lighting & Power plans/DWGs: `project_database.json` automatically merges Lighting (`DB-1/1, 5, 7`) + Power (`DB-1/2, 3, 4, 6`) per panel in numeric order (`1..7`); call `action: 'export_merged_panels'` to build the unified Panel Schedule + SLD + Excel.\n" +
+                "   - Random On-Demand Circuit Check: whenever the engineer selects ANY random circuit/line and asks for its data ('اللينيا المختارة دي طلع بياناتها'), call `guided_circuit_inventory(action: 'inspect_selection', strict_legend_specs: true)`!\n" +
+                "6s. XDATA PERSISTENCE ACROSS COPY/MOVE, SAVED-CIRCUIT RECALL, FULL MV/LV + LANDSCAPE MASTER SLD & PRE-EXPORT DIALUX WIZARD:\n" +
+                "   - XData & Recall: Approved/saved circuits carry `AIENG_CIRCUIT_TAG` XData on their wires & blocks so `COPY`/`MOVE` preserves circuit identity. Whenever asked to reopen/edit a saved circuit ('افتح لينيا DB-1/5 تاني', 'عايز اعدل اللينيا اللي حفظتها'), call `guided_circuit_inventory(action: 'recall', circuit_name: '...')`!\n" +
+                "   - Full Project Cable Routing, Transformer/RMU/Generator/ATS, Landscape Feeders & Master SLD: Whenever asked to size or draw the main project distribution (`RMU -> TX -> MDB -> GEN/ATS -> SMDB -> DB / Feeder Pillar / Landscape`) or calculate cumulative voltage drop & feeder schedules, ALWAYS call `build_distribution_network_and_sld` (NEVER invent missing DB/Landscape kW loads if `blocked_for_missing_loads: true` is returned — ask the engineer or tell them which panels lack inventory loads!).\n" +
+                "   - DIALux Pre-Export Table Review: When exporting `.stf` via `export_dialux_stf`, use `preview_missing_only: true` first when ceiling heights or luminaire Watt/IES specs may be missing so the engineer gets an editable parameter table instead of silent assumptions, or `interactive_dialog: true` (command `AIENGDIALUX`) for GUI editing!\n" +
                 "7. SAFE COPYING OUTSIDE LARGE DRAWINGS & FRAMING: Whenever asked to copy elements outside the drawing ('نسخة خارج المخطط') or put ONE frame/box around them ('مربع واحد'), use `copy_entities` with `entity_type: \"BlockReference\"` (or handles/filters), `auto_offset_outside: \"right\"`, `draw_frame: true` + concise `frame_label` if they want one bounding box around all copies, and `select_copied: true` / `zoom: true`.\n" +
                 "8. GEOMETRY PRECISION & SELF-VERIFICATION: When placing shapes side-by-side at a clear distance, inspect the exact `bounds` returned by `draw_entities` and call `measure_and_compare` (mode='distance'); if ANY coordinate or gap differs from what the engineer requested, IMMEDIATELY correct it using `modify_entities` BEFORE giving your final answer!\n" +
-                "9. STRICT TRUTH & NO HALLUCINATION: NEVER claim you extracted coordinates/schedules/BOQ, calculated/distributed lighting, exported `.stf`/Excel/PDF files, cleaned/purged/compared drawings, added arrows/tables/clouds, deleted, aligned, arrayed, separated, selected, renamed, converted into a block, or drew anything unless the corresponding tool (`lighting_design_engine`, `export_dialux_stf`, `extract_load_schedule`, `quantity_takeoff`, `manage_attributes`, `text_tools`, `advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`, `export_to_excel`, `import_excel_table`, `annotate_block_coordinates`, `draw_block_legend`, `draw_entities`, `delete_entities`, `copy_entities`, `modify_entities`, `create_block`, `convert_matching_shapes_to_block`, `select_entities`, `zoom_view`) ACTUALLY ran and returned `ok: true` in this turn! NEVER copy or write bracketed logs like `[Executed tools in AutoCAD: ...]` in your reply!\n" +
+                "9. STRICT TRUTH & NO HALLUCINATION: NEVER invent wattage/VA ratings or panel loads or claim you extracted/invented specs, coordinates/schedules/BOQ, built MV/LV SLD/feeder calculations, calculated/distributed lighting, exported `.stf`/Excel/PDF files, cleaned/purged/compared drawings, added arrows/tables/clouds, deleted, aligned, arrayed, separated, selected, renamed, converted into a block, or drew anything unless the corresponding tool (`build_distribution_network_and_sld`, `guided_circuit_inventory`, `lighting_design_engine`, `export_dialux_stf`, `extract_load_schedule`, `quantity_takeoff`, `manage_attributes`, `text_tools`, `advanced_geometry_ops`, `drawing_qa_cleanup`, `layout_and_plot_tools`, `manage_block_library`, `export_to_excel`, `import_excel_table`, `annotate_block_coordinates`, `draw_block_legend`, `draw_entities`, `delete_entities`, `copy_entities`, `modify_entities`, `create_block`, `convert_matching_shapes_to_block`, `select_entities`, `zoom_view`) ACTUALLY ran and returned `ok: true` in this turn! NEVER copy or write bracketed logs like `[Executed tools in AutoCAD: ...]` in your reply!\n" +
                 "10. CODE TRANSPARENCY & DIAGNOSTIC QUESTIONS: When the engineer asks WHY something reverted/failed ('ليه تم التراجع', 'هل فية مشكلة بالكود'), do NOT call `undo_last_action(steps: ...)` or repeat mutations — inspect `undo_last_action(action: \"list_history\")` / `get_plugin_diagnostics` read-only and answer clearly and honestly. If any plugin tool fails or lacks a CAD capability, report the EXACT error/limitation, name `integrations/autocad_context_plugin/CadToolExecutor.cs`, and explain the fix.\n" +
                 (isArabic
                     ? "11. Respond in clear, natural Arabic matching the engineer's tone, keeping CAD coordinates/handles/measurements exact and concise.\n"
@@ -2495,8 +2507,19 @@ namespace AIEngineer.AutoCAD
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "find_blocks_along_path", "trace_all_circuits", "draw_block_legend", "manage_project_legend_db",
+                    "guided_circuit_inventory", "find_blocks_along_path", "trace_all_circuits", "draw_block_legend", "manage_project_legend_db",
                     "extract_load_schedule", "quantity_takeoff", "export_to_excel", "approve_or_rollback_preview");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "جرد", "اوكي", "أوكي", "اضف", "أضف", "شيل", "ريفريش", "تحديث", "باور", "اناره", "إنارة",
+                "عشوائي", "المختارة", "نواقص", "تغطية", "استدعاء", "تعديل لينيا", "xdata", "recall", "inventory", "guided", "inspect_selection",
+                "approve_next", "audit_remaining", "export_merged_panels"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "guided_circuit_inventory", "manage_project_legend_db", "find_blocks_along_path",
+                    "generate_panel_schedule_and_sld", "draw_block_legend", "capture_visual_view", "export_to_excel");
             }
 
             if (ContainsAnyKeyword(low,
@@ -2505,8 +2528,8 @@ namespace AIEngineer.AutoCAD
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "calculate_lv_electrical", "extract_load_schedule", "trace_all_circuits", "manage_project_legend_db",
-                    "generate_panel_schedule_and_sld", "export_to_excel", "approve_or_rollback_preview");
+                    "calculate_lv_electrical", "build_distribution_network_and_sld", "extract_load_schedule", "trace_all_circuits", "manage_project_legend_db",
+                    "guided_circuit_inventory", "generate_panel_schedule_and_sld", "export_to_excel", "approve_or_rollback_preview");
             }
 
             if (ContainsAnyKeyword(low,
@@ -2515,14 +2538,25 @@ namespace AIEngineer.AutoCAD
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "generate_panel_schedule_and_sld", "design_panel_manufacturing_layout", "calculate_lv_electrical", "extract_load_schedule",
+                    "generate_panel_schedule_and_sld", "build_distribution_network_and_sld", "guided_circuit_inventory", "design_panel_manufacturing_layout", "calculate_lv_electrical", "extract_load_schedule",
                     "trace_all_circuits", "manage_project_legend_db", "export_to_excel", "approve_or_rollback_preview");
+            }
+
+            if (ContainsAnyKeyword(low,
+                "محول", "مولد", "شبكة", "مخطط كابلات", "مسار الكابلات", "لاندسكيب", "لاند سكيب", "اعمدة انارة", "أعمدة إنارة",
+                "rmu", "transformer", "generator", "ats", "mdb", "smdb", "cable routing", "feeder pillar", "landscape", "master sld", "distribution network"))
+            {
+                matchedDomain = true;
+                AddToolNames(allowed,
+                    "build_distribution_network_and_sld", "calculate_lv_electrical", "generate_panel_schedule_and_sld",
+                    "guided_circuit_inventory", "manage_project_legend_db", "export_to_excel");
             }
 
             if (ContainsAnyKeyword(low,
                 "تصنيع", "دولاب", "بارات", "بارة", "نحاس", "توزيع حراري", "حرارة", "ثري دي", "3d",
                 "traceparts", "part number", "din rail", "busbar", "enclosure", "switchgear", "acade", "ferrule", "mounting plate",
-                "بليتة", "تخريم", "cnc", "مسقط جانبي", "محاذاة", "تتبع سلك", "مشط", "كباري", "side section", "snap", "comb"))
+                "بليتة", "تخريم", "cnc", "مسقط جانبي", "محاذاة", "تتبع سلك", "مشط", "كباري", "side section", "snap", "comb",
+                "aiengpanel", "panelai", "2d_only", "3d_only", "components_only"))
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
@@ -2536,7 +2570,7 @@ namespace AIEngineer.AutoCAD
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "audit_electrical_drawing", "trace_all_circuits", "find_blocks_along_path",
+                    "audit_electrical_drawing", "guided_circuit_inventory", "trace_all_circuits", "find_blocks_along_path",
                     "calculate_lv_electrical", "export_to_excel", "approve_or_rollback_preview");
             }
 
@@ -2546,7 +2580,7 @@ namespace AIEngineer.AutoCAD
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "lighting_design_engine", "export_dialux_stf", "find_blocks_along_path", "manage_project_legend_db",
+                    "lighting_design_engine", "export_dialux_stf", "guided_circuit_inventory", "find_blocks_along_path", "manage_project_legend_db",
                     "trace_all_circuits", "draw_block_legend", "export_to_excel", "approve_or_rollback_preview");
             }
 
@@ -2557,7 +2591,7 @@ namespace AIEngineer.AutoCAD
             {
                 matchedDomain = true;
                 AddToolNames(allowed,
-                    "draw_block_legend", "manage_project_legend_db", "quantity_takeoff", "extract_load_schedule",
+                    "draw_block_legend", "manage_project_legend_db", "guided_circuit_inventory", "quantity_takeoff", "extract_load_schedule",
                     "find_blocks_along_path", "trace_all_circuits", "export_to_excel",
                     "create_block", "convert_matching_shapes_to_block");
             }
@@ -2709,7 +2743,8 @@ namespace AIEngineer.AutoCAD
                     { "excel_path", Prop("string", "Optional destination .xlsx path.") },
                     { "include_electrical_calc", Prop("boolean", "Compute deterministic IEC 60364 circuit Load (kW/kVA) & Max Voltage Drop (VD%) and append them as extra columns to the circuit Block Legend + Excel export (default false).") },
                     { "fixture_watt", Prop("number", "Actual active wattage per fixture block in Watts (e.g. 40 for 40W lamp) used when include_electrical_calc=true.") },
-                    { "fixture_va", Prop("number", "Apparent VA per fixture block when active wattage is unavailable (default 40 VA if include_electrical_calc=true).") },
+                    { "fixture_va", Prop("number", "Apparent VA per fixture block when active wattage is unavailable (ONLY used when strict_legend_specs=false).") },
+                    { "strict_legend_specs", Prop("boolean", "If true, NEVER assume 40 VA when fixture blocks are missing from Project Legend Spec DB; return needs_user_specs=true and ask the engineer (default false).") },
                     { "phases", Prop("integer", "1 (default for lighting/socket, 220V) or 3 (380V).") },
                     { "voltage_v", Prop("number", "Nominal voltage in Volts (default 220V for 1P, 380V for 3P).") },
                     { "power_factor", Prop("number", "Power factor cos(phi), 0.4..1.0 (default 0.90 for lighting).") },
@@ -3394,21 +3429,57 @@ namespace AIEngineer.AutoCAD
                 })));
 
             tools.Add(Tool("export_dialux_stf",
-                "Export active AutoCAD closed room polygons (with inner room labels) and existing lighting luminaire blocks in meters to a DIALux .stf (STFF 1.0.5) project file ready for import into DIALux evo / DIALux 4, with optional clean DWG background copy.",
+                "Export active AutoCAD closed room polygons (with inner room labels) and grouped luminaire blocks in meters to a multi-luminaire DIALux .stf (STFF 1.0.5) project file with per-room ceiling heights, optional pre-export missing-parameter table preview (`preview_missing_only`), interactive Windows review dialog (`interactive_dialog`), Project DB persistence (`save_to_project_db`), and optional clean DWG background copy.",
                 ObjSchema(new Dictionary<string, object>
                 {
                     { "file_path", Prop("string", "Destination .stf file path (auto-named beside DWG or Desktop when omitted).") },
                     { "browse", Prop("boolean", "Open Windows Save File dialog for choosing .stf destination.") },
+                    { "interactive_dialog", Prop("boolean", "Open interactive Windows DataGridView table dialog to review/edit per-room ceiling heights, workplane heights, and missing luminaire Watt/Lumen/IES specs before writing .stf.") },
+                    { "preview_missing_only", Prop("boolean", "Dry-run scan returning detected rooms, luminaire groups, and exact missing_parameters_summary without writing the .stf file yet.") },
+                    { "save_to_project_db", Prop("boolean", "Save confirmed room heights to dialux_rooms and luminaire specs to Project Legend DB (default true).") },
                     { "block_name", Prop("string", "Optional luminaire block name/pattern (auto-detects lighting blocks/layers if omitted).") },
                     { "fixture_layer", Prop("string", "Optional luminaire layer filter pattern.") },
                     { "room_layer", Prop("string", "Optional closed room boundary polyline layer filter.") },
                     { "ies_path", Prop("string", "Optional .ies/.ldt photometry file path referenced in the STF luminaire definition.") },
-                    { "fixture_lumens", Prop("number", "Luminaire luminous flux in Lumens (default 3600).") },
-                    { "fixture_watts", Prop("number", "Luminaire wattage (default 36).") },
-                    { "room_height_m", Prop("number", "Room height in meters (default 3.0).") },
-                    { "workplane_m", Prop("number", "Working plane height in meters (default 0.80).") },
-                    { "mounting_height_m", Prop("number", "Luminaire mounting height in meters (defaults to room_height_m).") },
+                    { "standard", Prop("string", "Lighting standard hint for space lux defaults: 'ECP' (default), 'EN12464', or 'CIBSE'.") },
+                    { "fixture_lumens", Prop("number", "Fallback luminaire luminous flux in Lumens when missing from Project DB and overrides (default 3600).") },
+                    { "fixture_watts", Prop("number", "Fallback luminaire wattage when missing from Project DB and overrides (default 36).") },
+                    { "room_height_m", Prop("number", "Default room ceiling height in meters (default 3.0).") },
+                    { "workplane_m", Prop("number", "Default working plane height in meters (default 0.80).") },
+                    { "mounting_height_m", Prop("number", "Default luminaire mounting height in meters (defaults to room_height_m).") },
                     { "maintenance_factor", Prop("number", "Maintenance factor MF (default 0.80).") },
+                    { "reflectance_ceiling", Prop("number", "Ceiling reflectance fraction 0..1 (default 0.70).") },
+                    { "reflectance_walls", Prop("number", "Walls reflectance fraction 0..1 (default 0.50).") },
+                    { "reflectance_floor", Prop("number", "Floor reflectance fraction 0..1 (default 0.20).") },
+                    { "room_overrides", new Dictionary<string, object>
+                        {
+                            { "type", "array" },
+                            { "description", "Optional per-room parameter overrides keyed by room_name (saved to dialux_rooms when save_to_project_db=true)." },
+                            { "items", ObjSchema(new Dictionary<string, object>
+                                {
+                                    { "room_name", Prop("string", "Target room label/name.") },
+                                    { "space_category", Prop("string", "Room space classification (e.g. 'Office', 'Corridor', 'Classroom').") },
+                                    { "ceiling_height_m", Prop("number", "Confirmed ceiling height in meters.") },
+                                    { "mounting_height_m", Prop("number", "Confirmed luminaire mounting height in meters.") },
+                                    { "workplane_m", Prop("number", "Working plane height in meters.") },
+                                    { "target_lux", Prop("number", "Target maintained illuminance in Lux.") }
+                                }, new string[] { "room_name" }) }
+                        }
+                    },
+                    { "luminaire_overrides", new Dictionary<string, object>
+                        {
+                            { "type", "array" },
+                            { "description", "Optional per-luminaire block spec overrides keyed by block_name (saved to Project Legend DB when save_to_project_db=true)." },
+                            { "items", ObjSchema(new Dictionary<string, object>
+                                {
+                                    { "block_name", Prop("string", "AutoCAD luminaire block name.") },
+                                    { "watt", Prop("number", "Verified luminaire active wattage (W).") },
+                                    { "lumens", Prop("number", "Verified luminaire luminous flux (lm).") },
+                                    { "mounting_type", Prop("string", "Mounting type (e.g. 'recessed', 'surface', 'suspended', 'pole').") },
+                                    { "ies_path", Prop("string", "Optional .ies/.ldt photometry file path.") }
+                                }, new string[] { "block_name" }) }
+                        }
+                    },
                     { "export_clean_dwg", Prop("boolean", "Also save a separate DWG background copy alongside the .stf file without altering the active document.") }
                 })));
 
@@ -3531,7 +3602,9 @@ namespace AIEngineer.AutoCAD
                     { "table_gap", Prop("number", "Optional spacing gap from main drawing extents.") },
                     { "title", Prop("string", "Optional custom title banner.") },
                     { "replace_existing", Prop("boolean", "Erase previous _AI_PANEL_SCHEDULE and _AI_SLD entities before drawing (default true).") },
-                    { "source", Prop("string", "Circuit source mode: 'auto' (default: scans drawing and merges locked circuits), 'saved_memory' (builds directly from saved/verified circuits in project_database without re-tracing whole drawing), or 'drawing'.") },
+                    { "source", Prop("string", "Circuit source mode: 'auto' (default: scans drawing and merges locked circuits), 'saved_memory' (builds directly from merged saved/verified circuits across Lighting+Power DWGs in project_database in numeric order), or 'drawing'.") },
+                    { "approved_only", Prop("boolean", "When source='saved_memory', include only circuits approved during Guided Inventory or user-locked (default false).") },
+                    { "strict_legend_specs", Prop("boolean", "If true, NEVER assume 40 VA for blocks missing from Project Legend Spec DB; halt and ask the engineer via needs_user_specs/missing_spec_blocks (default false for compatibility; guided_circuit_inventory defaults true).") },
                     { "export_excel", Prop("boolean", "Export Panel Schedule to formatted RTL Excel .xlsx workbook (default false).") },
                     { "excel_path", Prop("string", "Optional destination .xlsx file path.") },
                     { "zoom", Prop("boolean", "Zoom AutoCAD viewport onto generated schedule/SLD (default true).") }
@@ -3627,7 +3700,7 @@ namespace AIEngineer.AutoCAD
                     { "trace_target", Prop("string", "Wire number (e.g. 'W-02') or device tag (e.g. 'QF2', 'KM1') for mode='trace_connections' (uses active selection if omitted).") },
                     { "target_busbar_size", Prop("string", "Requested Cu busbar size (e.g. '28x6', '30x5', '40x10') for mode='resize_busbar' — snapped to nearest standard DIN 43671 size.") },
                     { "target_amps", Prop("number", "Optional target Amps for mode='resize_busbar' when dimension string is omitted.") },
-                    { "view_preset", Prop("string", "Depth visibility preset for mode='set_view_preset': 'full_assembly', 'busbars_only', 'wiring_uncovered', 'cnc_drilling_only', or 'no_door'.") },
+                    { "view_preset", Prop("string", "Depth visibility preset for mode='set_view_preset': 'full_assembly', 'busbars_only', 'wiring_uncovered', 'no_door', 'cnc_drilling_only', 'components_only', '2d_only', or '3d_only'.") },
                     { "use_comb_busbar", Prop("boolean", "Add 1P/3P Cu Comb Busbar bridge across contiguous DIN-rail MCB rows (default true).") },
                     { "draw_side_section", Prop("boolean", "Draw 2D Side Cross-Section View with Z-depth stack & Door Clearance mm (default true).") },
                     { "draw_cnc_drilling", Prop("boolean", "Draw workshop CNC Mounting Plate M4/M5/M6 drill holes on _AI_CNC_DRILLING (default true).") },
@@ -3684,6 +3757,83 @@ namespace AIEngineer.AutoCAD
                     { "excel_path", Prop("string", "Optional destination .xlsx file path.") },
                     { "replace_existing", Prop("boolean", "Erase previous _AI_PANEL_2D_LAYOUT and _AI_3D_* entities before drawing (default true).") },
                     { "zoom", Prop("boolean", "Zoom AutoCAD viewport onto generated 2D/3D panel assembly (default true).") }
+                })));
+
+            tools.Add(Tool("guided_circuit_inventory",
+                "Interactive Guided Circuit-by-Circuit & Panel-by-Panel Inventory Wizard with engineer supervision, forward auto-trace completion, exclusion memory, XData (AIENG_CIRCUIT_TAG) persistent circuit tagging across COPY/MOVE, instant saved-circuit recall for editing ('recall'), cross-plan Lighting+Power numeric merging (across sibling DWGs via project_database.json), strict zero-hallucination Legend Watt/VA gate, random on-demand circuit inspection (`inspect_selection`), coverage & missing-circuit gap auditing (`audit_remaining`), and merged Panel Schedule + SLD + Excel export.",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "action", Prop("string", "Wizard action: 'start' (scan & focus first unapproved circuit), 'status', 'add_selection' (add missed lines/blocks and auto-trace forward), 'remove_selection' (exclude wrong curves/blocks permanently from refresh), 'refresh' (re-trace & recalculate keeping exclusions), 'rename' (update circuit_name/panel_name/discipline), 'approve_next' (aliases 'ok'/'approve': verify specs, stamp XData AIENG_CIRCUIT_TAG, lock & save, draw stacked panel board in numeric order, and jump to next circuit), 'recall' (aliases 'edit'/'edit_circuit'/'open'/'show': reload any saved circuit into active wizard with add/remove/refresh/approve controls, recovering handles via XData scan if copied), 'skip', 'jump' (by circuit_name or 1-based index), 'stop', 'inspect_selection' (random ad-hoc circuit inspection without changing active queue), 'audit_remaining' (highlight un-inventoried fixtures and report missing circuit numbers per panel), or 'export_merged_panels' (unified Lighting+Power Panel Schedule + SLD + Excel).") },
+                    { "discipline", Prop("string", "Filter circuits by discipline during 'start' or set for 'rename'/'inspect_selection': 'lighting', 'power', or 'all' (default: lighting first, then power; merges into numeric panel order).") },
+                    { "panel_filter", Prop("string", "Optional Panel name filter for 'start' or 'export_merged_panels' (e.g. 'DB-1').") },
+                    { "circuit_name", Prop("string", "Target circuit tag for 'recall', 'jump', 'rename', or 'inspect_selection' (e.g. 'DB-1/5').") },
+                    { "panel_name", Prop("string", "Target panel name for 'rename', 'inspect_selection', or 'export_merged_panels'.") },
+                    { "index", Prop("integer", "1-based queue index for action='jump'.") },
+                    { "handles", ArrProp("string", "Optional explicit entity hex handles for 'add_selection', 'remove_selection', or 'inspect_selection' (defaults to active AutoCAD selection).") },
+                    { "strict_legend_specs", Prop("boolean", "Strict zero-hallucination gate: NEVER assume 40 VA if any fixture block is missing from Project Legend Spec DB; halt & ask engineer instead (default true).") },
+                    { "allow_pending_specs", Prop("boolean", "Explicit override allowing approval/save even when missing_spec_blocks exist (default false).") },
+                    { "include_already_approved", Prop("boolean", "Include previously approved circuits when restarting inventory (default false).") },
+                    { "mix_disciplines", Prop("boolean", "When discipline='all', interleave lighting and power strictly by circuit number during queue walk instead of finishing lighting first (default false).") },
+                    { "auto_draw_board", Prop("boolean", "Automatically render/update the numerically stacked per-panel board on _AI_BLOCK_LEGEND on each approval (default true).") },
+                    { "save_to_panel", Prop("boolean", "For action='inspect_selection': save inspected random circuit directly into its numeric panel slot in project DB and stamp XData AIENG_CIRCUIT_TAG (default false).") },
+                    { "follow_connected", Prop("boolean", "For action='inspect_selection': follow connected wires and blocks from the selected seed (default true).") },
+                    { "highlight", Prop("boolean", "For action='audit_remaining': draw red highlight rings on un-inventoried orphan fixtures and select them in AutoCAD (default true).") },
+                    { "export_excel", Prop("boolean", "For action='export_merged_panels': export merged Panel Schedule workbook to .xlsx (default true).") },
+                    { "excel_path", Prop("string", "Optional destination .xlsx file path for merged export.") },
+                    { "zoom", Prop("boolean", "Zoom AutoCAD viewport onto current circuit or orphan fixtures (default true).") }
+                }, new string[] { "action" })));
+
+            tools.Add(Tool("build_distribution_network_and_sld",
+                "Build full project MV/LV electrical distribution hierarchy (RMU -> Transformer -> MDB -> Standby Generator + ATS -> SMDB -> DB / Feeder Pillar / Landscape Lighting Pole), discover cable routing in AutoCAD or hydrate saved panel demand loads from project_database.json (with strict missing-load gate), perform deterministic IEC 60364 / IEC 60909 / ECP sizing (transformer kVA & % loading, MV cable, generator kVA, 4P ATS, feeder breakers/cables, cumulative voltage drop %, and bus Isc kA including buried landscape feeders), draw native Master SLD (_AI_MASTER_SLD) + Feeder Schedule (_AI_FEEDER_SCHEDULE) with Undo, and export multi-sheet Excel workbook (.xlsx).",
+                ObjSchema(new Dictionary<string, object>
+                {
+                    { "source", Prop("string", "Topology source: 'auto' (default: scan CAD routing first, else synthesize from project DB), 'drawing_routing', 'merged_project', or 'explicit'.") },
+                    { "use_selected", Prop("boolean", "Restrict CAD routing scan to currently selected entities (default false).") },
+                    { "strict_loads", Prop("boolean", "Halt and return blocked_for_missing_loads if any downstream DB, feeder pillar, or landscape pole lacks measured/explicit load (default true).") },
+                    { "allow_missing_loads", Prop("boolean", "Explicit override to allow 0 kVA placeholder nodes when strict_loads is enabled (default false).") },
+                    { "draw_in_cad", Prop("boolean", "Draw Master SLD on _AI_MASTER_SLD and Master Feeder Schedule table on _AI_FEEDER_SCHEDULE (default true).") },
+                    { "replace_existing", Prop("boolean", "Replace previous _AI_MASTER_SLD and _AI_FEEDER_SCHEDULE entities before redrawing (default true).") },
+                    { "export_excel", Prop("boolean", "Export multi-sheet Excel workbook (Master Summary, Master Feeder Schedule, Transformer & ATS, Landscape Feeders) to .xlsx (default false).") },
+                    { "excel_path", Prop("string", "Optional destination .xlsx file path.") },
+                    { "zoom", Prop("boolean", "Zoom AutoCAD viewport onto generated Master SLD & Feeder Schedule (default true).") },
+                    { "default_feeder_length_m", Prop("number", "Fallback feeder route length in meters when not measured in CAD or specified per node (default 25).") },
+                    { "riser_allowance_m", Prop("number", "Vertical riser allowance in meters added to CAD-traced cable routing runs (default 4).") },
+                    { "max_total_vd_percent", Prop("number", "Maximum permitted cumulative voltage drop % from transformer/MDB to furthest panel or landscape pole (default 5.0).") },
+                    { "include_rmu", Prop("boolean", "Include upstream 11kV Ring Main Unit when synthesizing distribution tree from project DB (default true).") },
+                    { "include_generator_ats", Prop("boolean", "Include Standby Generator + ATS branch even if no emergency panels were tagged yet (default false).") },
+                    { "transformer_kva", Prop("number", "Optional explicit transformer standard rating override in kVA.") },
+                    { "title", Prop("string", "Optional custom title for Master SLD and Feeder Schedule.") },
+                    { "nodes", new Dictionary<string, object>
+                        {
+                            { "type", "array" },
+                            { "description", "Optional explicit distribution tree nodes ordered from upstream to downstream." },
+                            { "items", ObjSchema(new Dictionary<string, object>
+                                {
+                                    { "name", Prop("string", "Equipment or panel tag (e.g. 'RMU-1', 'TX-1', 'MDB-1', 'GEN-1', 'ATS-1', 'SMDB-1', 'DB-1', 'FP-LAND-1', 'POLE-1').") },
+                                    { "kind", Prop("string", "Node type: 'rmu', 'transformer', 'generator', 'ats', 'mdb', 'smdb', 'db', 'feeder_pillar', 'landscape_pole', or 'motor_load'.") },
+                                    { "parent", Prop("string", "Upstream parent equipment/panel name.") },
+                                    { "feeder_length_m", Prop("number", "One-way feeder cable length in meters.") },
+                                    { "load_kw", Prop("number", "Direct active demand/connected load in kW (omit to hydrate downstream DBs or project DB).") },
+                                    { "load_kva", Prop("number", "Direct apparent load in kVA.") },
+                                    { "demand_factor", Prop("number", "Demand/diversity factor applied at this node.") },
+                                    { "power_factor", Prop("number", "Power factor cos(phi) (default 0.85).") },
+                                    { "phases", Prop("integer", "Number of phases: 3 (default) or 1.") },
+                                    { "voltage_v", Prop("number", "Nominal voltage in Volts (default 380 for 3P, 220 for 1P).") },
+                                    { "install_method", Prop("string", "Installation method: 'tray', 'buried', 'conduit', or 'free_air'.") },
+                                    { "ambient_temp_c", Prop("number", "Ambient or soil temperature in Celsius (default 40C indoor / 35C buried).") },
+                                    { "grouped_circuits", Prop("integer", "Number of grouped circuits/cables for Cg derating (default 1).") },
+                                    { "material", Prop("string", "Conductor material: 'CU' or 'AL'.") },
+                                    { "insulation", Prop("string", "Insulation type: 'XLPE' or 'PVC'.") },
+                                    { "max_vd_percent", Prop("number", "Maximum permitted feeder voltage drop % for this segment.") },
+                                    { "transformer_kva", Prop("number", "Explicit transformer rating in kVA for transformer nodes.") },
+                                    { "impedance_pct", Prop("number", "Transformer impedance uk% (default 5.0%).") },
+                                    { "hv_voltage_kv", Prop("number", "Primary MV voltage in kV for MV cable sizing (default 11.0).") },
+                                    { "mv_fault_mva", Prop("number", "MV grid short-circuit level in MVA (default 250).") },
+                                    { "is_emergency", Prop("boolean", "Mark node as emergency/essential standby-backed load.") },
+                                    { "is_landscape", Prop("boolean", "Mark node as outdoor/landscape feeder (defaults install_method to buried).") }
+                                }, new string[] { "name" }) }
+                        }
+                    }
                 })));
 
             return tools;

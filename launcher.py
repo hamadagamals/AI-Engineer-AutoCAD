@@ -18,9 +18,11 @@ from core.package_manager import (
     PackageBuilder,
     PackageInstaller,
     RecoveryManager,
+    ensure_runtime_data_files,
 )
 from core.autocad_release_readiness import (
     AUTOCAD_PRODUCT_FILES,
+    SUPPORTED_AUTOCAD_YEARS,
     inspect_autocad_release_readiness,
 )
 from core.revit_release_readiness import inspect_revit_release_readiness
@@ -44,7 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     readiness.add_argument("--port", type=int, default=8765)
     readiness.add_argument("--autocad-root", type=Path)
-    readiness.add_argument("--autocad-year", type=int, choices=(2021, 2023), default=2021)
+    readiness.add_argument("--autocad-year", type=int, choices=SUPPORTED_AUTOCAD_YEARS, default=2021)
     revit_readiness = commands.add_parser(
         "revit-readiness", help="inspect the read-only Revit bridge prerequisites"
     )
@@ -244,6 +246,7 @@ def _parser() -> argparse.ArgumentParser:
 def _check() -> dict[str, Any]:
     if sys.version_info[:2] != (3, 13):
         raise PackagingError("AI-Engineer requires Python 3.13.x.")
+    ensure_runtime_data_files(_root())
     config = AppConfig.load(_root())
     files = (
         config.state_file,

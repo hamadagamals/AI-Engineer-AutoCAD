@@ -464,8 +464,10 @@
     { "designation": "50x10 Cu", "width_mm": 50, "thickness_mm": 10, "runs": 1, "max_amps_35k": 850, "resistance_mohm_per_m": 0.039 },
     { "designation": "60x10 Cu", "width_mm": 60, "thickness_mm": 10, "runs": 1, "max_amps_35k": 1000, "resistance_mohm_per_m": 0.033 },
     { "designation": "80x10 Cu", "width_mm": 80, "thickness_mm": 10, "runs": 1, "max_amps_35k": 1250, "resistance_mohm_per_m": 0.025 },
+    { "designation": "100x10 Cu", "width_mm": 100, "thickness_mm": 10, "runs": 1, "max_amps_35k": 1500, "resistance_mohm_per_m": 0.0193 },
     { "designation": "2x(60x10) Cu", "width_mm": 60, "thickness_mm": 10, "runs": 2, "max_amps_35k": 1700, "resistance_mohm_per_m": 0.017 },
-    { "designation": "2x(80x10) Cu", "width_mm": 80, "thickness_mm": 10, "runs": 2, "max_amps_35k": 2150, "resistance_mohm_per_m": 0.013 }
+    { "designation": "2x(80x10) Cu", "width_mm": 80, "thickness_mm": 10, "runs": 2, "max_amps_35k": 2150, "resistance_mohm_per_m": 0.013 },
+    { "designation": "2x(100x10) Cu", "width_mm": 100, "thickness_mm": 10, "runs": 2, "max_amps_35k": 2500, "resistance_mohm_per_m": 0.00965 }
   ],
   "enclosures": [
     { "part_number": "NSYCRN64200", "series": "Schneider Spacial CRN", "type": "wall_mount", "width_mm": 400, "height_mm": 600, "depth_mm": 200 },

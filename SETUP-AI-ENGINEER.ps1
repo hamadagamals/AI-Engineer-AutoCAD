@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     AI-Engineer Commercial Setup and In-App Host Integration Wizard (AutoCAD & Revit).
 .DESCRIPTION
@@ -69,6 +69,18 @@ Step 'تثبيت وتحديث المكتبات الهندسية (Installing Requ
 & $pythonExe -m pip install -r requirements.txt --quiet
 if ($LASTEXITCODE -ne 0) { Fail 'Failed to install Python requirements.' }
 
+Step 'تهيئة ملفات التشغيل الافتراضية وفحص الجاهزية (Bootstrapping Runtime Data)'
+$prevErrPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& $pythonExe launcher.py check | Out-Null
+$checkExit = $LASTEXITCODE
+$ErrorActionPreference = $prevErrPref
+if ($checkExit -ne 0) {
+    Write-Host "ملاحظة: تعذر إتمام فحص launcher.py check (يتطلب Python 3.13.x)." -ForegroundColor Yellow
+} else {
+    Success "تم التحقق من سلامة ملفات التشغيل والمنتج بنجاح."
+}
+
 if (-not $SkipTests) {
     Step 'فحص الاختبارات الهندسية (Verifying AI-Engineer Core Tests)'
     $pytestBase = Join-Path $PSScriptRoot ("test-temp\pt-setup-" + [guid]::NewGuid().ToString('N'))
@@ -137,7 +149,25 @@ if (-not $Unattended) {
 }
 
 # 4. Deploy AutoCAD Plugin
-Step 'تثبيت إضافة أوتوكاد (Deploying AutoCAD Plugin Bundle)'
+Step 'تثبيت وبناء إضافات أوتوكاد (Building & Deploying AutoCAD Plugins)'
+$acadDetectedRoot = $null
+for ($yr = 2030; $yr -ge 2015; $yr--) {
+    $cand = "C:\Program Files\Autodesk\AutoCAD $yr"
+    if (Test-Path -LiteralPath (Join-Path $cand "accoremgd.dll") -PathType Leaf) {
+        $acadDetectedRoot = $cand
+        break
+    }
+}
+$autocadBuildScript = Join-Path $PSScriptRoot "integrations\autocad_context_plugin\build.ps1"
+if ($null -ne $acadDetectedRoot -and (Test-Path -LiteralPath $autocadBuildScript -PathType Leaf)) {
+    try {
+        $builtCtx = & $autocadBuildScript -WorkspaceRoot (Join-Path $PSScriptRoot "workspace") -AutoCADRoot $acadDetectedRoot
+        $bridgeDir = Join-Path $PSScriptRoot "workspace\.ai-engineer\autocad\context\bridge"
+        Success "تم بناء Context.dll + PanelManufacturing.dll بنجاح لأوتوكاد في: $bridgeDir"
+    } catch {
+        Write-Host "تحذير: تعذر البناء التلقائي لإضافة AutoCAD: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
 $acadPluginsDir = Join-Path $env:APPDATA "Autodesk\ApplicationPlugins"
 if (-not (Test-Path $acadPluginsDir)) {
     New-Item -ItemType Directory -Path $acadPluginsDir -Force | Out-Null
@@ -147,23 +177,34 @@ $sourceBundle = Join-Path $PSScriptRoot "workspace - Copy\.ai-engineer\autocad\p
 if (Test-Path $sourceBundle) {
     Copy-Item -Path $sourceBundle -Destination $targetBundle -Recurse -Force
     Success "تم تثبيت حزمة AutoCAD Bundle بنجاح في: $targetBundle"
-} else {
-    Write-Host "ملاحظة: حزمة البناء جاهزة للتجميع المباشر." -ForegroundColor Yellow
 }
 
 # 5. Deploy Revit Plugin
-Step 'تثبيت إضافة ريفيت (Deploying Revit Plugin Addin)'
-$revitAddinsDir = Join-Path $env:APPDATA "Autodesk\Revit\Addins"
-if (Test-Path $revitAddinsDir) {
-    $addinTemplate = Join-Path $PSScriptRoot "integrations\revit_readonly_plugin\AIEngineer.Revit.addin.template"
-    if (Test-Path $addinTemplate) {
-        $dllPath = Join-Path $PSScriptRoot "integrations\revit_readonly_plugin\bin\AIEngineer.Revit.dll"
-        $addinContent = (Get-Content $addinTemplate -Raw).Replace("{{ASSEMBLY_PATH}}", $dllPath)
-        foreach ($year in @("2024", "2025")) {
-            $yearDir = Join-Path $revitAddinsDir $year
-            if (Test-Path $yearDir) {
-                Set-Content -Path (Join-Path $yearDir "AIEngineer.Revit.addin") -Value $addinContent -Encoding UTF8
-                Success "تم تفعيل إضافة Revit $year في: $yearDir"
+Step 'تثبيت وبناء إضافة ريفيت (Building & Deploying Revit Plugin)'
+$revitDirectBuild = Join-Path $PSScriptRoot "integrations\revit_direct_plugin\build.ps1"
+$revitBuilt = $false
+if (Test-Path -LiteralPath $revitDirectBuild -PathType Leaf) {
+    try {
+        & $revitDirectBuild -AllInstalled -Install | Out-Null
+        $revitBuilt = $true
+        Success "تم بناء وتفعيل إضافة Revit Direct (2015-2026+) بنجاح."
+    } catch {
+        Write-Host "ملاحظة: تعذر البناء التلقائي لإضافة Revit Direct: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+if (-not $revitBuilt) {
+    $revitAddinsDir = Join-Path $env:APPDATA "Autodesk\Revit\Addins"
+    if (Test-Path $revitAddinsDir) {
+        $addinTemplate = Join-Path $PSScriptRoot "integrations\revit_readonly_plugin\AIEngineer.Revit.addin.template"
+        if (Test-Path $addinTemplate) {
+            $dllPath = Join-Path $PSScriptRoot "integrations\revit_readonly_plugin\bin\AIEngineer.Revit.dll"
+            $addinContent = (Get-Content $addinTemplate -Raw).Replace("{{ASSEMBLY_PATH}}", $dllPath)
+            foreach ($year in @("2024", "2025", "2026")) {
+                $yearDir = Join-Path $revitAddinsDir $year
+                if (Test-Path $yearDir) {
+                    Set-Content -Path (Join-Path $yearDir "AIEngineer.Revit.addin") -Value $addinContent -Encoding UTF8
+                    Success "تم تفعيل إضافة Revit $year في: $yearDir"
+                }
             }
         }
     }
@@ -193,7 +234,8 @@ try {
 Write-Host "`n========================================================================" -ForegroundColor Green
 Write-Host "                         اكتمل التثبيت بنجاح!                           " -ForegroundColor White
 Write-Host "========================================================================" -ForegroundColor Green
-Write-Host "1) داخل أوتوكاد: اكتب في شريط الأوامر: AIENGPALETTE لفتح نافذة الشات." -ForegroundColor Cyan
-Write-Host "2) داخل ريفيت: ستجد لوحة AI-Engineer المدمجة جاهزة للتواصل." -ForegroundColor Cyan
-Write-Host "3) للتعديل أو الرسم: سيظهر التعديل بلون المراجعة (أحمر). اكتب 'تمام' للاعتماد." -ForegroundColor Yellow
+Write-Host "1) داخل أوتوكاد (المخططات والإنارة والكميات): اكتب AIENGPALETTE في شريط الأوامر." -ForegroundColor Cyan
+Write-Host "2) داخل أوتوكاد (تصنيع اللوحات الصناعية 2D/3D): اكتب AIENGPANEL في شريط الأوامر." -ForegroundColor Cyan
+Write-Host "3) داخل ريفيت: ستجد لوحة AI-Engineer المدمجة جاهزة للتواصل." -ForegroundColor Cyan
+Write-Host "4) للتعديل أو الرسم: سيظهر التعديل بلون المراجعة (أحمر). اكتب 'تمام' للاعتماد." -ForegroundColor Yellow
 Write-Host "========================================================================`n" -ForegroundColor Green

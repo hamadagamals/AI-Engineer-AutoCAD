@@ -21,4 +21,5 @@ workspace/*
 workspace - Copy/
 test-temp/
 .ai-engineer/
-data/
+data/*
+!data/switchgear_3d_catalog.json

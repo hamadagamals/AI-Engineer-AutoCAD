@@ -38,6 +38,7 @@ def test_accore_regression_harness_and_build_wired() -> None:
     assert "ACCORE_REGRESSION_PASS" in harness_text
     assert "generate_panel_schedule_and_sld" in harness_text
     assert "audit_electrical_drawing" in harness_text
+    assert "build_distribution_network_and_sld" in harness_text
     assert "BENCHMARK_30C_300F_MS" in harness_text
 
     build_text = BUILD_PS1.read_text(encoding="utf-8")
@@ -45,6 +46,8 @@ def test_accore_regression_harness_and_build_wired() -> None:
     assert "CadPanelAndQaTools.cs" in build_text
     assert "CadPanelManufacturingTools.cs" in build_text
     assert "CadProjectLegendDb.cs" in build_text
+    assert "CadGuidedInventoryTools.cs" in build_text
+    assert "CadDistributionNetworkTools.cs" in build_text
     assert "CadVisualCaptureTools.cs" in build_text
 
 

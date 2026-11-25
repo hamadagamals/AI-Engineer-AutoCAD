@@ -37,6 +37,10 @@ namespace AIEngineer.AutoCAD
             new Dictionary<IntPtr, Dictionary<string, ProjectLegendSpecItem>>();
         private static readonly HashSet<IntPtr> s_legendLoadedForDb =
             new HashSet<IntPtr>();
+        private static readonly Dictionary<IntPtr, DateTime> s_legendLoadedMtimeByDb =
+            new Dictionary<IntPtr, DateTime>();
+        private static readonly Dictionary<IntPtr, Dictionary<string, Dictionary<string, object>>> s_dialuxRoomPrefsByDb =
+            new Dictionary<IntPtr, Dictionary<string, Dictionary<string, object>>>();
 
         private static Dictionary<string, object> LegendSpecToDict(ProjectLegendSpecItem item)
         {
@@ -184,8 +188,41 @@ namespace AIEngineer.AutoCAD
             EnsureDocDestroyedHook();
             if (db == null || db.UnmanagedObject == IntPtr.Zero) return;
             IntPtr dbPtr = db.UnmanagedObject;
-            if (s_legendLoadedForDb.Contains(dbPtr)) return;
+
+            string primaryPath, mirrorPath, indexPath, docPath;
+            ResolveProjectDbPaths(doc, db, out primaryPath, out mirrorPath, out indexPath, out docPath);
+            bool hasPrim = !string.IsNullOrEmpty(primaryPath) && File.Exists(primaryPath);
+            bool hasMir = !string.IsNullOrEmpty(mirrorPath) && File.Exists(mirrorPath);
+            string readPath = null;
+            if (hasPrim && hasMir)
+            {
+                try
+                {
+                    DateTime pt = File.GetLastWriteTimeUtc(primaryPath);
+                    DateTime mt = File.GetLastWriteTimeUtc(mirrorPath);
+                    readPath = (mt > pt) ? mirrorPath : primaryPath;
+                }
+                catch { readPath = primaryPath; }
+            }
+            else if (hasPrim) readPath = primaryPath;
+            else if (hasMir) readPath = mirrorPath;
+
+            DateTime diskMtime = DateTime.MinValue;
+            if (!string.IsNullOrEmpty(readPath))
+            {
+                try { diskMtime = File.GetLastWriteTimeUtc(readPath); } catch { }
+            }
+
+            if (s_legendLoadedForDb.Contains(dbPtr))
+            {
+                if (string.IsNullOrEmpty(readPath)) return;
+                DateTime prevMtime;
+                if (s_legendLoadedMtimeByDb.TryGetValue(dbPtr, out prevMtime) && prevMtime == diskMtime)
+                    return;
+            }
             s_legendLoadedForDb.Add(dbPtr);
+            if (!string.IsNullOrEmpty(readPath))
+                s_legendLoadedMtimeByDb[dbPtr] = diskMtime;
 
             Dictionary<string, ProjectLegendSpecItem> cat;
             if (!s_legendCatalogByDb.TryGetValue(dbPtr, out cat))
@@ -196,11 +233,6 @@ namespace AIEngineer.AutoCAD
 
             try
             {
-                string primaryPath, mirrorPath, indexPath, docPath;
-                ResolveProjectDbPaths(doc, db, out primaryPath, out mirrorPath, out indexPath, out docPath);
-                string readPath = (!string.IsNullOrEmpty(primaryPath) && File.Exists(primaryPath))
-                    ? primaryPath
-                    : ((!string.IsNullOrEmpty(mirrorPath) && File.Exists(mirrorPath)) ? mirrorPath : null);
                 if (string.IsNullOrEmpty(readPath)) return;
 
                 string raw = File.ReadAllText(readPath, Encoding.UTF8);
@@ -219,6 +251,55 @@ namespace AIEngineer.AutoCAD
                         ProjectLegendSpecItem parsed = LegendSpecFromDict(kv.Key, ld);
                         if (parsed != null && !string.IsNullOrEmpty(parsed.BlockName))
                             cat[parsed.BlockName] = parsed;
+                    }
+                }
+
+                // Import sibling-DWG circuits (e.g. Lighting.dwg + Power.dwg in same project folder)
+                Dictionary<string, object> diskCircs = root.ContainsKey("circuits")
+                    ? (root["circuits"] as Dictionary<string, object>)
+                    : null;
+                if (diskCircs != null)
+                {
+                    Dictionary<string, SavedCircuitRecord> bucket;
+                    if (!s_savedCircuitsByDb.TryGetValue(dbPtr, out bucket))
+                    {
+                        bucket = new Dictionary<string, SavedCircuitRecord>(StringComparer.OrdinalIgnoreCase);
+                        s_savedCircuitsByDb[dbPtr] = bucket;
+                    }
+                    foreach (KeyValuePair<string, object> kv in diskCircs)
+                    {
+                        SavedCircuitRecord rec = ParseSavedCircuitFromDict(kv.Key, kv.Value as Dictionary<string, object>);
+                        if (rec == null) continue;
+                        string normKey = NormalizeCircuitKey(rec.CircuitName);
+                        if (string.IsNullOrEmpty(normKey)) continue;
+                        SavedCircuitRecord existing;
+                        if (!bucket.TryGetValue(normKey, out existing) || existing == null)
+                        {
+                            bucket[normKey] = rec;
+                        }
+                        else if (!IsRecordFromCurrentDrawing(doc, existing) && (rec.Approved || rec.UserLocked))
+                        {
+                            bucket[normKey] = rec;
+                        }
+                    }
+                }
+
+                Dictionary<string, object> dialuxRoomsRaw = root.ContainsKey("dialux_rooms")
+                    ? (root["dialux_rooms"] as Dictionary<string, object>)
+                    : null;
+                if (dialuxRoomsRaw != null)
+                {
+                    Dictionary<string, Dictionary<string, object>> rMap;
+                    if (!s_dialuxRoomPrefsByDb.TryGetValue(dbPtr, out rMap))
+                    {
+                        rMap = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+                        s_dialuxRoomPrefsByDb[dbPtr] = rMap;
+                    }
+                    foreach (KeyValuePair<string, object> rkv in dialuxRoomsRaw)
+                    {
+                        Dictionary<string, object> rv = rkv.Value as Dictionary<string, object>;
+                        if (rv == null || string.IsNullOrWhiteSpace(rkv.Key)) continue;
+                        rMap[rkv.Key] = new Dictionary<string, object>(rv, StringComparer.OrdinalIgnoreCase);
                     }
                 }
             }
@@ -248,7 +329,34 @@ namespace AIEngineer.AutoCAD
                     if (kv.Value != null) legSerialized[kv.Value.BlockName] = LegendSpecToDict(kv.Value);
                 }
 
-                Dictionary<string, object> circSerialized = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                // Merge existing on-disk circuits from sibling DWGs before applying current-DWG records
+                Dictionary<string, SavedCircuitRecord> mergedCircuits = new Dictionary<string, SavedCircuitRecord>(StringComparer.OrdinalIgnoreCase);
+                JavaScriptSerializer readSer = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
+                string existingDiskPath = (!string.IsNullOrEmpty(primaryPath) && File.Exists(primaryPath))
+                    ? primaryPath
+                    : ((!string.IsNullOrEmpty(mirrorPath) && File.Exists(mirrorPath)) ? mirrorPath : null);
+                if (!string.IsNullOrEmpty(existingDiskPath))
+                {
+                    try
+                    {
+                        Dictionary<string, object> diskRoot = readSer.DeserializeObject(File.ReadAllText(existingDiskPath, Encoding.UTF8)) as Dictionary<string, object>;
+                        Dictionary<string, object> diskCircs = (diskRoot != null && diskRoot.ContainsKey("circuits"))
+                            ? (diskRoot["circuits"] as Dictionary<string, object>)
+                            : null;
+                        if (diskCircs != null)
+                        {
+                            foreach (KeyValuePair<string, object> kv in diskCircs)
+                            {
+                                SavedCircuitRecord dRec = ParseSavedCircuitFromDict(kv.Key, kv.Value as Dictionary<string, object>);
+                                if (dRec == null) continue;
+                                string nk = NormalizeCircuitKey(dRec.CircuitName);
+                                if (!string.IsNullOrEmpty(nk)) mergedCircuits[nk] = dRec;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
                 Dictionary<string, SavedCircuitRecord> circBucket;
                 if (s_savedCircuitsByDb.TryGetValue(dbPtr, out circBucket) && circBucket != null)
                 {
@@ -256,7 +364,63 @@ namespace AIEngineer.AutoCAD
                     {
                         SavedCircuitRecord r = kv.Value;
                         if (r == null) continue;
-                        circSerialized[kv.Key] = SavedCircuitToDict(r);
+                        string nk = NormalizeCircuitKey(r.CircuitName);
+                        if (string.IsNullOrEmpty(nk)) nk = kv.Key;
+                        SavedCircuitRecord diskRec;
+                        if (mergedCircuits.TryGetValue(nk, out diskRec) && diskRec != null && !IsRecordFromCurrentDrawing(doc, diskRec))
+                        {
+                            if (!IsRecordFromCurrentDrawing(doc, r) || (!r.Approved && !r.UserLocked && (diskRec.Approved || diskRec.UserLocked)))
+                                continue;
+                        }
+                        mergedCircuits[nk] = CloneSavedRecord(r);
+                    }
+                }
+
+                List<KeyValuePair<string, SavedCircuitRecord>> sortedCircs = new List<KeyValuePair<string, SavedCircuitRecord>>(mergedCircuits);
+                sortedCircs.Sort(delegate(KeyValuePair<string, SavedCircuitRecord> a, KeyValuePair<string, SavedCircuitRecord> b)
+                {
+                    return CompareCircuitKeysNatural(
+                        a.Value != null ? a.Value.PanelName : "",
+                        a.Value != null ? a.Value.CircuitName : a.Key,
+                        b.Value != null ? b.Value.PanelName : "",
+                        b.Value != null ? b.Value.CircuitName : b.Key);
+                });
+
+                Dictionary<string, object> circSerialized = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                for (int si = 0; si < sortedCircs.Count; si++)
+                {
+                    SavedCircuitRecord r = sortedCircs[si].Value;
+                    if (r != null) circSerialized[sortedCircs[si].Key] = SavedCircuitToDict(r);
+                }
+
+                Dictionary<string, object> existingDiskDialuxRooms = null;
+                if (!string.IsNullOrEmpty(existingDiskPath))
+                {
+                    try
+                    {
+                        Dictionary<string, object> dr2 = readSer.DeserializeObject(File.ReadAllText(existingDiskPath, Encoding.UTF8)) as Dictionary<string, object>;
+                        if (dr2 != null && dr2.ContainsKey("dialux_rooms"))
+                            existingDiskDialuxRooms = dr2["dialux_rooms"] as Dictionary<string, object>;
+                    }
+                    catch { }
+                }
+                Dictionary<string, object> dialuxRoomsSerialized = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                if (existingDiskDialuxRooms != null)
+                {
+                    foreach (KeyValuePair<string, object> rkv in existingDiskDialuxRooms)
+                    {
+                        Dictionary<string, object> rv = rkv.Value as Dictionary<string, object>;
+                        if (rv != null && !string.IsNullOrWhiteSpace(rkv.Key))
+                            dialuxRoomsSerialized[rkv.Key] = new Dictionary<string, object>(rv, StringComparer.OrdinalIgnoreCase);
+                    }
+                }
+                Dictionary<string, Dictionary<string, object>> memDialuxRooms;
+                if (s_dialuxRoomPrefsByDb.TryGetValue(dbPtr, out memDialuxRooms) && memDialuxRooms != null)
+                {
+                    foreach (KeyValuePair<string, Dictionary<string, object>> mkv in memDialuxRooms)
+                    {
+                        if (mkv.Value != null && !string.IsNullOrWhiteSpace(mkv.Key))
+                            dialuxRoomsSerialized[mkv.Key] = new Dictionary<string, object>(mkv.Value, StringComparer.OrdinalIgnoreCase);
                     }
                 }
 
@@ -270,7 +434,8 @@ namespace AIEngineer.AutoCAD
                     { "project_dir", dwgDir },
                     { "updated_utc", utcNow },
                     { "legend_catalog", legSerialized },
-                    { "circuits", circSerialized }
+                    { "circuits", circSerialized },
+                    { "dialux_rooms", dialuxRoomsSerialized }
                 };
 
                 JavaScriptSerializer ser = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
@@ -285,6 +450,14 @@ namespace AIEngineer.AutoCAD
                 if (!string.IsNullOrEmpty(mirrorPath))
                 {
                     try { File.WriteAllText(mirrorPath, json, Encoding.UTF8); } catch { }
+                }
+
+                string mtimeTarget = (!string.IsNullOrEmpty(primaryPath) && File.Exists(primaryPath))
+                    ? primaryPath
+                    : ((!string.IsNullOrEmpty(mirrorPath) && File.Exists(mirrorPath)) ? mirrorPath : null);
+                if (!string.IsNullOrEmpty(mtimeTarget))
+                {
+                    try { s_legendLoadedMtimeByDb[dbPtr] = File.GetLastWriteTimeUtc(mtimeTarget); } catch { }
                 }
 
                 if (!string.IsNullOrEmpty(indexPath) && !string.IsNullOrEmpty(primaryPath))
@@ -368,10 +541,32 @@ namespace AIEngineer.AutoCAD
             out List<string> missingCatalogBlocks,
             out Dictionary<string, object> specBreakdown)
         {
+            ComputeCircuitLoadFromProjectDb(
+                doc, countsByBlock, explicitFixtureWatt, explicitFixtureVa, fallbackFixtureVa, powerFactor, false,
+                out totalKw, out totalKva, out loadAssumed, out loadSource,
+                out rowLoadByBlock, out missingCatalogBlocks, out specBreakdown);
+        }
+
+        private static void ComputeCircuitLoadFromProjectDb(
+            Document doc,
+            Dictionary<string, int> countsByBlock,
+            double? explicitFixtureWatt,
+            double? explicitFixtureVa,
+            double fallbackFixtureVa,
+            double powerFactor,
+            bool strictNoAssume,
+            out double totalKw,
+            out double totalKva,
+            out bool loadAssumed,
+            out string loadSource,
+            out Dictionary<string, object> rowLoadByBlock,
+            out List<string> missingCatalogBlocks,
+            out Dictionary<string, object> specBreakdown)
+        {
             totalKw = 0.0;
             totalKva = 0.0;
             loadAssumed = false;
-            loadSource = "default_40va_assumed";
+            loadSource = strictNoAssume ? "pending_user_specs" : "default_40va_assumed";
             rowLoadByBlock = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
             missingCatalogBlocks = new List<string>();
             specBreakdown = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
@@ -489,25 +684,44 @@ namespace AIEngineer.AutoCAD
                     }
                 }
 
-                loadAssumed = true;
                 if (!missingCatalogBlocks.Contains(kv.Key)) missingCatalogBlocks.Add(kv.Key);
-                double fbVa = kv.Value * safeFallbackVa;
-                double fbKva = fbVa / 1000.0;
-                double fbKw = fbKva * pf;
-                totalKva += fbKva;
-                totalKw += fbKw;
-                rowLoadByBlock[kv.Key] = "~" + Math.Round(fbVa, 0).ToString(CultureInfo.InvariantCulture) + " VA (افتراضي)";
-                specBreakdown[kv.Key] = new Dictionary<string, object>
+                if (strictNoAssume)
                 {
-                    { "qty", kv.Value },
-                    { "unit_va", Math.Round(safeFallbackVa, 2) },
-                    { "total_va", Math.Round(fbVa, 2) },
-                    { "source", "default_40va_assumed" }
-                };
+                    rowLoadByBlock[kv.Key] = "غير مسجل بالليجند (" + kv.Value.ToString(CultureInfo.InvariantCulture) + "x ? W)";
+                    specBreakdown[kv.Key] = new Dictionary<string, object>
+                    {
+                        { "qty", kv.Value },
+                        { "unit_va", 0.0 },
+                        { "total_va", 0.0 },
+                        { "missing_from_legend", true },
+                        { "source", "pending_user_specs" }
+                    };
+                }
+                else
+                {
+                    loadAssumed = true;
+                    double fbVa = kv.Value * safeFallbackVa;
+                    double fbKva = fbVa / 1000.0;
+                    double fbKw = fbKva * pf;
+                    totalKva += fbKva;
+                    totalKw += fbKw;
+                    rowLoadByBlock[kv.Key] = "~" + Math.Round(fbVa, 0).ToString(CultureInfo.InvariantCulture) + " VA (افتراضي)";
+                    specBreakdown[kv.Key] = new Dictionary<string, object>
+                    {
+                        { "qty", kv.Value },
+                        { "unit_va", Math.Round(safeFallbackVa, 2) },
+                        { "total_va", Math.Round(fbVa, 2) },
+                        { "source", "default_40va_assumed" }
+                    };
+                }
             }
 
             if (missingCatalogBlocks.Count == 0 && matchedAny)
                 loadSource = "project_legend_db";
+            else if (strictNoAssume && matchedAny)
+                loadSource = "partial_pending_user_specs";
+            else if (strictNoAssume)
+                loadSource = "pending_user_specs";
             else if (matchedAny)
                 loadSource = "partial_legend_db";
             else
@@ -2049,6 +2263,58 @@ namespace AIEngineer.AutoCAD
             }
             if (warnings.Count > 0) res["warnings"] = warnings;
             return Ok(res);
+        }
+
+        private static Dictionary<string, Dictionary<string, object>> GetSavedDialuxRoomPrefs(Document doc)
+        {
+            Dictionary<string, Dictionary<string, object>> result =
+                new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+            if (doc == null || doc.Database == null || doc.Database.UnmanagedObject == IntPtr.Zero)
+                return result;
+
+            IntPtr dbPtr = doc.Database.UnmanagedObject;
+            lock (s_lastCoordLock)
+            {
+                EnsureDocDestroyedHook();
+                EnsureProjectLegendDbLoadedLocked(doc, doc.Database);
+                Dictionary<string, Dictionary<string, object>> stored;
+                if (s_dialuxRoomPrefsByDb.TryGetValue(dbPtr, out stored) && stored != null)
+                {
+                    foreach (KeyValuePair<string, Dictionary<string, object>> kv in stored)
+                    {
+                        if (kv.Value != null)
+                            result[kv.Key] = new Dictionary<string, object>(kv.Value, StringComparer.OrdinalIgnoreCase);
+                    }
+                }
+            }
+            return result;
+        }
+
+        private static void SaveDialuxRoomPrefs(
+            Document doc,
+            Dictionary<string, Dictionary<string, object>> prefs)
+        {
+            if (doc == null || doc.Database == null || doc.Database.UnmanagedObject == IntPtr.Zero || prefs == null)
+                return;
+
+            IntPtr dbPtr = doc.Database.UnmanagedObject;
+            lock (s_lastCoordLock)
+            {
+                EnsureDocDestroyedHook();
+                EnsureProjectLegendDbLoadedLocked(doc, doc.Database);
+                Dictionary<string, Dictionary<string, object>> stored;
+                if (!s_dialuxRoomPrefsByDb.TryGetValue(dbPtr, out stored) || stored == null)
+                {
+                    stored = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+                    s_dialuxRoomPrefsByDb[dbPtr] = stored;
+                }
+                foreach (KeyValuePair<string, Dictionary<string, object>> kv in prefs)
+                {
+                    if (string.IsNullOrWhiteSpace(kv.Key) || kv.Value == null) continue;
+                    stored[kv.Key.Trim()] = new Dictionary<string, object>(kv.Value, StringComparer.OrdinalIgnoreCase);
+                }
+                SaveProjectDatabaseToDiskLocked(doc, doc.Database);
+            }
         }
     }
 }

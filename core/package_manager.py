@@ -60,6 +60,7 @@ _RUNTIME_DATA_FILES = (
     "mission.json",
     "settings.json",
 )
+_CATALOG_DATA_FILES = ("data/switchgear_3d_catalog.json",)
 _RUNTIME_DIRECTORIES = ("workspace", "logs", "backup")
 _REQUIRED_RECOVERY_FILES = frozenset({"agent_state.json", "mission.json", "settings.json"})
 _SECRET_KEY_FRAGMENTS = ("api_key", "credential", "password", "secret", "token")
@@ -201,6 +202,11 @@ class PackageBuilder:
                 if path.suffix.casefold() in {".pyc", ".pyo"}:
                     continue
                 entries[relative] = _read_bounded(path, PackagingError)
+        for name in _CATALOG_DATA_FILES:
+            path = self.project_root / name
+            if path.is_file():
+                _validate_source_path(path, self.project_root)
+                entries[name] = _read_bounded(path, PackagingError)
         if len(entries) > _MAX_ARCHIVE_ENTRIES:
             raise PackagingError("Portable package exceeds its file-count limit.")
         if sum(len(content) for content in entries.values()) > _MAX_ARCHIVE_BYTES:
@@ -432,6 +438,21 @@ class MigrationManager:
 def _portable_data_templates(project_root: Path) -> dict[str, bytes]:
     defaults = _runtime_defaults(project_root, PackagingError)
     return {f"data/{name}": _json_bytes(value) for name, value in defaults.items()}
+
+
+def ensure_runtime_data_files(project_root: Path) -> tuple[str, ...]:
+    """Initialize any missing schema-v1 runtime JSON files under data/ without overwriting."""
+    root = project_root.expanduser().resolve(strict=True)
+    data_dir = root / "data"
+    defaults = _runtime_defaults(root, PackagingError)
+    created: list[str] = []
+    for name in _RUNTIME_DATA_FILES:
+        target = data_dir / name
+        if target.exists():
+            continue
+        StateStore(target).save(defaults[name])
+        created.append(name)
+    return tuple(created)
 
 
 def _runtime_defaults(
