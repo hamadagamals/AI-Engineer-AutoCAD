@@ -1524,54 +1524,108 @@ namespace AcCoreRegressionHarness
                 AssertTrue(dialuxCmdType != null && dialuxCmdType.GetMethod("RunDialuxExportWizard") != null, "Test 15E missing AIENGDIALUX command class");
                 ed.WriteMessage("\nTEST15E=OK|AIENGDIALUX=PRESENT\n");
 
-                // TEST16A: Multi-column gridded Legend extraction + block-name wattage fallback (upligh9w -> 9W) + strict extracted_items
+                // TEST16A: Multi-column 8-col gridded Legend (with TYPE sketch diagrams + RECOMMENDED sub-lines + range wattages + zero-load panel/accessory)
                 execTool.Invoke(null, new object[] {
                     doc, "manage_project_legend_db",
                     new Dictionary<string, object> { { "action", "set_item" }, { "block_name", "STALE_OLD_BLOCK" }, { "watt", 99.0 }, { "description", "Stale from another DWG" } }
                 });
                 List<string> handles16a = new List<string>();
+                string wire16aCirc = "";
                 using (Transaction tr16a = db.TransactionManager.StartTransaction())
                 {
                     LayerTable lt16 = (LayerTable)tr16a.GetObject(db.LayerTableId, OpenMode.ForRead);
                     EnsureLayer(tr16a, lt16, "E-LEGEND-16A", 7);
+                    EnsureLayer(tr16a, lt16, "E-LTG-16A-CIRC", 4);
                     BlockTable bt16 = (BlockTable)tr16a.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    ObjectId pedBtr = EnsureRectBlock(tr16a, bt16, "ped post", 0.4, 0.4, 6);
                     ObjectId up9Btr = EnsureRectBlock(tr16a, bt16, "upligh9w", 0.4, 0.4, 3);
-                    ObjectId spot16Btr = EnsureRectBlock(tr16a, bt16, "SPOT16A", 0.4, 0.4, 2);
+                    ObjectId spotBtr = EnsureRectBlock(tr16a, bt16, "SPOT", 0.4, 0.4, 2);
+                    ObjectId spoteBtr = EnsureRectBlock(tr16a, bt16, "SPOTE", 0.35, 0.35, 5);
+                    ObjectId sideBtr = EnsureRectBlock(tr16a, bt16, "Sidelight", 0.4, 0.4, 1);
+                    ObjectId panel16Btr = EnsureRectBlock(tr16a, bt16, "A$Cf9b77d30", 0.4, 0.4, 3);
+                    ObjectId tranBtr = EnsureRectBlock(tr16a, bt16, "traneleled", 0.4, 0.4, 5);
                     BlockTableRecord ms16a = (BlockTableRecord)tr16a.GetObject(bt16[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
 
-                    double[] yGrid = new double[] { 15.0, 11.0, 7.0, 3.0 };
+                    double[] yGrid = new double[] { 27.0, 24.0, 20.0, 16.0, 12.0, 8.0, 4.0, 0.0 };
                     for (int yi = 0; yi < yGrid.Length; yi++)
-                    {
-                        ObjectId hl = AddLine(ms16a, tr16a, new Point3d(120.0, yGrid[yi], 0), new Point3d(162.0, yGrid[yi], 0), "E-LEGEND-16A", 7);
-                        handles16a.Add(hl.Handle.ToString());
-                    }
-                    double[] xGrid = new double[] { 120.0, 123.0, 128.0, 144.0, 150.0, 155.0, 162.0 };
+                        handles16a.Add(AddLine(ms16a, tr16a, new Point3d(120.0, yGrid[yi], 0), new Point3d(176.0, yGrid[yi], 0), "E-LEGEND-16A", 7).Handle.ToString());
+                    double[] xGrid = new double[] { 120.0, 122.5, 127.0, 132.5, 149.0, 154.0, 159.0, 164.0, 176.0 };
                     for (int xi = 0; xi < xGrid.Length; xi++)
-                    {
-                        ObjectId vl = AddLine(ms16a, tr16a, new Point3d(xGrid[xi], 3.0, 0), new Point3d(xGrid[xi], 15.0, 0), "E-LEGEND-16A", 7);
-                        handles16a.Add(vl.Handle.ToString());
-                    }
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(120.5, 12.5, 0), "TAG", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(123.5, 12.5, 0), "SYMBOL", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(129.0, 12.5, 0), "DESCRIPTION", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(145.0, 12.5, 0), "QTY1", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(151.0, 12.5, 0), "QTY2", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(156.0, 12.5, 0), "PHOTO", 0.35, "E-LEGEND-16A").Handle.ToString());
+                        handles16a.Add(AddLine(ms16a, tr16a, new Point3d(xGrid[xi], 0.0, 0), new Point3d(xGrid[xi], 27.0, 0), "E-LEGEND-16A", 7).Handle.ToString());
 
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, 9.0, 0), "A", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(InsertBlock(ms16a, tr16a, up9Btr, new Point3d(125.5, 9.0, 0), "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(129.0, 9.0, 0), "LED UP-LIGHT IN-GROUND", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(145.0, 9.0, 0), "17 PCS", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(151.0, 9.0, 0), "244 PCS", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    // Short diagram lines inside TYPE column & short sub-divider lines inside RECOMMENDED TYPE (must be filtered by FilterMajorGridAxes)
+                    handles16a.Add(AddLine(ms16a, tr16a, new Point3d(128.0, 21.0, 0), new Point3d(131.5, 21.0, 0), "E-LEGEND-16A", 7).Handle.ToString());
+                    handles16a.Add(AddLine(ms16a, tr16a, new Point3d(129.8, 20.5, 0), new Point3d(129.8, 23.0, 0), "E-LEGEND-16A", 7).Handle.ToString());
+                    handles16a.Add(AddLine(ms16a, tr16a, new Point3d(164.0, 20.8, 0), new Point3d(176.0, 20.8, 0), "E-LEGEND-16A", 7).Handle.ToString());
+                    handles16a.Add(AddLine(ms16a, tr16a, new Point3d(164.0, 16.8, 0), new Point3d(176.0, 16.8, 0), "E-LEGEND-16A", 7).Handle.ToString());
 
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, 5.0, 0), "B", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(InsertBlock(ms16a, tr16a, spot16Btr, new Point3d(125.5, 5.0, 0), "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(129.0, 5.0, 0), "RECESSED DOWNLIGHT 18W", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(145.0, 5.0, 0), "20 PCS", 0.35, "E-LEGEND-16A").Handle.ToString());
-                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(151.0, 5.0, 0), "18 PCS", 0.35, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(120.8, 25.5, 0), "CODE", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(123.5, 25.5, 0), "ICON", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(128.5, 25.5, 0), "TYPE", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(134.0, 25.5, 0), "DESCRIPTION", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(150.0, 25.5, 0), "QTY AS-BUILT", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(155.0, 25.5, 0), "QTY SHOP", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(160.0, 25.5, 0), "QTY BOQ", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(165.5, 25.5, 0), "RECOMMENDED TYPE", 0.30, "E-LEGEND-16A").Handle.ToString());
 
-                    InsertBlock(ms16a, tr16a, up9Btr, new Point3d(170.0, 5.0, 0), "E-LEGEND-16A");
-                    InsertBlock(ms16a, tr16a, spot16Btr, new Point3d(172.0, 5.0, 0), "E-LEGEND-16A");
+                    // Row 1 (Y=22): ped post -> 24W
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, 22.0, 0), "C", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(InsertBlock(ms16a, tr16a, pedBtr, new Point3d(124.7, 22.0, 0), "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(128.0, 22.2, 0), "BOLLARD LIGHTING", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(133.5, 22.0, 0), "LED NOT MORE THAN 24 W, LUMEN NOT LESS THAN 2500 lm", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(150.0, 22.0, 0), "55 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(155.0, 22.0, 0), "55 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(160.0, 22.0, 0), "55 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+
+                    // Row 2 (Y=18): upligh9w + "9-12 W LED" -> 9W (prefers matching block-name wattage within range)
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, 18.0, 0), "E", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(InsertBlock(ms16a, tr16a, up9Btr, new Point3d(124.7, 18.0, 0), "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(128.0, 18.0, 0), "UP LED LIGHTING", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(133.5, 18.0, 0), "FLOOR RECESSED FIXTURE 9-12 W LED IP 67", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(150.0, 18.0, 0), "17 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(155.0, 18.0, 0), "17 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(160.0, 18.0, 0), "17 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+
+                    // Row 3 (Y=14): SPOT + incidental SPOTE inside TYPE column -> SPOT=9W, SPOTE NOT extracted
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, 14.0, 0), "F", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(InsertBlock(ms16a, tr16a, spotBtr, new Point3d(124.7, 14.0, 0), "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(128.0, 14.8, 0), "SPOT LIGHTING", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(InsertBlock(ms16a, tr16a, spoteBtr, new Point3d(129.7, 13.6, 0), "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(133.5, 14.0, 0), "SPIKE FIXTURE 9 W LED WARM COLOR 3000K", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(150.0, 14.0, 0), "244 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(155.0, 14.0, 0), "248 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(160.0, 14.0, 0), "244 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+
+                    // Row 4 (Y=10): Sidelight + "3-6W LED" -> 6W (upper bound of range)
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, 10.0, 0), "G", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(InsertBlock(ms16a, tr16a, sideBtr, new Point3d(124.7, 10.0, 0), "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(128.0, 10.0, 0), "WALL RECESSED LIGHT", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(133.5, 10.0, 0), "WALL RECESSED FIXTURE 3-6W LED IP 65", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(150.0, 10.0, 0), "123 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(155.0, 10.0, 0), "123 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(160.0, 10.0, 0), "111 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+
+                    // Row 5 (Y=6): A$Cf9b77d30 -> panel (0W non-load)
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(121.0, 6.0, 0), "Z", 0.30, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(InsertBlock(ms16a, tr16a, panel16Btr, new Point3d(124.7, 6.0, 0), "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(128.0, 6.0, 0), "DB LIGHTING DISTRIBUTION PANEL", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(133.5, 6.0, 0), "OUTDOOR TYPE, WATER PROOF WITH SUN SHADE", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(150.0, 6.0, 0), "6 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(155.0, 6.0, 0), "6 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(160.0, 6.0, 0), "6 PCS", 0.25, "E-LEGEND-16A").Handle.ToString());
+
+                    // Row 6 (Y=2): traneleled -> accessory (0W non-load)
+                    handles16a.Add(InsertBlock(ms16a, tr16a, tranBtr, new Point3d(124.7, 2.0, 0), "E-LEGEND-16A").Handle.ToString());
+                    handles16a.Add(AddText(ms16a, tr16a, new Point3d(133.5, 2.0, 0), "ELECTRICAL BOX FOR LED TRANSFORMER", 0.25, "E-LEGEND-16A").Handle.ToString());
+
+                    // Drawing blocks + isolated test circuit at Y=-10 to verify strict_legend_specs calc
+                    InsertBlock(ms16a, tr16a, pedBtr, new Point3d(126.0, -10.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, spotBtr, new Point3d(130.0, -10.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, tranBtr, new Point3d(134.0, -10.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, up9Btr, new Point3d(140.0, -10.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, sideBtr, new Point3d(142.0, -10.0, 0), "E-LTG-16A-CIRC");
+                    InsertBlock(ms16a, tr16a, panel16Btr, new Point3d(144.0, -10.0, 0), "E-LTG-16A-CIRC");
+                    wire16aCirc = AddLine(ms16a, tr16a, new Point3d(125.0, -10.0, 0), new Point3d(135.0, -10.0, 0), "E-LTG-16A-CIRC", 4).Handle.ToString();
                     tr16a.Commit();
                 }
 
@@ -1580,22 +1634,50 @@ namespace AcCoreRegressionHarness
                     new Dictionary<string, object> { { "action", "extract_from_selection" }, { "handles", handles16a.ToArray() } }
                 });
                 IList extItems16a = r16a.ContainsKey("extracted_items") ? r16a["extracted_items"] as IList : null;
-                AssertTrue(GetBoolVal(r16a, "ok") && extItems16a != null && extItems16a.Count == 2,
-                    "Test 16A expected strictly 2 extracted_items from gridded Legend");
-                double wUp9 = 0.0, wSpot16 = 0.0;
-                bool sawStale16a = false;
+                AssertTrue(GetBoolVal(r16a, "ok") && extItems16a != null && extItems16a.Count == 6,
+                    "Test 16A expected strictly 6 ICON items from 8-column gridded Legend (got " + (extItems16a != null ? extItems16a.Count : 0) + ")");
+                double wPed = 0.0, wUp9 = 0.0, wSpot16 = 0.0, wSide = 0.0;
+                string catPanel16 = "", catTran16 = "";
+                bool sawStale16a = false, sawSpote16a = false;
                 foreach (object itemObj in extItems16a)
                 {
                     Dictionary<string, object> it = itemObj as Dictionary<string, object>;
                     if (it == null) continue;
                     string bn = GetStrVal(it, "block_name");
-                    if (bn == "upligh9w") wUp9 = GetDblVal(it, "watt");
-                    else if (bn == "SPOT16A") wSpot16 = GetDblVal(it, "watt");
+                    if (bn == "ped post") wPed = GetDblVal(it, "watt");
+                    else if (bn == "upligh9w") wUp9 = GetDblVal(it, "watt");
+                    else if (bn == "SPOT") wSpot16 = GetDblVal(it, "watt");
+                    else if (bn == "Sidelight") wSide = GetDblVal(it, "watt");
+                    else if (bn == "A$Cf9b77d30") catPanel16 = GetStrVal(it, "category");
+                    else if (bn == "traneleled") catTran16 = GetStrVal(it, "category");
+                    else if (bn == "SPOTE") sawSpote16a = true;
                     else if (bn == "STALE_OLD_BLOCK") sawStale16a = true;
                 }
-                AssertTrue(!sawStale16a && Math.Abs(wUp9 - 9.0) < 0.01 && Math.Abs(wSpot16 - 18.0) < 0.01,
-                    "Test 16A failed wattage fallback / strict extracted_items check (up9=" + wUp9 + ", spot=" + wSpot16 + ")");
-                ed.WriteMessage("\nTEST16A=OK|GRID_EXTRACTED=2|UPLIGH9W=" + wUp9 + "|SPOT16A=" + wSpot16 + "\n");
+                AssertTrue(!sawStale16a && !sawSpote16a &&
+                           Math.Abs(wPed - 24.0) < 0.01 && Math.Abs(wUp9 - 9.0) < 0.01 &&
+                           Math.Abs(wSpot16 - 9.0) < 0.01 && Math.Abs(wSide - 6.0) < 0.01 &&
+                           catPanel16 == "panel" && catTran16 == "accessory",
+                    "Test 16A 8-col Legend mismatch (ped=" + wPed + ", up9=" + wUp9 + ", spot=" + wSpot16 +
+                    ", side=" + wSide + ", panelCat=" + catPanel16 + ", tranCat=" + catTran16 + ", spote=" + sawSpote16a + ")");
+
+                Dictionary<string, object> r16aCalc = (Dictionary<string, object>)execTool.Invoke(null, new object[] {
+                    doc, "find_blocks_along_path",
+                    new Dictionary<string, object>
+                    {
+                        { "handles", new string[] { wire16aCirc } },
+                        { "circuit_name", "C16A-CALC" },
+                        { "include_electrical_calc", true },
+                        { "strict_legend_specs", true },
+                        { "draw_legend", false }, { "select_blocks", false }, { "select_paths", false }, { "zoom", false }
+                    }
+                });
+                Dictionary<string, object> ec16a = r16aCalc.ContainsKey("electrical_calc") ? r16aCalc["electrical_calc"] as Dictionary<string, object> : null;
+                AssertTrue(GetBoolVal(r16aCalc, "ok") && !GetBoolVal(r16aCalc, "needs_user_specs") &&
+                           GetStrVal(r16aCalc, "load_source") == "project_legend_db" && ec16a != null &&
+                           Math.Abs(GetDblVal(ec16a, "load_kw") - 0.033) < 0.002,
+                    "Test 16A electrical calc with Legend DB + 0W accessory failed (load_source=" + GetStrVal(r16aCalc, "load_source") +
+                    ", load_kw=" + (ec16a != null ? GetDblVal(ec16a, "load_kw") : -1.0) + ")");
+                ed.WriteMessage("\nTEST16A=OK|GRID_EXTRACTED=6|PED=" + wPed + "|UPLIGH9W=" + wUp9 + "|SPOT=" + wSpot16 + "|SIDE=" + wSide + "|CALC_KW=0.033\n");
 
                 // TEST16B: Nearest-competing-wire fixture ownership arbitration
                 string wire16bA = "";

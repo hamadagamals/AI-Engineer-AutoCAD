@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-25 - Phase 7.1.1: Real-Project 8-Column Gridded Legend, Range Wattages & Zero-Load Accessories
+
+- **Full-Span Grid Filtering & Header-Aware Symbol Column Isolation (`integrations/autocad_context_plugin/CadProjectLegendDb.cs`):**
+  - Added `FilterMajorGridAxes` to drop short detail/diagram lines inside `TYPE` cells (`<45%` table width / `<40%` table height) and short sub-divider lines inside `RECOMMENDED TYPE` cells so table rows and columns align with outer borders cleanly.
+  - Added `IsLegendHeaderSymbolText` (`ICON`/`SYMBOL`), `IsLegendHeaderDescText` (`DESCRIPTION`/`TYPE`), and `IsLegendHeaderIgnoreText` (`RECOMMENDED TYPE`/`PHOTO`/`CATALOG`) so `TryExtractGridTableLegend` locks onto the primary symbol column (`ICON`), ignores incidental sketch blocks in `TYPE` (e.g. `SPOTE`), stops description collection at the first `QTY` column, and ignores `RECOMMENDED` columns.
+- **Range Wattages, Voltage Ranges & Zero-Load Panel/Accessory Classification (`CadProjectLegendDb.cs`, `AcCoreRegressionVerifier.cs`):**
+  - Added wattage range parsing (`9-12 W`, `3-6W`, `10 to 15W`) preferring an in-range wattage embedded in the block name (`upligh9w` -> `9W`) or using the conservative upper bound (`3-6W` -> `6W`), plus hyphenated wattages (`LED-12W`) and `220-240V` parsing (`230V`).
+  - Added `"accessory"` classification (`MANHOLE`, `METAL POST`, `ELECTRICAL BOX FOR LED TRANSFORMER`, `CABLE PHASE`, etc.) and `0 W` non-consuming handling in `ComputeCircuitLoadFromProjectDb` for `"panel"` and `"accessory"` entries so strict calculations never assume `40 VA` on non-luminaire blocks.
+  - Updated `ManageProjectLegendDb` (`action: 'extract_from_selection'`) to prune stale `drawing_legend` entries cleanly and upgraded `TEST16A` to verify all 6 `ICON` blocks + zero-load accessory calculation.
+
 ## 2026-11-25 - Phase 7.1: Field-Feedback Precision Upgrade (Gridded Legend Extraction, Nearest-Wire Ownership, Multi-Line Feeder Callout Parser & Exact Circuit Lock)
 
 - **Multi-Column Gridded Legend Extractor & Strict Selection Isolation (`integrations/autocad_context_plugin/CadProjectLegendDb.cs`):**

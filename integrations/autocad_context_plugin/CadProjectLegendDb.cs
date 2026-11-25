@@ -682,6 +682,22 @@ namespace AIEngineer.AutoCAD
                         };
                         continue;
                     }
+                    if (string.Equals(spec.Category, "panel", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(spec.Category, "accessory", StringComparison.OrdinalIgnoreCase))
+                    {
+                        matchedAny = true;
+                        rowLoadByBlock[kv.Key] = "0 W (" + (string.Equals(spec.Category, "panel", StringComparison.OrdinalIgnoreCase) ? "لوحة/توزيع" : "ملحق غير مستهلك") + ")";
+                        specBreakdown[kv.Key] = new Dictionary<string, object>
+                        {
+                            { "qty", kv.Value },
+                            { "unit_watt", 0.0 },
+                            { "total_watt", 0.0 },
+                            { "category", spec.Category },
+                            { "source", spec.Source },
+                            { "description", spec.Description ?? "" }
+                        };
+                        continue;
+                    }
                 }
 
                 if (!missingCatalogBlocks.Contains(kv.Key)) missingCatalogBlocks.Add(kv.Key);
@@ -783,8 +799,19 @@ namespace AIEngineer.AutoCAD
                 combined.Contains("تكييف") || combined.Contains("شيلر"))
                 return "hvac";
             if (combined.Contains("PANEL") || combined.Contains("SWITCHBOARD") || combined.Contains("SMDB") ||
-                combined.Contains("MDB") || combined.Contains("EMDB") || combined.Contains("لوحة"))
+                combined.Contains("MDB") || combined.Contains("EMDB") || combined.Contains("DISTRIBUTION PANEL") ||
+                combined.Contains("DB LIGHTING") || combined.Contains("DB-") || combined.Contains("لوحة"))
                 return "panel";
+            bool hasWattHint = Regex.IsMatch(combined, @"\b\d+(?:\.\d+)?\s*(?:WATTS?|W|KW|VA|KVA)\b");
+            if (!hasWattHint &&
+                (combined.Contains("MANHOLE") || combined.Contains("HANDHOLE") ||
+                 combined.Contains("METAL POST") || combined.Contains("LIGHTING POLE") ||
+                 combined.Contains("ELECTRICAL BOX") || combined.Contains("TRANSFORMER BOX") ||
+                 combined.Contains("LED TRANSFORMER") || combined.Contains("LED DRIVER") ||
+                 combined.Contains("JUNCTION BOX") || combined.Contains("PULL BOX") ||
+                 combined.Contains("CABLE PHASE") || combined.Contains("VOLTAGE DROP") ||
+                 combined.Contains("غرفة تفتيش") || combined.Contains("علبة")))
+                return "accessory";
             return "lighting";
         }
 
@@ -816,6 +843,44 @@ namespace AIEngineer.AutoCAD
                 }
             }
 
+            // 1b. Wattage range e.g. "9-12 W LED", "3-6W", "10 to 15W"
+            if (!item.Watt.HasValue)
+            {
+                Match mRange = Regex.Match(
+                    desc,
+                    @"(?:^|[\s,;(/:])(\d+(?:\.\d+)?)\s*(?:[-–~]|TO)\s*(\d+(?:\.\d+)?)\s*(?:WATTS?|W(?=\b|[\s,;./)]|$)|واط|وات)",
+                    RegexOptions.IgnoreCase);
+                if (mRange.Success)
+                {
+                    double rA, rB;
+                    if (double.TryParse(mRange.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out rA) &&
+                        double.TryParse(mRange.Groups[2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out rB))
+                    {
+                        double lowW = Math.Min(rA, rB);
+                        double highW = Math.Max(rA, rB);
+                        if (highW > 0.0 && highW <= 50000.0)
+                        {
+                            double chosenW = highW;
+                            if (!string.IsNullOrEmpty(item.BlockName))
+                            {
+                                Match mBlkInRange = Regex.Match(
+                                    item.BlockName,
+                                    @"(?:^|[A-Za-z_\-\s])(\d+(?:\.\d+)?)\s*W(?=$|[^A-Za-z])",
+                                    RegexOptions.IgnoreCase);
+                                double bwVal;
+                                if (mBlkInRange.Success &&
+                                    double.TryParse(mBlkInRange.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out bwVal) &&
+                                    bwVal >= lowW - 1e-3 && bwVal <= highW + 1e-3)
+                                {
+                                    chosenW = bwVal;
+                                }
+                            }
+                            item.Watt = Math.Round(chosenW, 2);
+                        }
+                    }
+                }
+            }
+
             // 2. kW
             if (!item.Watt.HasValue)
             {
@@ -828,10 +893,10 @@ namespace AIEngineer.AutoCAD
                 }
             }
 
-            // 3. Single Wattage e.g. "45 WATT", "22W", "36 وات"
+            // 3. Single Wattage e.g. "45 WATT", "22W", "LED-12W", "36 وات"
             if (!item.Watt.HasValue)
             {
-                Match mWatt = Regex.Match(desc, @"(?:^|[\s,;(/:])(\d+(?:\.\d+)?)\s*(?:WATTS?|W(?=\b|[\s,;./)]|$)|واط|وات)", RegexOptions.IgnoreCase);
+                Match mWatt = Regex.Match(desc, @"(?:^|[\s,;(/:]|(?<!\d)-)(\d+(?:\.\d+)?)\s*(?:WATTS?|W(?=\b|[\s,;./)]|$)|واط|وات)", RegexOptions.IgnoreCase);
                 if (mWatt.Success)
                 {
                     double wVal;
@@ -859,13 +924,21 @@ namespace AIEngineer.AutoCAD
                 }
             }
 
-            // 5. Voltage e.g. 220V / 230V / 380V
-            Match mV = Regex.Match(desc, @"(?:^|[\s,;(/:])(220|230|240|380|400|415)\s*V(?=\b|[\s,;./)]|$)", RegexOptions.IgnoreCase);
-            if (mV.Success)
+            // 5. Voltage e.g. 220V / 230V / 380V / 220-240V
+            Match mVRange = Regex.Match(desc, @"(?:^|[\s,;(/:])(220|230)\s*[-–~]\s*(240)\s*V(?=\b|[\s,;./)]|$)", RegexOptions.IgnoreCase);
+            if (mVRange.Success)
             {
-                double vVal;
-                if (double.TryParse(mV.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out vVal))
-                    item.VoltageV = vVal;
+                item.VoltageV = 230.0;
+            }
+            else
+            {
+                Match mV = Regex.Match(desc, @"(?:^|[\s,;(/:])(220|230|240|380|400|415)\s*V(?=\b|[\s,;./)]|$)", RegexOptions.IgnoreCase);
+                if (mV.Success)
+                {
+                    double vVal;
+                    if (double.TryParse(mV.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out vVal))
+                        item.VoltageV = vVal;
+                }
             }
 
             // 6. Fallback: explicit numeric wattage embedded in fixture block name (e.g. upligh9w -> 9W, LED_18W -> 18W)
@@ -1124,6 +1197,124 @@ namespace AIEngineer.AutoCAD
                    u == "SR" || u == "SL" || u == "ID" || u == "الكود";
         }
 
+        private static bool IsLegendHeaderSymbolText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string u = Regex.Replace(text.Trim().ToUpperInvariant(), @"[\s'’.:_\-]+", " ").Trim();
+            return u == "ICON" || u == "ICONS" || u == "SYMBOL" || u == "SYMBOLS" || u == "SYM" ||
+                   u == "الرمز" || u == "رمز" || u == "البلوك";
+        }
+
+        private static bool IsLegendHeaderDescText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string u = Regex.Replace(text.Trim().ToUpperInvariant(), @"[\s'’.:_\-]+", " ").Trim();
+            return u == "DESCRIPTION" || u == "DESCRIPTIONS" || u == "SPEC" || u == "SPECIFICATION" ||
+                   u == "SPECIFICATIONS" || u == "TYPE" || u == "FIXTURE TYPE" || u == "LIGHTING TYPE" ||
+                   u == "الوصف" || u == "الوصف الهندسي" || u == "المواصفات" || u == "النوع";
+        }
+
+        private static bool IsLegendHeaderIgnoreText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string u = Regex.Replace(text.Trim().ToUpperInvariant(), @"[\s'’.:_\-]+", " ").Trim();
+            if (u == "NOTES" || u == "NOTE" || u == "صورة" || u == "ملاحظات") return true;
+            return u.Contains("RECOMMENDED") || u.Contains("PHOTO") || u.Contains("IMAGE") ||
+                   u.Contains("PICTURE") || u.Contains("ILLUSTRATION") || u.Contains("CATALOG") ||
+                   u.Contains("MANUFACTURER") || u.Contains("MAKE") || u.Contains("REMARKS");
+        }
+
+        private static List<double> FilterMajorGridAxes(
+            List<LegendGridSegment> segs,
+            bool horizontal,
+            double axisTol,
+            double totalSpan,
+            double minCoverageRatio,
+            bool descending)
+        {
+            List<LegendGridSegment> axisSegs = new List<LegendGridSegment>();
+            for (int i = 0; i < segs.Count; i++)
+            {
+                if (segs[i].IsHoriz == horizontal) axisSegs.Add(segs[i]);
+            }
+            if (axisSegs.Count == 0) return new List<double>();
+
+            axisSegs.Sort(delegate(LegendGridSegment a, LegendGridSegment b)
+            {
+                double va = horizontal ? (a.Y1 + a.Y2) * 0.5 : (a.X1 + a.X2) * 0.5;
+                double vb = horizontal ? (b.Y1 + b.Y2) * 0.5 : (b.X1 + b.X2) * 0.5;
+                return va.CompareTo(vb);
+            });
+
+            List<double> allAxes = new List<double>();
+            List<double> majorAxes = new List<double>();
+            double minCovered = Math.Max(0.0, totalSpan * minCoverageRatio);
+
+            int idx = 0;
+            while (idx < axisSegs.Count)
+            {
+                double curPos = horizontal ? (axisSegs[idx].Y1 + axisSegs[idx].Y2) * 0.5 : (axisSegs[idx].X1 + axisSegs[idx].X2) * 0.5;
+                double sumPos = curPos;
+                int cnt = 1;
+                double lastPos = curPos;
+                List<double[]> spans = new List<double[]>();
+                spans.Add(horizontal
+                    ? new double[] { axisSegs[idx].MinX, axisSegs[idx].MaxX }
+                    : new double[] { axisSegs[idx].MinY, axisSegs[idx].MaxY });
+                idx++;
+                while (idx < axisSegs.Count)
+                {
+                    double p = horizontal ? (axisSegs[idx].Y1 + axisSegs[idx].Y2) * 0.5 : (axisSegs[idx].X1 + axisSegs[idx].X2) * 0.5;
+                    if (p - lastPos <= axisTol)
+                    {
+                        sumPos += p;
+                        cnt++;
+                        lastPos = p;
+                        spans.Add(horizontal
+                            ? new double[] { axisSegs[idx].MinX, axisSegs[idx].MaxX }
+                            : new double[] { axisSegs[idx].MinY, axisSegs[idx].MaxY });
+                        idx++;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                double meanAxis = sumPos / cnt;
+                allAxes.Add(meanAxis);
+
+                spans.Sort(delegate(double[] a, double[] b) { return a[0].CompareTo(b[0]); });
+                double covered = 0.0;
+                double curS = spans[0][0];
+                double curE = spans[0][1];
+                for (int si = 1; si < spans.Count; si++)
+                {
+                    if (spans[si][0] <= curE + axisTol)
+                    {
+                        if (spans[si][1] > curE) curE = spans[si][1];
+                    }
+                    else
+                    {
+                        covered += Math.Max(0.0, curE - curS);
+                        curS = spans[si][0];
+                        curE = spans[si][1];
+                    }
+                }
+                covered += Math.Max(0.0, curE - curS);
+
+                if (covered >= minCovered)
+                    majorAxes.Add(meanAxis);
+            }
+
+            List<double> chosen = majorAxes.Count >= 3 ? majorAxes : allAxes;
+            if (descending)
+                chosen.Sort(delegate(double a, double b) { return b.CompareTo(a); });
+            else
+                chosen.Sort();
+            return chosen;
+        }
+
         private static List<double> ClusterSortedAxisCoords(List<double> coords, double tol, bool descending)
         {
             List<double> result = new List<double>();
@@ -1239,17 +1430,20 @@ namespace AIEngineer.AutoCAD
                 List<LegendGridSegment> comp = clusters[clIdx];
                 if (comp.Count < 6) continue;
 
-                List<double> hCoords = new List<double>();
-                List<double> vCoords = new List<double>();
+                double compMinX = double.MaxValue, compMaxX = double.MinValue;
+                double compMinY = double.MaxValue, compMaxY = double.MinValue;
                 for (int si = 0; si < comp.Count; si++)
                 {
-                    if (comp[si].IsHoriz) hCoords.Add((comp[si].Y1 + comp[si].Y2) * 0.5);
-                    else vCoords.Add((comp[si].X1 + comp[si].X2) * 0.5);
+                    if (comp[si].MinX < compMinX) compMinX = comp[si].MinX;
+                    if (comp[si].MaxX > compMaxX) compMaxX = comp[si].MaxX;
+                    if (comp[si].MinY < compMinY) compMinY = comp[si].MinY;
+                    if (comp[si].MaxY > compMaxY) compMaxY = comp[si].MaxY;
                 }
-                if (hCoords.Count < 3 || vCoords.Count < 3) continue;
+                double compW = Math.Max(1e-4, compMaxX - compMinX);
+                double compH = Math.Max(1e-4, compMaxY - compMinY);
 
-                List<double> rowYs = ClusterSortedAxisCoords(hCoords, axisTol, true);
-                List<double> colXs = ClusterSortedAxisCoords(vCoords, axisTol, false);
+                List<double> rowYs = FilterMajorGridAxes(comp, true, axisTol, compW, 0.45, true);
+                List<double> colXs = FilterMajorGridAxes(comp, false, axisTol, compH, 0.40, false);
                 if (rowYs.Count < 3 || colXs.Count < 3) continue;
 
                 int nRows = rowYs.Count - 1;
@@ -1299,6 +1493,9 @@ namespace AIEngineer.AutoCAD
                 int[] colTagCellCnt = new int[nCols];
                 bool[] colHdrQty = new bool[nCols];
                 bool[] colHdrTag = new bool[nCols];
+                bool[] colHdrSym = new bool[nCols];
+                bool[] colHdrDesc = new bool[nCols];
+                bool[] colHdrIgnore = new bool[nCols];
 
                 for (int c = 0; c < nCols; c++)
                 {
@@ -1338,6 +1535,9 @@ namespace AIEngineer.AutoCAD
 
                             if (r <= 1 && IsLegendHeaderQtyText(combinedCell)) { colHdrQty[c] = true; continue; }
                             if (r <= 1 && IsLegendHeaderTagText(combinedCell)) { colHdrTag[c] = true; continue; }
+                            if (r <= 1 && IsLegendHeaderSymbolText(combinedCell)) { colHdrSym[c] = true; continue; }
+                            if (r <= 1 && IsLegendHeaderIgnoreText(combinedCell)) { colHdrIgnore[c] = true; continue; }
+                            if (r <= 1 && IsLegendHeaderDescText(combinedCell)) { colHdrDesc[c] = true; continue; }
 
                             colTextCellCnt[c]++;
                             if (IsLegendQtyCellText(combinedCell)) colQtyCellCnt[c]++;
@@ -1357,31 +1557,64 @@ namespace AIEngineer.AutoCAD
                 }
 
                 bool anyOutsidePlanSym = false;
+                bool anyHeaderSymCol = false;
                 int maxSymInAnyCol = 0;
                 for (int c = 0; c < nCols; c++)
                 {
-                    if (colOutsidePlanCnt[c] > 0) anyOutsidePlanSym = true;
+                    if (colOutsidePlanCnt[c] > 0 && !colHdrIgnore[c]) anyOutsidePlanSym = true;
+                    if (colHdrSym[c] && colSymCnt[c] > 0) anyHeaderSymCol = true;
                     if (colSymCnt[c] > maxSymInAnyCol) maxSymInAnyCol = colSymCnt[c];
                 }
                 if (maxSymInAnyCol < 2 && !(fromSelectionOnly && maxSymInAnyCol >= 1)) continue;
 
                 List<int> symCols = new List<int>();
-                int lastQtyCol = -1;
-                for (int c = nCols - 1; c >= 0; c--) { if (isQtyCol[c]) { lastQtyCol = c; break; } }
-                for (int c = 0; c < nCols; c++)
+                if (anyHeaderSymCol)
                 {
-                    if (colSymCnt[c] == 0) continue;
-                    if (anyOutsidePlanSym)
+                    for (int c = 0; c < nCols; c++)
                     {
-                        if (colOutsidePlanCnt[c] > 0) symCols.Add(c);
+                        if (colHdrSym[c] && colSymCnt[c] > 0) symCols.Add(c);
                     }
-                    else
+                }
+                else
+                {
+                    int lastQtyCol = -1;
+                    for (int c = nCols - 1; c >= 0; c--) { if (isQtyCol[c]) { lastQtyCol = c; break; } }
+                    List<int> candSymCols = new List<int>();
+                    for (int c = 0; c < nCols; c++)
                     {
-                        if (symCols.Count > 0 && lastQtyCol >= 0 && c > lastQtyCol) continue;
-                        if (colSymCnt[c] >= 2 || (fromSelectionOnly && colSymCnt[c] >= 1)) symCols.Add(c);
+                        if (colSymCnt[c] == 0 || isQtyCol[c] || isTagCol[c] || colHdrIgnore[c] || colHdrDesc[c]) continue;
+                        if (candSymCols.Count > 0 && lastQtyCol >= 0 && c > lastQtyCol) continue;
+                        if (anyOutsidePlanSym && colOutsidePlanCnt[c] == 0) continue;
+                        if (colSymCnt[c] >= 2 || (fromSelectionOnly && colSymCnt[c] >= 1)) candSymCols.Add(c);
+                    }
+                    if (candSymCols.Count == 0)
+                    {
+                        for (int c = 0; c < nCols; c++)
+                        {
+                            if (colSymCnt[c] == 0 || colHdrIgnore[c]) continue;
+                            if (candSymCols.Count > 0 && lastQtyCol >= 0 && c > lastQtyCol) continue;
+                            if (colSymCnt[c] >= 2 || (fromSelectionOnly && colSymCnt[c] >= 1)) candSymCols.Add(c);
+                        }
+                    }
+                    // Deduplicate adjacent symbol columns (e.g. ICON vs TYPE with incidental sketch block)
+                    for (int ci = 0; ci < candSymCols.Count; ci++)
+                    {
+                        int cCur = candSymCols[ci];
+                        if (symCols.Count > 0 && symCols[symCols.Count - 1] == cCur - 1)
+                        {
+                            int cPrev = symCols[symCols.Count - 1];
+                            int scorePrev = colOutsidePlanCnt[cPrev] * 10 + colSymCnt[cPrev] * 3 - colTextCellCnt[cPrev];
+                            int scoreCur = colOutsidePlanCnt[cCur] * 10 + colSymCnt[cCur] * 3 - colTextCellCnt[cCur];
+                            if (scoreCur > scorePrev) symCols[symCols.Count - 1] = cCur;
+                        }
+                        else
+                        {
+                            symCols.Add(cCur);
+                        }
                     }
                 }
                 if (symCols.Count == 0) continue;
+                HashSet<int> symColsSet = new HashSet<int>(symCols);
 
                 // Determine whether spec text lies right or left of each symbol column
                 bool gridDescOnLeft = false;
@@ -1448,9 +1681,13 @@ namespace AIEngineer.AutoCAD
                         }
 
                         List<string> descParts = new List<string>();
-                        for (int c = minSpanCol; c <= maxSpanCol; c++)
+                        int cStart = gridDescOnLeft ? maxSpanCol : minSpanCol;
+                        int cEnd = gridDescOnLeft ? minSpanCol : maxSpanCol;
+                        int cStep = gridDescOnLeft ? -1 : 1;
+                        for (int c = cStart; gridDescOnLeft ? (c >= cEnd) : (c <= cEnd); c += cStep)
                         {
-                            if (isQtyCol[c] || isTagCol[c] || colSymCnt[c] > 0) continue;
+                            if (isQtyCol[c]) break;
+                            if (isTagCol[c] || colHdrIgnore[c] || symColsSet.Contains(c)) continue;
                             List<LegendCandidateText> tc = textCells[r, c];
                             if (tc == null || tc.Count == 0) continue;
                             for (int k = 0; k < tc.Count; k++)
@@ -1458,7 +1695,9 @@ namespace AIEngineer.AutoCAD
                                 string txtLine = tc[k].Text.Trim();
                                 if (string.IsNullOrWhiteSpace(txtLine)) continue;
                                 string tu = txtLine.ToUpperInvariant();
-                                if (tu == "SYMBOL" || tu == "SYMBOLS" || tu == "DESCRIPTION" || tu == "TITLE" || tu == "SPECIFICATION" || tu == "LEGEND")
+                                if (tu == "ICON" || tu == "TYPE" || tu == "SYMBOL" || tu == "SYMBOLS" ||
+                                    tu == "DESCRIPTION" || tu == "TITLE" || tu == "SPECIFICATION" ||
+                                    tu == "LEGEND" || tu == "RECOMMENDED TYPE")
                                     continue;
                                 if (string.Equals(txtLine, chosenSym.BlockName, StringComparison.OrdinalIgnoreCase)) continue;
                                 descParts.Add(txtLine);
@@ -2595,8 +2834,12 @@ namespace AIEngineer.AutoCAD
                             {
                                 if (kv.Value == null) continue;
                                 if (string.Equals(kv.Value.Source, "user_verified", StringComparison.OrdinalIgnoreCase)) continue;
-                                if (!foundNames.Contains(kv.Key) && !placedInDwg.Contains(kv.Key))
+                                if (!foundNames.Contains(kv.Key) &&
+                                    ((found.Count >= 2 && string.Equals(kv.Value.Source, "drawing_legend", StringComparison.OrdinalIgnoreCase)) ||
+                                     !placedInDwg.Contains(kv.Key)))
+                                {
                                     staleCrossKeys.Add(kv.Key);
+                                }
                             }
                             for (int si = 0; si < staleCrossKeys.Count; si++) cat.Remove(staleCrossKeys[si]);
                         }
